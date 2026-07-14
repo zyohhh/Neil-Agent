@@ -13,6 +13,7 @@ class FakeChatModel:
     def __init__(self, response: str = "assistant reply") -> None:
         self.response = response
         self.requests: list[list[Message]] = []
+        self.system_prompts: list[str] = []
         self.fail_stream = False
 
     def complete(
@@ -22,6 +23,7 @@ class FakeChatModel:
         system_prompt: str,
     ) -> str:
         self.requests.append(list(messages))
+        self.system_prompts.append(system_prompt)
         return self.response
 
     def stream(
@@ -31,6 +33,7 @@ class FakeChatModel:
         system_prompt: str,
     ) -> Iterator[str]:
         self.requests.append(list(messages))
+        self.system_prompts.append(system_prompt)
         if self.fail_stream:
             raise LLMError("request failed")
         yield "assistant "
@@ -89,3 +92,12 @@ def test_clear_removes_conversation_history() -> None:
     agent.clear()
 
     assert agent.messages == ()
+
+
+def test_agent_passes_custom_system_prompt_to_model() -> None:
+    model = FakeChatModel()
+    agent = Agent(model, system_prompt="You are a Python tutor.")
+
+    agent.chat("hello")
+
+    assert model.system_prompts == ["You are a Python tutor."]

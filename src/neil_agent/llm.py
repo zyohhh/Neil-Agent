@@ -14,7 +14,7 @@ from anthropic import (
     AuthenticationError,
     RateLimitError,
 )
-from anthropic.types import ContentBlock, MessageParam
+from anthropic.types import ContentBlock, MessageParam, ThinkingConfigParam
 
 from .config import Settings, get_settings
 from .schemas import Message
@@ -54,7 +54,7 @@ class LLMClient:
                 max_tokens=self.settings.max_tokens,
                 system=system_prompt,
                 messages=self._to_api_messages(messages),
-                thinking={"type": "disabled"},
+                thinking=self._thinking_config(),
             )
         except APIError as error:
             raise self._friendly_error(error) from error
@@ -78,7 +78,7 @@ class LLMClient:
                 max_tokens=self.settings.max_tokens,
                 system=system_prompt,
                 messages=self._to_api_messages(messages),
-                thinking={"type": "disabled"},
+                thinking=self._thinking_config(),
             ) as stream:
                 for text in stream.text_stream:
                     if text:
@@ -98,6 +98,12 @@ class LLMClient:
     @staticmethod
     def _to_api_messages(messages: Sequence[Message]) -> list[MessageParam]:
         return [cast(MessageParam, message.to_api_dict()) for message in messages]
+
+    def _thinking_config(self) -> ThinkingConfigParam:
+        if self.settings.thinking_enabled:
+            # DeepSeek accepts the Anthropic field but ignores budget_tokens.
+            return {"type": "enabled", "budget_tokens": 1024}
+        return {"type": "disabled"}
 
     @staticmethod
     def _extract_text(content: Iterable[ContentBlock]) -> str:

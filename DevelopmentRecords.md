@@ -10,7 +10,7 @@
 - 文档创建时间：2026 年 7 月
 - GitHub 仓库：https://github.com/zyohhh/Neil-Agent
 - 当前版本：v0.1.0-dev
-- 当前状态：第一个可用版本已完成（终端多轮对话）
+- 当前状态：第一个可用版本已完成，正在开发可配置能力和只读工具
 
 ## 文件职责
 
@@ -20,7 +20,7 @@
 | `agent.py` | 管理系统提示词、多轮消息历史以及模型调用流程 |
 | `llm.py` | 封装 DeepSeek 客户端、普通请求、流式请求和错误转换 |
 | `schemas.py` | 定义 `Message`、`ToolCall` 和 `ToolResult` 数据结构 |
-| `config.py` | 从环境变量或 `.env` 读取并校验 API Key、模型名和运行限制 |
+| `config.py` | 从环境变量或 `.env` 读取并校验 API Key、模型、系统提示词、思考模式和运行限制 |
 | `registry.py` | 预留：注册工具并根据名称分发工具调用 |
 | `filesystem.py` | 预留：受控查看、搜索和修改文件 |
 | `shell.py` | 预留：受控执行测试、Git 和其他 Shell 命令 |
@@ -70,12 +70,14 @@ agent.py 在回答完整结束后保存本轮消息
 DEEPSEEK_API_KEY=your_real_api_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
 DEEPSEEK_MODEL=deepseek-v4-flash
+THINKING_ENABLED=false
+SYSTEM_PROMPT="You are Neil Agent, a helpful local coding assistant. Give accurate, practical, and concise answers."
 MAX_TOKENS=8192
 MAX_ROUNDS=20
 REQUEST_TIMEOUT=120
 ```
 
-为了让第一版响应更直接、流式展示更及时，当前模型请求显式关闭思考模式。后续可以把思考模式做成可配置选项。
+`THINKING_ENABLED` 默认是 `false`，让响应更直接、流式展示更及时。设置为 `true` 后，普通请求和流式请求都会启用 DeepSeek 思考模式。`SYSTEM_PROMPT` 用于调整 Agent 的角色和回答方式，不再需要修改 Python 代码。
 
 ### 启动方式
 
@@ -97,17 +99,29 @@ uv run neil-agent
 
 - Ruff 代码检查：通过
 - Ruff 格式检查：通过
-- mypy 类型检查：通过（10 个源文件）
-- pytest 离线单元测试：9 项通过
+- mypy 类型检查：通过（11 个源文件）
+- pytest 离线单元测试：13 项通过
 - 单元测试不会发送真实 DeepSeek 请求，也不会消耗 API 额度
 
-尚未使用真实 API Key 进行在线调用验证。首次配置 `.env` 后，需要手动发送一条消息确认网络、账户余额和 API 权限均正常。
+2026-07-14，Neil 已使用真实 API Key 完成端到端聊天测试，确认配置加载、网络请求、DeepSeek V4 Flash、流式输出和多轮消息链路均可用。
+
+## 2026-07-14：可配置系统提示词和思考模式
+
+### 已完成
+
+- 增加 `SYSTEM_PROMPT` 配置，可通过 `.env` 修改 Agent 的系统指令。
+- 拒绝空白系统提示词，避免向模型发送无效配置。
+- 增加 `THINKING_ENABLED` 布尔配置，默认关闭。
+- 普通请求和流式请求共享同一套思考模式配置。
+- 开启思考模式时发送 Anthropic 兼容的 `thinking` 参数。
+- CLI 启动信息会显示当前思考模式是开启还是关闭。
+- 增加系统提示词、思考模式和配置校验测试。
 
 ## 下一阶段计划
 
-1. 使用真实 API Key 完成一次端到端聊天测试。
-2. 为思考模式和系统提示词增加可配置项。
-3. 实现只读工具：`list_directory`、`read_file`、`search_text`。
-4. 在 `registry.py` 中实现工具注册和分发。
-5. 在 `agent.py` 中加入“模型请求工具 → 执行工具 → 返回结果给模型”的循环。
-6. 在确认权限边界后，再实现文件修改和 Shell 命令执行。
+- [x] 使用真实 API Key 完成一次端到端聊天测试。
+- [x] 为思考模式和系统提示词增加可配置项。
+- [ ] 实现只读工具：`list_directory`、`read_file`、`search_text`。
+- [ ] 在 `registry.py` 中实现工具注册和分发。
+- [ ] 在 `agent.py` 中加入“模型请求工具 → 执行工具 → 返回结果给模型”的循环。
+- [ ] 在确认权限边界后，再实现文件修改和 Shell 命令执行。

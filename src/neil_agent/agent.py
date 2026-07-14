@@ -5,12 +5,9 @@ from __future__ import annotations
 from collections.abc import Generator, Iterator, Sequence
 from typing import Protocol
 
+from .config import DEFAULT_SYSTEM_PROMPT
 from .llm import LLMError
 from .schemas import Message
-
-DEFAULT_SYSTEM_PROMPT = """You are Neil Agent, a helpful local coding assistant.
-Give accurate, practical, and concise answers. Explain unfamiliar programming
-concepts clearly, and say when you are uncertain instead of inventing facts."""
 
 
 class ChatModel(Protocol):

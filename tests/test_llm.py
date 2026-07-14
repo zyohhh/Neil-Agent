@@ -11,11 +11,12 @@ from neil_agent.llm import LLMClient
 from neil_agent.schemas import Message
 
 
-def make_settings() -> Settings:
+def make_settings(*, thinking_enabled: bool = False) -> Settings:
     return Settings(
         _env_file=None,
         deepseek_api_key="test-key",
         deepseek_model="deepseek-v4-flash",
+        thinking_enabled=thinking_enabled,
     )
 
 
@@ -35,6 +36,25 @@ def test_complete_extracts_text_content() -> None:
     request = client.messages.create.call_args.kwargs
     assert request["model"] == "deepseek-v4-flash"
     assert request["thinking"] == {"type": "disabled"}
+
+
+def test_complete_enables_thinking_from_settings() -> None:
+    client = MagicMock(spec=Anthropic)
+    client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="reasoned answer")]
+    )
+    llm = LLMClient(
+        make_settings(thinking_enabled=True),
+        client=cast(Anthropic, client),
+    )
+
+    llm.complete(
+        [Message(role="user", content="solve this")],
+        system_prompt="Think carefully.",
+    )
+
+    request = client.messages.create.call_args.kwargs
+    assert request["thinking"] == {"type": "enabled", "budget_tokens": 1024}
 
 
 def test_stream_yields_text_fragments() -> None:

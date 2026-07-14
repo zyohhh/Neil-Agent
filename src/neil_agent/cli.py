@@ -26,8 +26,12 @@ def main() -> None:
         raise SystemExit(1) from None
 
     llm = LLMClient(settings)
-    agent = Agent(llm, max_rounds=settings.max_rounds)
-    _show_welcome(settings.deepseek_model)
+    agent = Agent(
+        llm,
+        system_prompt=settings.system_prompt,
+        max_rounds=settings.max_rounds,
+    )
+    _show_welcome(settings.deepseek_model, settings.thinking_enabled)
 
     while True:
         try:
@@ -70,9 +74,11 @@ def main() -> None:
             console.print()
 
 
-def _show_welcome(model: str) -> None:
+def _show_welcome(model: str, thinking_enabled: bool) -> None:
     console.print("[bold green]Neil Agent[/bold green] 已启动")
     console.print(f"[dim]模型：{model}[/dim]")
+    thinking_status = "开启" if thinking_enabled else "关闭"
+    console.print(f"[dim]思考模式：{thinking_status}[/dim]")
     console.print("[dim]输入 /help 查看命令。[/dim]")
 
 
