@@ -1,7 +1,7 @@
 [project]
 name = "neil-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "A local coding agent built from scratch with Python."
 readme = "README.md"
 authors = [
     { name = "zyohhh", email = "zyohhh@163.com" }
