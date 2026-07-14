@@ -7,23 +7,28 @@ from rich.console import Console
 
 from .agent import Agent
 from .config import get_settings
-from .llm import LLMClient, LLMError
+from .errors import NeilAgentError
+from .llm import LLMClient
 from .tools import FileSystemTools, ToolRegistry
 
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
 HELP_COMMANDS = {"help", "/help"}
 
-console = Console()
-
 
 def main() -> None:
-    """Run the interactive multi-turn chat loop."""
+    """Create the real terminal console and run the application."""
+
+    run(Console())
+
+
+def run(console: Console) -> None:
+    """Run the interactive chat loop using an injected console."""
 
     try:
         settings = get_settings()
     except ValidationError as error:
-        _show_config_error(error)
+        _show_config_error(console, error)
         raise SystemExit(1) from None
 
     registry = ToolRegistry()
@@ -43,6 +48,7 @@ def main() -> None:
         max_tool_rounds=settings.max_tool_rounds,
     )
     _show_welcome(
+        console,
         settings.deepseek_model,
         settings.thinking_enabled,
         str(filesystem_tools.root),
@@ -53,19 +59,19 @@ def main() -> None:
         try:
             user_input = console.input("\n[bold cyan]你[/bold cyan] > ").strip()
         except (EOFError, KeyboardInterrupt):
-            _show_goodbye()
+            _show_goodbye(console)
             return
 
         command = user_input.lower()
         if command in EXIT_COMMANDS:
-            _show_goodbye()
+            _show_goodbye(console)
             return
         if command in CLEAR_COMMANDS:
             agent.clear()
             console.print("[dim]对话历史已清空。[/dim]")
             continue
         if command in HELP_COMMANDS:
-            _show_help()
+            _show_help(console)
             continue
         if not user_input:
             continue
@@ -84,13 +90,14 @@ def main() -> None:
         except KeyboardInterrupt:
             response_stream.close()
             console.print("\n[yellow]已取消本次回答。[/yellow]")
-        except LLMError as error:
+        except NeilAgentError as error:
             console.print(f"\n[bold red]请求失败：[/bold red]{error}")
         else:
             console.print()
 
 
 def _show_welcome(
+    console: Console,
     model: str,
     thinking_enabled: bool,
     workspace_root: str,
@@ -105,18 +112,18 @@ def _show_welcome(
     console.print("[dim]输入 /help 查看命令。[/dim]")
 
 
-def _show_help() -> None:
+def _show_help(console: Console) -> None:
     console.print("[bold]可用命令[/bold]")
     console.print("  /clear  清空对话历史")
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
 
 
-def _show_goodbye() -> None:
+def _show_goodbye(console: Console) -> None:
     console.print("\n[dim]Neil Agent 已退出。[/dim]")
 
 
-def _show_config_error(error: ValidationError) -> None:
+def _show_config_error(console: Console, error: ValidationError) -> None:
     missing_api_key = any(
         item["type"] == "missing" and item["loc"] == ("deepseek_api_key",)
         for item in error.errors()

@@ -5,7 +5,7 @@ from collections.abc import Iterator, Sequence
 import pytest
 
 from neil_agent.agent import Agent
-from neil_agent.llm import LLMError
+from neil_agent.errors import AgentError, LLMError
 from neil_agent.schemas import Message, ModelResponse, ToolCall, ToolDefinition
 from neil_agent.tools.registry import ToolRegistry
 
@@ -170,7 +170,7 @@ def test_agent_stops_when_tool_round_limit_is_exceeded() -> None:
     )
     agent = Agent(model, registry=registry, max_tool_rounds=1)
 
-    with pytest.raises(LLMError, match="超过 1 轮"):
+    with pytest.raises(AgentError, match="超过 1 轮"):
         list(agent.stream_chat("keep going"))
 
     assert agent.messages == ()

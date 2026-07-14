@@ -17,6 +17,7 @@ from anthropic import (
 from anthropic.types import ContentBlock, MessageParam, ThinkingConfigParam, ToolParam
 
 from .config import Settings, get_settings
+from .errors import LLMError
 from .schemas import (
     Message,
     ModelResponse,
@@ -24,10 +25,6 @@ from .schemas import (
     ToolCall,
     ToolDefinition,
 )
-
-
-class LLMError(RuntimeError):
-    """A user-facing error raised when the model request cannot complete."""
 
 
 class LLMClient:

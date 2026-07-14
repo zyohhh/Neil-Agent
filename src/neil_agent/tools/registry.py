@@ -6,13 +6,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from inspect import signature
 
+from ..errors import ToolError
 from ..schemas import ToolCall, ToolDefinition, ToolResult
 
 ToolHandler = Callable[..., str]
-
-
-class ToolError(RuntimeError):
-    """An expected, user-safe tool execution error."""
 
 
 @dataclass(frozen=True, slots=True)

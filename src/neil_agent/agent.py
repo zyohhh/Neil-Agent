@@ -6,7 +6,7 @@ from collections.abc import Generator, Iterator, Sequence
 from typing import Protocol
 
 from .config import DEFAULT_SYSTEM_PROMPT
-from .llm import LLMError
+from .errors import AgentError
 from .schemas import Message, ModelResponse, ToolDefinition
 from .tools.registry import ToolRegistry
 
@@ -100,7 +100,7 @@ class Agent:
                     model_response = event
 
             if model_response is None:
-                raise LLMError("模型流式响应缺少结束事件，请重新尝试。")
+                raise AgentError("模型流式响应缺少结束事件，请重新尝试。")
 
             assistant_message = Message(
                 role="assistant",
@@ -116,11 +116,11 @@ class Agent:
                 return
 
             if self._registry is None:
-                raise LLMError("模型请求了工具，但当前没有可用的工具注册表。")
+                raise AgentError("模型请求了工具，但当前没有可用的工具注册表。")
 
             tool_rounds += 1
             if tool_rounds > self._max_tool_rounds:
-                raise LLMError(
+                raise AgentError(
                     f"工具调用超过 {self._max_tool_rounds} 轮，已停止本次任务。"
                 )
 
@@ -143,7 +143,7 @@ class Agent:
     @staticmethod
     def _make_assistant_message(response: str) -> Message:
         if not response.strip():
-            raise LLMError("模型返回了空内容，请重新尝试。")
+            raise AgentError("模型返回了空内容，请重新尝试。")
         return Message(role="assistant", content=response)
 
     def _request_messages(self, user_message: Message) -> list[Message]:

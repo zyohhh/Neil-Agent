@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from neil_agent.errors import ToolError
 from neil_agent.tools.filesystem import FileSystemTools
-from neil_agent.tools.registry import ToolError
 
 
 def test_rejects_path_outside_workspace(tmp_path: Path) -> None:

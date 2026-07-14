@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ..errors import ToolError
 from ..schemas import ToolDefinition
-from .registry import ToolError, ToolRegistry
+from .registry import ToolRegistry
 
 MAX_FILE_SIZE_BYTES = 1_000_000
 MAX_SEARCH_RESULTS = 100
