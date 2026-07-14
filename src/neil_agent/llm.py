@@ -14,10 +14,16 @@ from anthropic import (
     AuthenticationError,
     RateLimitError,
 )
-from anthropic.types import ContentBlock, MessageParam, ThinkingConfigParam
+from anthropic.types import ContentBlock, MessageParam, ThinkingConfigParam, ToolParam
 
 from .config import Settings, get_settings
-from .schemas import Message
+from .schemas import (
+    Message,
+    ModelResponse,
+    ThinkingContent,
+    ToolCall,
+    ToolDefinition,
+)
 
 
 class LLMError(RuntimeError):
@@ -66,11 +72,11 @@ class LLMClient:
         messages: Sequence[Message],
         *,
         system_prompt: str,
-    ) -> Iterator[str]:
-        """Yield text fragments as DeepSeek generates them."""
+        tools: Sequence[ToolDefinition] = (),
+    ) -> Iterator[str | ModelResponse]:
+        """Yield text fragments followed by one accumulated response event."""
 
         self._ensure_messages(messages)
-        received_text = False
 
         try:
             with self._client.messages.stream(
@@ -79,16 +85,16 @@ class LLMClient:
                 system=system_prompt,
                 messages=self._to_api_messages(messages),
                 thinking=self._thinking_config(),
+                tools=self._to_api_tools(tools),
             ) as stream:
                 for text in stream.text_stream:
                     if text:
-                        received_text = True
                         yield text
+                final_message = stream.get_final_message()
         except APIError as error:
             raise self._friendly_error(error) from error
 
-        if not received_text:
-            raise LLMError("模型返回了空内容，请重新尝试。")
+        yield self._to_model_response(final_message.content)
 
     @staticmethod
     def _ensure_messages(messages: Sequence[Message]) -> None:
@@ -98,6 +104,10 @@ class LLMClient:
     @staticmethod
     def _to_api_messages(messages: Sequence[Message]) -> list[MessageParam]:
         return [cast(MessageParam, message.to_api_dict()) for message in messages]
+
+    @staticmethod
+    def _to_api_tools(tools: Sequence[ToolDefinition]) -> list[ToolParam]:
+        return [cast(ToolParam, tool.to_api_dict()) for tool in tools]
 
     def _thinking_config(self) -> ThinkingConfigParam:
         if self.settings.thinking_enabled:
@@ -111,6 +121,34 @@ class LLMClient:
         if not text.strip():
             raise LLMError("模型返回了空内容，请重新尝试。")
         return text
+
+    @staticmethod
+    def _to_model_response(content: Iterable[ContentBlock]) -> ModelResponse:
+        blocks = list(content)
+        text = "".join(block.text for block in blocks if block.type == "text")
+        tool_calls = tuple(
+            ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
+            for block in blocks
+            if block.type == "tool_use"
+        )
+        if not text.strip() and not tool_calls:
+            raise LLMError("模型返回了空内容，请重新尝试。")
+
+        thinking: tuple[ThinkingContent, ...] = ()
+        if tool_calls:
+            thinking = tuple(
+                ThinkingContent(
+                    thinking=block.thinking,
+                    signature=block.signature,
+                )
+                for block in blocks
+                if block.type == "thinking"
+            )
+        return ModelResponse(
+            content=text,
+            thinking=thinking,
+            tool_calls=tool_calls,
+        )
 
     @staticmethod
     def _friendly_error(error: APIError) -> LLMError:

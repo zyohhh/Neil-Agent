@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -54,7 +55,16 @@ class Settings(BaseSettings):
     max_rounds: int = Field(
         default=20,
         ge=1,
-        description="Maximum number of conversation or agent-loop rounds.",
+        description="Maximum number of conversation rounds retained in history.",
+    )
+    max_tool_rounds: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum tool-use cycles allowed for one user request.",
+    )
+    workspace_root: Path = Field(
+        default=Path("."),
+        description="Directory boundary for local project tools.",
     )
     request_timeout: float = Field(
         default=120.0,

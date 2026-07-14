@@ -8,6 +8,7 @@ from rich.console import Console
 from .agent import Agent
 from .config import get_settings
 from .llm import LLMClient, LLMError
+from .tools import FileSystemTools, ToolRegistry
 
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
@@ -25,13 +26,28 @@ def main() -> None:
         _show_config_error(error)
         raise SystemExit(1) from None
 
+    registry = ToolRegistry()
+    try:
+        filesystem_tools = FileSystemTools(settings.workspace_root)
+    except ValueError as error:
+        console.print(f"[bold red]工作区配置错误：[/bold red]{error}")
+        raise SystemExit(1) from None
+    filesystem_tools.register(registry)
+
     llm = LLMClient(settings)
     agent = Agent(
         llm,
         system_prompt=settings.system_prompt,
         max_rounds=settings.max_rounds,
+        registry=registry,
+        max_tool_rounds=settings.max_tool_rounds,
     )
-    _show_welcome(settings.deepseek_model, settings.thinking_enabled)
+    _show_welcome(
+        settings.deepseek_model,
+        settings.thinking_enabled,
+        str(filesystem_tools.root),
+        len(registry.definitions),
+    )
 
     while True:
         try:
@@ -74,11 +90,18 @@ def main() -> None:
             console.print()
 
 
-def _show_welcome(model: str, thinking_enabled: bool) -> None:
+def _show_welcome(
+    model: str,
+    thinking_enabled: bool,
+    workspace_root: str,
+    tool_count: int,
+) -> None:
     console.print("[bold green]Neil Agent[/bold green] 已启动")
     console.print(f"[dim]模型：{model}[/dim]")
     thinking_status = "开启" if thinking_enabled else "关闭"
     console.print(f"[dim]思考模式：{thinking_status}[/dim]")
+    console.print(f"[dim]工作区：{workspace_root}[/dim]")
+    console.print(f"[dim]只读工具：{tool_count} 个[/dim]")
     console.print("[dim]输入 /help 查看命令。[/dim]")
 
 
