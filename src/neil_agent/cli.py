@@ -9,6 +9,7 @@ from .agent import Agent
 from .config import get_settings
 from .errors import NeilAgentError
 from .llm import LLMClient
+from .schemas import ToolCall
 from .tools import FileSystemTools, ToolRegistry
 
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
@@ -46,6 +47,11 @@ def run(console: Console) -> None:
         max_rounds=settings.max_rounds,
         registry=registry,
         max_tool_rounds=settings.max_tool_rounds,
+        approval_handler=lambda call, preview: _confirm_tool_call(
+            console,
+            call,
+            preview,
+        ),
     )
     _show_welcome(
         console,
@@ -108,7 +114,7 @@ def _show_welcome(
     thinking_status = "开启" if thinking_enabled else "关闭"
     console.print(f"[dim]思考模式：{thinking_status}[/dim]")
     console.print(f"[dim]工作区：{workspace_root}[/dim]")
-    console.print(f"[dim]只读工具：{tool_count} 个[/dim]")
+    console.print(f"[dim]可用工具：{tool_count} 个（写入操作需确认）[/dim]")
     console.print("[dim]输入 /help 查看命令。[/dim]")
 
 
@@ -121,6 +127,24 @@ def _show_help(console: Console) -> None:
 
 def _show_goodbye(console: Console) -> None:
     console.print("\n[dim]Neil Agent 已退出。[/dim]")
+
+
+def _confirm_tool_call(console: Console, call: ToolCall, preview: str) -> bool:
+    """Show a write preview and require an explicit yes response."""
+
+    console.print(f"\n[bold yellow]工具请求确认：{call.name}[/bold yellow]")
+    console.print(preview, markup=False, highlight=False, soft_wrap=True)
+    try:
+        answer = console.input("[bold yellow]允许执行？[y/N][/bold yellow] ")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+
+    approved = answer.strip().lower() in {"y", "yes"}
+    if approved:
+        console.print("[green]已批准。[/green]")
+    else:
+        console.print("[yellow]已拒绝。[/yellow]")
+    return approved
 
 
 def _show_config_error(console: Console, error: ValidationError) -> None:

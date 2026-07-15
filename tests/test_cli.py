@@ -9,6 +9,7 @@ from rich.console import Console
 
 from neil_agent import cli
 from neil_agent.config import Settings
+from neil_agent.schemas import ToolCall
 
 
 def test_run_uses_injected_console(
@@ -31,3 +32,21 @@ def test_run_uses_injected_console(
     )
     assert "可用命令" in printed_text
     assert "Neil Agent 已退出" in printed_text
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [("y", True), ("", False)],
+)
+def test_confirm_tool_call_requires_explicit_yes(answer: str, expected: bool) -> None:
+    console = MagicMock(spec=Console)
+    console.input.return_value = answer
+    call = ToolCall(id="call-write", name="write_file", arguments={})
+
+    approved = cli._confirm_tool_call(
+        cast(Console, console),
+        call,
+        "--- a/file\n+++ b/file",
+    )
+
+    assert approved is expected

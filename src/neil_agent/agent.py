@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from typing import Protocol
 
 from .config import DEFAULT_SYSTEM_PROMPT
 from .errors import AgentError
-from .schemas import Message, ModelResponse, ToolDefinition
+from .schemas import Message, ModelResponse, ToolCall, ToolDefinition, ToolResult
 from .tools.registry import ToolRegistry
+
+ToolApprovalHandler = Callable[[ToolCall, str], bool]
 
 
 class ChatModel(Protocol):
@@ -41,6 +43,7 @@ class Agent:
         max_rounds: int = 20,
         registry: ToolRegistry | None = None,
         max_tool_rounds: int = 5,
+        approval_handler: ToolApprovalHandler | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -52,6 +55,7 @@ class Agent:
         self._max_rounds = max_rounds
         self._registry = registry
         self._max_tool_rounds = max_tool_rounds
+        self._approval_handler = approval_handler
         self._messages: list[Message] = []
 
     @property
@@ -127,7 +131,7 @@ class Agent:
             tool_result_message = Message(
                 role="user",
                 tool_results=tuple(
-                    self._registry.execute(call) for call in model_response.tool_calls
+                    self._execute_tool_call(call) for call in model_response.tool_calls
                 ),
             )
             request_messages.append(tool_result_message)
@@ -174,3 +178,34 @@ class Agent:
         if self._registry is None:
             return ()
         return self._registry.definitions
+
+    def _execute_tool_call(self, call: ToolCall) -> ToolResult:
+        if self._registry is None:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="当前没有可用的工具注册表。",
+                is_error=True,
+            )
+        if not self._registry.requires_approval(call.name):
+            return self._registry.execute(call)
+
+        preview = self._registry.preview(call)
+        if preview.is_error:
+            return preview
+        if self._approval_handler is None:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"工具需要用户确认，但当前无法请求确认：{call.name}",
+                is_error=True,
+            )
+        if not self._approval_handler(call, preview.content):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"用户拒绝执行工具：{call.name}",
+                is_error=True,
+            )
+        return self._registry.execute(
+            call,
+            approved=True,
+            approved_preview=preview.content,
+        )

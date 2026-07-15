@@ -47,6 +47,8 @@ def test_registry_dispatches_tool_call(tmp_path: Path) -> None:
         "list_directory",
         "read_file",
         "search_text",
+        "write_file",
+        "replace_text",
     ]
 
 
@@ -80,3 +82,92 @@ def test_registry_rejects_duplicate_names() -> None:
 
     with pytest.raises(ValueError, match="already registered"):
         registry.register(definition, lambda: "second")
+
+
+def test_write_file_requires_preview_and_approval(tmp_path: Path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("old\n", encoding="utf-8")
+    registry = ToolRegistry()
+    FileSystemTools(tmp_path).register(registry)
+    call = ToolCall(
+        id="call-write",
+        name="write_file",
+        arguments={"path": "notes.txt", "content": "new\n"},
+    )
+
+    preview = registry.preview(call)
+    denied = registry.execute(call)
+    approved = registry.execute(
+        call,
+        approved=True,
+        approved_preview=preview.content,
+    )
+
+    assert "-old" in preview.content
+    assert "+new" in preview.content
+    assert denied.is_error is True
+    assert "需要用户确认" in denied.content
+    assert approved.is_error is False
+    assert target.read_text(encoding="utf-8") == "new\n"
+
+
+def test_replace_text_requires_exact_match_count(tmp_path: Path) -> None:
+    target = tmp_path / "module.py"
+    target.write_text("value = 1\nvalue = 1\n", encoding="utf-8")
+    registry = ToolRegistry()
+    FileSystemTools(tmp_path).register(registry)
+    wrong_count = ToolCall(
+        id="call-wrong",
+        name="replace_text",
+        arguments={
+            "path": "module.py",
+            "old_text": "value = 1",
+            "new_text": "value = 2",
+        },
+    )
+    exact_count = wrong_count.model_copy(
+        update={
+            "id": "call-exact",
+            "arguments": {
+                **wrong_count.arguments,
+                "expected_replacements": 2,
+            },
+        }
+    )
+
+    rejected = registry.preview(wrong_count)
+    exact_preview = registry.preview(exact_count)
+    accepted = registry.execute(
+        exact_count,
+        approved=True,
+        approved_preview=exact_preview.content,
+    )
+
+    assert rejected.is_error is True
+    assert "实际 2 处" in rejected.content
+    assert accepted.is_error is False
+    assert target.read_text(encoding="utf-8") == "value = 2\nvalue = 2\n"
+
+
+def test_write_rejects_stale_approved_preview(tmp_path: Path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("original\n", encoding="utf-8")
+    registry = ToolRegistry()
+    FileSystemTools(tmp_path).register(registry)
+    call = ToolCall(
+        id="call-write",
+        name="write_file",
+        arguments={"path": "notes.txt", "content": "agent change\n"},
+    )
+    preview = registry.preview(call)
+    target.write_text("external change\n", encoding="utf-8")
+
+    result = registry.execute(
+        call,
+        approved=True,
+        approved_preview=preview.content,
+    )
+
+    assert result.is_error is True
+    assert "确认后发生变化" in result.content
+    assert target.read_text(encoding="utf-8") == "external change\n"

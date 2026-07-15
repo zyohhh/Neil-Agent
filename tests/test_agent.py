@@ -174,3 +174,79 @@ def test_agent_stops_when_tool_round_limit_is_exceeded() -> None:
         list(agent.stream_chat("keep going"))
 
     assert agent.messages == ()
+
+
+def test_agent_previews_and_executes_approved_write_tool() -> None:
+    call = ToolCall(
+        id="call-write",
+        name="write_file",
+        arguments={"path": "notes.txt", "content": "new"},
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(call,))],
+        ["saved", ModelResponse(content="saved")],
+    ]
+    registry = ToolRegistry()
+    writes: list[str] = []
+    registry.register(
+        ToolDefinition(
+            name="write_file",
+            description="Write a file.",
+            input_schema={"type": "object"},
+        ),
+        lambda path, content: writes.append(f"{path}:{content}") or "written",
+        requires_approval=True,
+        preview_handler=lambda path, content: f"preview {path}:{content}",
+    )
+    previews: list[str] = []
+    agent = Agent(
+        model,
+        registry=registry,
+        approval_handler=lambda tool_call, preview: previews.append(preview) or True,
+    )
+
+    chunks = list(agent.stream_chat("update notes"))
+
+    assert chunks == ["saved"]
+    assert previews == ["preview notes.txt:new"]
+    assert writes == ["notes.txt:new"]
+    assert model.requests[1][-1].tool_results[0].is_error is False
+
+
+def test_agent_returns_denied_write_to_model_without_execution() -> None:
+    call = ToolCall(
+        id="call-write",
+        name="write_file",
+        arguments={"path": "notes.txt", "content": "new"},
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(call,))],
+        ["cancelled", ModelResponse(content="cancelled")],
+    ]
+    registry = ToolRegistry()
+    writes: list[str] = []
+    registry.register(
+        ToolDefinition(
+            name="write_file",
+            description="Write a file.",
+            input_schema={"type": "object"},
+        ),
+        lambda path, content: writes.append(content) or "written",
+        requires_approval=True,
+        preview_handler=lambda path, content: f"preview {path}:{content}",
+    )
+    agent = Agent(
+        model,
+        registry=registry,
+        approval_handler=lambda tool_call, preview: False,
+    )
+
+    chunks = list(agent.stream_chat("update notes"))
+
+    assert chunks == ["cancelled"]
+    assert writes == []
+    denied_result = model.requests[1][-1].tool_results[0]
+    assert denied_result.is_error is True
+    assert "用户拒绝" in denied_result.content
