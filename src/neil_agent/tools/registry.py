@@ -86,13 +86,13 @@ class ToolRegistry:
             if not approved:
                 return self._error(call, f"工具需要用户确认后才能执行：{call.name}")
             if approved_preview is None:
-                return self._error(call, f"工具缺少已确认的修改预览：{call.name}")
+                return self._error(call, f"工具缺少已确认的操作预览：{call.name}")
             assert registered.preview_handler is not None
             current_preview = self._invoke(call, registered.preview_handler)
             if current_preview.is_error:
                 return current_preview
             if current_preview.content != approved_preview:
-                return self._error(call, "文件在确认后发生变化，请重新预览并确认。")
+                return self._error(call, "操作预览在确认后发生变化，请重新预览并确认。")
 
         return self._invoke(call, registered.handler)
 

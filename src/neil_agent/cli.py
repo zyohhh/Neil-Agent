@@ -10,7 +10,7 @@ from .config import get_settings
 from .errors import NeilAgentError
 from .llm import LLMClient
 from .schemas import ToolCall
-from .tools import FileSystemTools, ToolRegistry
+from .tools import FileSystemTools, ShellTools, ToolRegistry
 
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
@@ -39,6 +39,12 @@ def run(console: Console) -> None:
         console.print(f"[bold red]工作区配置错误：[/bold red]{error}")
         raise SystemExit(1) from None
     filesystem_tools.register(registry)
+    shell_tools = ShellTools(
+        settings.workspace_root,
+        timeout=settings.command_timeout,
+        max_output_chars=settings.max_command_output_chars,
+    )
+    shell_tools.register(registry)
 
     llm = LLMClient(settings)
     agent = Agent(
@@ -114,7 +120,7 @@ def _show_welcome(
     thinking_status = "开启" if thinking_enabled else "关闭"
     console.print(f"[dim]思考模式：{thinking_status}[/dim]")
     console.print(f"[dim]工作区：{workspace_root}[/dim]")
-    console.print(f"[dim]可用工具：{tool_count} 个（写入操作需确认）[/dim]")
+    console.print(f"[dim]可用工具：{tool_count} 个（高风险操作需确认）[/dim]")
     console.print("[dim]输入 /help 查看命令。[/dim]")
 
 
@@ -130,7 +136,7 @@ def _show_goodbye(console: Console) -> None:
 
 
 def _confirm_tool_call(console: Console, call: ToolCall, preview: str) -> bool:
-    """Show a write preview and require an explicit yes response."""
+    """Show an operation preview and require an explicit yes response."""
 
     console.print(f"\n[bold yellow]工具请求确认：{call.name}[/bold yellow]")
     console.print(preview, markup=False, highlight=False, soft_wrap=True)

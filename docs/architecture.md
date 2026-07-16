@@ -2,13 +2,13 @@
 
 ## 目标
 
-Neil Agent 是一个运行在终端中的本地 Coding Agent。当前版本能够与 DeepSeek V4 Flash 多轮对话，在限定工作区内读取、搜索和修改文本文件，并在任何写操作前请求用户确认。
+Neil Agent 是一个运行在终端中的本地 Coding Agent。当前版本能够与 DeepSeek V4 Flash 多轮对话，在限定工作区内读取、搜索和修改文本文件，运行固定的项目质量检查，并检查 Git 状态。
 
 ## 分层结构
 
 ```text
 cli.py
-  终端输入、流式展示、写入审批
+  终端输入、流式展示、高风险操作审批
     ↓
 agent.py
   对话历史、工具循环、审批协调
@@ -18,9 +18,10 @@ llm.py
     ↓
 tools/registry.py
   工具注册、参数绑定、预览和执行分发
-    ↓
-tools/filesystem.py
-  工作区受限的读取、搜索和原子写入
+    ├→ tools/filesystem.py
+    │    工作区受限的读取、搜索和原子写入
+    └→ tools/shell.py
+         固定质量检查、只读 Git、子进程安全边界
 ```
 
 `schemas.py` 为各层提供消息和工具数据结构，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置。
@@ -40,16 +41,16 @@ tools/filesystem.py
 
 工具注册分为两类：
 
-- 直接执行：`list_directory`、`read_file`、`search_text`
-- 必须审批：`write_file`、`replace_text`
+- 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`
+- 必须审批：`write_file`、`replace_text`、`run_quality_check`
 
 审批工具必须同时注册预览函数。执行流程为：
 
 ```text
-参数校验 → 生成 diff → 用户确认 → 执行 → ToolResult
+参数校验 → 生成操作预览 → 用户确认 → 执行 → ToolResult
 ```
 
-没有明确批准时，注册表拒绝执行写工具。CLI 只接受 `y` 或 `yes`，其他输入均视为拒绝。diff 包含基于修改前后内容生成的 `Change-ID`；执行前注册表会重新生成预览，如果与用户批准的版本不一致，则要求重新确认。
+没有明确批准时，注册表拒绝执行高风险工具。CLI 只接受 `y` 或 `yes`，其他输入均视为拒绝。文件 diff 包含基于修改前后内容生成的 `Change-ID`；执行前注册表会重新生成预览，如果与用户批准的版本不一致，则要求重新确认。质量检查预览则显示精确命令、工作目录和超时时间。
 
 ## 文件安全边界
 
@@ -62,6 +63,17 @@ tools/filesystem.py
 - 过期的 diff 审批不能用于已经发生外部变化的文件。
 - 精确替换要求实际匹配数量等于 `expected_replacements`。
 - 写入使用同目录临时文件和 `os.replace`；替换失败时原文件保持不变。
+
+## 命令安全边界
+
+- `run_quality_check` 只允许 `pytest`、`ruff`、`mypy`，调用参数由程序固定拼装。
+- `git_status` 固定读取简洁状态；`git_diff` 只允许切换是否查看暂存区，并禁用 external diff 与 textconv。
+- Git 命令禁用 fsmonitor、分页器和可选锁，避免执行扩展程序或产生非必要写入。
+- 不接收任意可执行文件、命令参数或 Shell 字符串，子进程始终使用 `shell=False`。
+- 命令工作目录固定为解析后的 `WORKSPACE_ROOT`，标准输入设为空，避免命令等待交互。
+- 子进程环境采用最小白名单，不继承 API Key、访问令牌等敏感变量。
+- 命令受 `COMMAND_TIMEOUT` 约束，返回内容受 `MAX_COMMAND_OUTPUT_CHARS` 约束。
+- 非零退出码和超时会作为 `ToolResult(is_error=True)` 返回模型，而不是绕过工具错误边界。
 
 ## 异常边界
 
@@ -82,4 +94,6 @@ NeilAgentError
 | `THINKING_ENABLED` | 是否启用思考模式 | `false` |
 | `MAX_ROUNDS` | 对话历史窗口 | `20` |
 | `MAX_TOOL_ROUNDS` | 单次请求工具循环上限 | `5` |
-| `WORKSPACE_ROOT` | 文件工具工作区边界 | `.` |
+| `WORKSPACE_ROOT` | 本地工具工作区边界 | `.` |
+| `COMMAND_TIMEOUT` | 本地命令超时时间（秒） | `120` |
+| `MAX_COMMAND_OUTPUT_CHARS` | 返回模型的命令输出上限 | `20000` |

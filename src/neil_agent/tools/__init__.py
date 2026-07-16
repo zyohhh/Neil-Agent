@@ -3,5 +3,6 @@
 from ..errors import ToolError
 from .filesystem import FileSystemTools
 from .registry import ToolRegistry
+from .shell import ShellTools
 
-__all__ = ["FileSystemTools", "ToolError", "ToolRegistry"]
+__all__ = ["FileSystemTools", "ShellTools", "ToolError", "ToolRegistry"]

@@ -71,6 +71,16 @@ class Settings(BaseSettings):
         gt=0,
         description="Model request timeout in seconds.",
     )
+    command_timeout: float = Field(
+        default=120.0,
+        gt=0,
+        description="Timeout in seconds for an approved local command.",
+    )
+    max_command_output_chars: int = Field(
+        default=20_000,
+        ge=1_000,
+        description="Maximum command output returned to the model.",
+    )
 
     @field_validator("system_prompt")
     @classmethod

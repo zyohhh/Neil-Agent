@@ -10,7 +10,7 @@
 - 文档创建时间：2026 年 7 月
 - GitHub 仓库：https://github.com/zyohhh/Neil-Agent
 - 当前版本：v0.1.0-dev
-- 当前状态：受控文件修改闭环已完成，下一步开发受限命令执行
+- 当前状态：受限命令执行闭环已完成，下一步验证真实模型调用并设计本地版本保存
 
 ## 文件职责
 
@@ -24,7 +24,7 @@
 | `config.py` | 从环境变量或 `.env` 读取并校验 API Key、模型、系统提示词、思考模式和运行限制 |
 | `registry.py` | 注册工具、生成预览、执行审批检查并统一返回结果 |
 | `filesystem.py` | 在工作区内读取、搜索以及原子写入 UTF-8 文件 |
-| `shell.py` | 预留：受控执行测试、Git 和其他 Shell 命令 |
+| `shell.py` | 在固定白名单内执行质量检查和只读 Git 命令，并限制环境、超时和输出 |
 | `__init__.py` | 保存包版本，并把命令行入口转发给 `cli.py` |
 
 ## 第一阶段目标
@@ -78,6 +78,8 @@ MAX_ROUNDS=20
 MAX_TOOL_ROUNDS=5
 REQUEST_TIMEOUT=120
 WORKSPACE_ROOT=.
+COMMAND_TIMEOUT=120
+MAX_COMMAND_OUTPUT_CHARS=20000
 ```
 
 `THINKING_ENABLED` 默认是 `false`，让响应更直接、流式展示更及时。设置为 `true` 后，普通请求和流式请求都会启用 DeepSeek 思考模式。`SYSTEM_PROMPT` 用于调整 Agent 的角色和回答方式，不再需要修改 Python 代码。
@@ -103,7 +105,7 @@ uv run neil-agent
 - Ruff 代码检查：通过
 - Ruff 格式检查：通过
 - mypy 类型检查：通过（12 个源文件）
-- pytest 离线单元测试：36 项通过
+- pytest 离线单元测试：42 项通过
 - 单元测试不会发送真实 DeepSeek 请求，也不会消耗 API 额度
 
 2026-07-14，Neil 已使用真实 API Key 完成端到端聊天测试，确认配置加载、网络请求、DeepSeek V4 Flash、流式输出和多轮消息链路均可用。
@@ -192,10 +194,32 @@ CLI 展示修改预览并等待用户输入 y/yes
 - CLI 当前注册 5 个工具，其中 2 个写工具必须人工确认。
 - 增加批准、拒绝、精确匹配、敏感路径和模拟写入失败测试。
 
+2026-07-16，Neil 已使用真实 DeepSeek API 验证 `write_file` / `replace_text` 的写入预览、批准和拒绝流程，确认审批闭环可用。
+
+## 2026-07-16：受限命令执行
+
+### 权限规则
+
+- `run_quality_check` 只接受 `pytest`、`ruff`、`mypy` 三个枚举值，并在执行前展示固定命令、工作目录和超时时间。
+- 质量检查器的配置或插件可能运行项目代码，因此 `run_quality_check` 必须经过人工批准。
+- `git_status` 和 `git_diff` 只读取仓库状态，不修改工作区，可直接执行；同时禁用分页器、fsmonitor、external diff、textconv 和可选锁。
+- 不提供任意命令、任意参数、管道、重定向或 Shell 字符串入口。
+
+### 已完成
+
+- 使用当前 Python 解释器的 `-m` 形式运行质量检查，确保复用 Neil Agent 的虚拟环境。
+- 所有命令都固定在 `WORKSPACE_ROOT` 中运行，并显式设置 `shell=False` 和空标准输入。
+- 子进程只继承运行所需的少量环境变量，不传递 DeepSeek API Key、GitHub Token 等凭据。
+- 使用 `COMMAND_TIMEOUT` 限制单次命令时间，默认 120 秒。
+- 使用 `MAX_COMMAND_OUTPUT_CHARS` 限制返回给模型的输出，默认 20,000 字符；超长输出保留开头和结尾。
+- 命令不存在、超时、启动失败和非零退出码统一转换为工具错误。
+- CLI 当前注册 8 个工具，其中文件写入和质量检查共 3 个工具必须人工确认。
+- 增加白名单、审批、只读 Git、工作目录、环境净化、超时和输出截断测试。
+
 ## 下一阶段计划
 
-下一阶段只聚焦“受限命令执行”，不开放任意 Shell：
+下一阶段聚焦“任务验证与本地版本保存”，仍不开放任意 Shell 或远程 Git 操作：
 
-1. 使用真实 DeepSeek API 验证写入预览、批准和拒绝流程。
-2. 设计命令白名单、工作目录、超时、输出上限和审批规则。
-3. 仅开放测试、代码检查以及 `git status` / `git diff` 等低风险命令。
+1. 使用真实 DeepSeek API 验证质量检查的预览、批准、拒绝，以及只读 Git 工具调用。
+2. 让 Agent 在修改后主动选择合适的质量检查，并向用户汇总命令、退出码和关键结果。
+3. 设计需要审批的本地 `git add` / `git commit` 流程；先不实现推送、分支删除或其他远程操作。
