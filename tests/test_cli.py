@@ -31,7 +31,7 @@ def test_run_uses_injected_console(
         str(call.args[0]) for call in console.print.call_args_list if call.args
     )
     assert "可用命令" in printed_text
-    assert "可用工具：8 个（高风险操作需确认）" in printed_text
+    assert "可用工具：10 个（高风险操作需确认）" in printed_text
     assert "Neil Agent 已退出" in printed_text
 
 

@@ -116,6 +116,36 @@ def test_agent_passes_custom_system_prompt_to_model() -> None:
     assert model.system_prompts == ["You are a Python tutor."]
 
 
+def test_agent_adds_quality_workflow_when_write_and_check_tools_exist() -> None:
+    model = FakeChatModel()
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="write_file",
+            description="Write a file.",
+            input_schema={"type": "object"},
+        ),
+        lambda: "written",
+    )
+    registry.register(
+        ToolDefinition(
+            name="run_quality_check",
+            description="Run a check.",
+            input_schema={"type": "object"},
+        ),
+        lambda: "checked",
+    )
+    agent = Agent(model, system_prompt="Custom role.", registry=registry)
+
+    agent.chat("hello")
+
+    prompt = model.system_prompts[0]
+    assert prompt.startswith("Custom role.")
+    assert "After a successful write_file or replace_text" in prompt
+    assert "Command" in prompt
+    assert "Exit code" in prompt
+
+
 def test_agent_executes_tool_and_returns_result_to_model() -> None:
     model = FakeChatModel()
     model.stream_responses = [
@@ -212,6 +242,7 @@ def test_agent_previews_and_executes_approved_write_tool() -> None:
     assert previews == ["preview notes.txt:new"]
     assert writes == ["notes.txt:new"]
     assert model.requests[1][-1].tool_results[0].is_error is False
+    assert "run_quality_check" in model.requests[1][-1].tool_results[0].content
 
 
 def test_agent_returns_denied_write_to_model_without_execution() -> None:

@@ -12,6 +12,16 @@ from .tools.registry import ToolRegistry
 
 ToolApprovalHandler = Callable[[ToolCall, str], bool]
 
+TOOL_WORKFLOW_INSTRUCTIONS = """Local tool workflow requirements:
+- After a successful write_file or replace_text call, choose an appropriate
+  run_quality_check for the changed code. Do not run every check without reason.
+- In the final answer, summarize each attempted check using its exact Command,
+  Exit code, and the key Output. If approval was denied, say that it was not run.
+- Before creating a local commit, inspect Git changes, stage only explicit paths,
+  and never claim that a commit was pushed unless a separate push actually occurred."""
+
+WRITE_TOOL_NAMES = frozenset({"write_file", "replace_text"})
+
 
 class ChatModel(Protocol):
     """The model operations required by the conversation agent."""
@@ -51,7 +61,7 @@ class Agent:
             raise ValueError("max_tool_rounds must be at least 1")
 
         self._llm = llm
-        self._system_prompt = system_prompt
+        self._system_prompt = self._with_tool_workflow(system_prompt, registry)
         self._max_rounds = max_rounds
         self._registry = registry
         self._max_tool_rounds = max_tool_rounds
@@ -179,6 +189,22 @@ class Agent:
             return ()
         return self._registry.definitions
 
+    @staticmethod
+    def _with_tool_workflow(
+        system_prompt: str,
+        registry: ToolRegistry | None,
+    ) -> str:
+        """Append non-configurable workflow rules when matching tools exist."""
+
+        if registry is None:
+            return system_prompt
+        tool_names = {definition.name for definition in registry.definitions}
+        if not WRITE_TOOL_NAMES.intersection(tool_names):
+            return system_prompt
+        if "run_quality_check" not in tool_names:
+            return system_prompt
+        return f"{system_prompt.rstrip()}\n\n{TOOL_WORKFLOW_INSTRUCTIONS}"
+
     def _execute_tool_call(self, call: ToolCall) -> ToolResult:
         if self._registry is None:
             return ToolResult(
@@ -187,7 +213,8 @@ class Agent:
                 is_error=True,
             )
         if not self._registry.requires_approval(call.name):
-            return self._registry.execute(call)
+            result = self._registry.execute(call)
+            return self._with_post_tool_guidance(call, result)
 
         preview = self._registry.preview(call)
         if preview.is_error:
@@ -204,8 +231,32 @@ class Agent:
                 content=f"用户拒绝执行工具：{call.name}",
                 is_error=True,
             )
-        return self._registry.execute(
+        result = self._registry.execute(
             call,
             approved=True,
             approved_preview=preview.content,
         )
+        return self._with_post_tool_guidance(call, result)
+
+    @staticmethod
+    def _with_post_tool_guidance(call: ToolCall, result: ToolResult) -> ToolResult:
+        """Give the model the next safe workflow step after successful mutations."""
+
+        if result.is_error:
+            return result
+        guidance = ""
+        if call.name in WRITE_TOOL_NAMES and "没有变化" not in result.content:
+            guidance = (
+                "下一步：根据本次修改选择合适的 run_quality_check；"
+                "最终回答需汇总命令、退出码和关键结果。"
+            )
+        elif call.name == "git_stage":
+            guidance = (
+                "下一步：使用 git_diff(staged=true) 检查暂存内容；"
+                "只有用户要求时才调用 git_commit。"
+            )
+        elif call.name == "git_commit":
+            guidance = "本地提交已完成；除非另有工具结果，否则不要声称已经推送。"
+        if not guidance:
+            return result
+        return result.model_copy(update={"content": f"{result.content}\n\n{guidance}"})
