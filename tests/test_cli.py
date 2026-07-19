@@ -22,8 +22,13 @@ def test_run_uses_injected_console(
         workspace_root=tmp_path,
     )
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        cli.ShellTools,
+        "git_status_snapshot",
+        lambda self: "## main...origin/main",
+    )
     console = MagicMock(spec=Console)
-    console.input.side_effect = ["/help", "/exit"]
+    console.input.side_effect = ["/status", "/help", "/exit"]
 
     cli.run(cast(Console, console))
 
@@ -31,7 +36,11 @@ def test_run_uses_injected_console(
         str(call.args[0]) for call in console.print.call_args_list if call.args
     )
     assert "可用命令" in printed_text
-    assert "可用工具：10 个（高风险操作需确认）" in printed_text
+    assert "可用工具：12 个（高风险操作需确认）" in printed_text
+    assert "当前任务计划" in printed_text
+    assert "最近质量检查" in printed_text
+    assert "## main...origin/main" in printed_text
+    assert "/status" in printed_text
     assert "Neil Agent 已退出" in printed_text
 
 

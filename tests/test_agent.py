@@ -7,6 +7,7 @@ import pytest
 from neil_agent.agent import Agent
 from neil_agent.errors import AgentError, LLMError
 from neil_agent.schemas import Message, ModelResponse, ToolCall, ToolDefinition
+from neil_agent.task import TaskTracker
 from neil_agent.tools.registry import ToolRegistry
 
 
@@ -99,12 +100,15 @@ def test_max_rounds_keeps_only_recent_context() -> None:
 
 
 def test_clear_removes_conversation_history() -> None:
-    agent = Agent(FakeChatModel())
+    tracker = TaskTracker()
+    tracker.set_task_plan(["Inspect", "Verify"])
+    agent = Agent(FakeChatModel(), task_tracker=tracker)
     agent.chat("hello")
 
     agent.clear()
 
     assert agent.messages == ()
+    assert tracker.steps == ()
 
 
 def test_agent_passes_custom_system_prompt_to_model() -> None:
@@ -135,7 +139,14 @@ def test_agent_adds_quality_workflow_when_write_and_check_tools_exist() -> None:
         ),
         lambda: "checked",
     )
-    agent = Agent(model, system_prompt="Custom role.", registry=registry)
+    tracker = TaskTracker()
+    tracker.register(registry)
+    agent = Agent(
+        model,
+        system_prompt="Custom role.",
+        registry=registry,
+        task_tracker=tracker,
+    )
 
     agent.chat("hello")
 
@@ -144,6 +155,41 @@ def test_agent_adds_quality_workflow_when_write_and_check_tools_exist() -> None:
     assert "After a successful write_file or replace_text" in prompt
     assert "Command" in prompt
     assert "Exit code" in prompt
+    assert "set_task_plan" in prompt
+    assert "update_task_step" in prompt
+
+
+def test_agent_records_quality_result_in_task_tracker() -> None:
+    call = ToolCall(
+        id="call-quality",
+        name="run_quality_check",
+        arguments={"check": "pytest"},
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(call,))],
+        ["done", ModelResponse(content="done")],
+    ]
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="run_quality_check",
+            description="Run tests.",
+            input_schema={"type": "object"},
+        ),
+        lambda check: "Command: python -m pytest -q\nExit code: 0\nOutput:\n2 passed",
+    )
+    tracker = TaskTracker()
+    agent = Agent(model, registry=registry, task_tracker=tracker)
+
+    chunks = list(agent.stream_chat("run tests"))
+
+    assert chunks == ["done"]
+    record = tracker.latest_quality_check
+    assert record is not None
+    assert record.check == "pytest"
+    assert record.status == "passed"
+    assert record.output == "2 passed"
 
 
 def test_agent_executes_tool_and_returns_result_to_model() -> None:

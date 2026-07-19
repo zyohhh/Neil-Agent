@@ -157,6 +157,24 @@ def test_command_timeout_becomes_tool_error(
     assert "partial output" in result.content
 
 
+def test_cli_git_status_snapshot_uses_short_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    options: dict[str, Any] = {}
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        options.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "## main\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    snapshot = ShellTools(tmp_path, timeout=120).git_status_snapshot()
+
+    assert snapshot == "## main"
+    assert options["timeout"] == 5
+
+
 def test_failed_command_output_is_capped(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -2,16 +2,18 @@
 
 ## 目标
 
-Neil Agent 是一个运行在终端中的本地 Coding Agent。当前版本能够与 DeepSeek V4 Flash 多轮对话，在限定工作区内读取、搜索和修改文本文件，运行固定的项目质量检查，并在批准后暂存明确文件和创建本地 Git 提交。
+Neil Agent 是一个运行在终端中的本地 Coding Agent。当前版本能够与 DeepSeek V4 Flash 多轮对话，在限定工作区内读取、搜索和修改文本文件，运行固定的项目质量检查，在批准后创建本地 Git 提交，并展示当前任务进度。
 
 ## 分层结构
 
 ```text
 cli.py
-  终端输入、流式展示、高风险操作审批
+  终端输入、流式展示、高风险操作审批、/status
     ↓
 agent.py
   对话历史、工具循环、审批协调、修改后验证工作流
+    ↘ task.py
+      任务计划、步骤状态、最近质量检查
     ↓
 llm.py
   DeepSeek Anthropic API、流式事件、ToolCall 解析
@@ -39,11 +41,13 @@ tools/registry.py
 
 当注册表同时提供文件写入和质量检查工具时，Agent 会在用户系统提示词后追加不可配置的本地工具工作流。文件修改结果会提醒模型选择合适的质量检查；命令结果固定返回 `Command`、`Working directory`、`Exit code` 和 `Output`，最终回答据此汇总验证结果。
 
+当注册表提供计划工具时，多步骤开发任务会先调用 `set_task_plan`，再用 `update_task_step` 按顺序推进。计划变化通过注入式回调立即显示在 CLI，不需要等待模型最终回答。
+
 ## 工具权限模型
 
 工具注册分为两类：
 
-- 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`
+- 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`、`set_task_plan`、`update_task_step`
 - 必须审批：`write_file`、`replace_text`、`run_quality_check`、`git_stage`、`git_commit`
 
 审批工具必须同时注册预览函数。执行流程为：
@@ -86,6 +90,16 @@ tools/registry.py
 - `git_commit` 只从当前暂存区创建本地提交，消息必须是 1–200 字符的单行文本。
 - 提交预览显示暂存区统计和 diff；超长 diff 会截断，但 `Change-ID` 覆盖完整内容；空暂存区不能提交。
 - 提交时禁用 hooks 和 GPG 签名，不提供 amend、空提交、远程操作或推送入口。
+
+## 任务状态边界
+
+- 计划只存在于当前进程内，最多包含 5 个步骤，每个步骤最多 200 字符。
+- 状态只允许 `pending`、`in_progress`、`completed`；同一时间最多有一个进行中步骤。
+- 新计划自动启动第一步；完成当前步骤后自动启动下一步，禁止跳步或重新打开已完成步骤。
+- `TaskTracker` 只记录最近一次质量检查，并把审批拒绝区分为 `not_run`，把启动或执行错误记录为 `failed`。
+- `/status` 直接读取内存计划和检查快照，同时调用受限的只读 Git 状态方法获取当前仓库状态。
+- `/status` 的 Git 快照使用独立的 5 秒上限；超时会显示不可用，不会长时间阻塞终端。
+- `/status` 不发送模型请求；`/clear` 会清除对话历史、计划和最近检查，但不会修改 Git。
 
 ## 异常边界
 

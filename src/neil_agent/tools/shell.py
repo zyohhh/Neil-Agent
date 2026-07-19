@@ -20,6 +20,7 @@ QUALITY_COMMANDS: dict[str, tuple[str, ...]] = {
 }
 MAX_GIT_PATHS = 50
 MAX_COMMIT_MESSAGE_CHARS = 200
+STATUS_TIMEOUT_SECONDS = 5.0
 BLOCKED_GIT_DIRECTORIES = frozenset(
     {
         ".git",
@@ -120,13 +121,14 @@ class ShellTools:
     def git_status(self) -> str:
         """Return concise working-tree status without modifying Git state."""
 
-        return self._run(
-            self._git_command(
-                "status",
-                "--short",
-                "--branch",
-                "--ignore-submodules=all",
-            )
+        return self._run(self._git_status_command())
+
+    def git_status_snapshot(self) -> str:
+        """Return raw concise Git status for the local ``/status`` command."""
+
+        return self._capture(
+            self._git_status_command(),
+            timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
         )
 
     def git_diff(self, staged: bool = False) -> str:
@@ -297,8 +299,14 @@ class ShellTools:
             raise ToolError(result)
         return result
 
-    def _capture(self, command: list[str], *, truncate: bool = True) -> str:
-        completed = self._run_process(command)
+    def _capture(
+        self,
+        command: list[str],
+        *,
+        truncate: bool = True,
+        timeout: float | None = None,
+    ) -> str:
+        completed = self._run_process(command, timeout=timeout)
         if completed.returncode != 0:
             raise ToolError(self._format_process_result(command, completed))
         return self._combined_output(
@@ -307,7 +315,13 @@ class ShellTools:
             truncate=truncate,
         )
 
-    def _run_process(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_process(
+        self,
+        command: list[str],
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        effective_timeout = self.timeout if timeout is None else timeout
         try:
             return subprocess.run(
                 command,
@@ -318,7 +332,7 @@ class ShellTools:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=self.timeout,
+                timeout=effective_timeout,
                 check=False,
                 shell=False,
                 creationflags=self._creation_flags(),
@@ -328,7 +342,7 @@ class ShellTools:
             message = (
                 f"Command: {subprocess.list2cmdline(command)}\n"
                 f"Working directory: {self.root}\n"
-                f"命令执行超过 {self.timeout:g} 秒，已停止。"
+                f"命令执行超过 {effective_timeout:g} 秒，已停止。"
             )
             if output:
                 message += f"\n{output}"
@@ -360,6 +374,14 @@ class ShellTools:
             "core.fsmonitor=false",
             *arguments,
         ]
+
+    def _git_status_command(self) -> list[str]:
+        return self._git_command(
+            "status",
+            "--short",
+            "--branch",
+            "--ignore-submodules=all",
+        )
 
     def _git_commit_command(self, message: str) -> list[str]:
         return [

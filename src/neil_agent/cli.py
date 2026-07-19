@@ -10,11 +10,13 @@ from .config import get_settings
 from .errors import NeilAgentError
 from .llm import LLMClient
 from .schemas import ToolCall
+from .task import TaskTracker
 from .tools import FileSystemTools, ShellTools, ToolRegistry
 
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
 HELP_COMMANDS = {"help", "/help"}
+STATUS_COMMANDS = {"status", "/status"}
 
 
 def main() -> None:
@@ -45,6 +47,10 @@ def run(console: Console) -> None:
         max_output_chars=settings.max_command_output_chars,
     )
     shell_tools.register(registry)
+    task_tracker = TaskTracker(
+        change_handler=lambda plan: _show_plan_update(console, plan)
+    )
+    task_tracker.register(registry)
 
     llm = LLMClient(settings)
     agent = Agent(
@@ -58,6 +64,7 @@ def run(console: Console) -> None:
             call,
             preview,
         ),
+        task_tracker=task_tracker,
     )
     _show_welcome(
         console,
@@ -80,10 +87,13 @@ def run(console: Console) -> None:
             return
         if command in CLEAR_COMMANDS:
             agent.clear()
-            console.print("[dim]对话历史已清空。[/dim]")
+            console.print("[dim]对话、任务计划和检查记录已清空。[/dim]")
             continue
         if command in HELP_COMMANDS:
             _show_help(console)
+            continue
+        if command in STATUS_COMMANDS:
+            _show_status(console, task_tracker, shell_tools)
             continue
         if not user_input:
             continue
@@ -129,6 +139,33 @@ def _show_help(console: Console) -> None:
     console.print("  /clear  清空对话历史")
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
+    console.print("  /status 显示任务、检查和 Git 状态")
+
+
+def _show_plan_update(console: Console, plan: str) -> None:
+    """Display a plan immediately after the model creates or updates it."""
+
+    console.print("\n[bold blue]任务计划已更新[/bold blue]")
+    console.print(plan, markup=False, highlight=False, soft_wrap=True)
+
+
+def _show_status(
+    console: Console,
+    task_tracker: TaskTracker,
+    shell_tools: ShellTools,
+) -> None:
+    """Display current in-memory task state and a fresh local Git snapshot."""
+
+    try:
+        git_status = shell_tools.git_status_snapshot()
+    except NeilAgentError as error:
+        git_status = f"不可用：{error}"
+    console.print(
+        task_tracker.format_status(git_status),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
 
 
 def _show_goodbye(console: Console) -> None:

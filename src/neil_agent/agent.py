@@ -8,6 +8,7 @@ from typing import Protocol
 from .config import DEFAULT_SYSTEM_PROMPT
 from .errors import AgentError
 from .schemas import Message, ModelResponse, ToolCall, ToolDefinition, ToolResult
+from .task import TaskTracker
 from .tools.registry import ToolRegistry
 
 ToolApprovalHandler = Callable[[ToolCall, str], bool]
@@ -19,6 +20,14 @@ TOOL_WORKFLOW_INSTRUCTIONS = """Local tool workflow requirements:
   Exit code, and the key Output. If approval was denied, say that it was not run.
 - Before creating a local commit, inspect Git changes, stage only explicit paths,
   and never claim that a commit was pushed unless a separate push actually occurred."""
+
+TASK_PLAN_INSTRUCTIONS = """Visible task-plan requirements:
+- For a development request that needs multiple actions, call set_task_plan with
+  no more than five concise steps before making changes.
+- Keep the plan accurate with update_task_step. Complete steps in order and do
+  not mark work completed before it is actually finished.
+- Combine plan updates with related tool calls when possible so plan tracking
+  does not consume unnecessary tool rounds."""
 
 WRITE_TOOL_NAMES = frozenset({"write_file", "replace_text"})
 
@@ -54,6 +63,7 @@ class Agent:
         registry: ToolRegistry | None = None,
         max_tool_rounds: int = 5,
         approval_handler: ToolApprovalHandler | None = None,
+        task_tracker: TaskTracker | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -66,6 +76,7 @@ class Agent:
         self._registry = registry
         self._max_tool_rounds = max_tool_rounds
         self._approval_handler = approval_handler
+        self._task_tracker = task_tracker
         self._messages: list[Message] = []
 
     @property
@@ -78,6 +89,8 @@ class Agent:
         """Start a new conversation."""
 
         self._messages.clear()
+        if self._task_tracker is not None:
+            self._task_tracker.clear()
 
     def chat(self, user_input: str) -> str:
         """Send one user message and return the complete assistant response."""
@@ -199,11 +212,17 @@ class Agent:
         if registry is None:
             return system_prompt
         tool_names = {definition.name for definition in registry.definitions}
-        if not WRITE_TOOL_NAMES.intersection(tool_names):
+        instructions: list[str] = []
+        if (
+            WRITE_TOOL_NAMES.intersection(tool_names)
+            and "run_quality_check" in tool_names
+        ):
+            instructions.append(TOOL_WORKFLOW_INSTRUCTIONS)
+        if {"set_task_plan", "update_task_step"}.issubset(tool_names):
+            instructions.append(TASK_PLAN_INSTRUCTIONS)
+        if not instructions:
             return system_prompt
-        if "run_quality_check" not in tool_names:
-            return system_prompt
-        return f"{system_prompt.rstrip()}\n\n{TOOL_WORKFLOW_INSTRUCTIONS}"
+        return f"{system_prompt.rstrip()}\n\n" + "\n\n".join(instructions)
 
     def _execute_tool_call(self, call: ToolCall) -> ToolResult:
         if self._registry is None:
@@ -214,28 +233,37 @@ class Agent:
             )
         if not self._registry.requires_approval(call.name):
             result = self._registry.execute(call)
-            return self._with_post_tool_guidance(call, result)
+            return self._finish_tool_call(call, result)
 
         preview = self._registry.preview(call)
         if preview.is_error:
-            return preview
+            return self._finish_tool_call(call, preview)
         if self._approval_handler is None:
-            return ToolResult(
+            result = ToolResult(
                 tool_call_id=call.id,
                 content=f"工具需要用户确认，但当前无法请求确认：{call.name}",
                 is_error=True,
             )
+            return self._finish_tool_call(call, result)
         if not self._approval_handler(call, preview.content):
-            return ToolResult(
+            result = ToolResult(
                 tool_call_id=call.id,
                 content=f"用户拒绝执行工具：{call.name}",
                 is_error=True,
             )
+            return self._finish_tool_call(call, result)
         result = self._registry.execute(
             call,
             approved=True,
             approved_preview=preview.content,
         )
+        return self._finish_tool_call(call, result)
+
+    def _finish_tool_call(self, call: ToolCall, result: ToolResult) -> ToolResult:
+        """Record observable task state and append safe workflow guidance."""
+
+        if self._task_tracker is not None:
+            self._task_tracker.record_tool_result(call, result)
         return self._with_post_tool_guidance(call, result)
 
     @staticmethod
