@@ -64,32 +64,56 @@ def test_confirm_tool_call_requires_explicit_yes(answer: str, expected: bool) ->
 
 def test_terminal_renderer_coordinates_activity_and_streamed_text() -> None:
     console = MagicMock(spec=Console)
+    status = MagicMock()
+    console.status.return_value = status
     renderer = cli.TerminalRenderer(cast(Console, console))
 
-    renderer.show_activity(ActivityEvent(status="running", message="正在分析请求…"))
+    renderer.show_activity(
+        ActivityEvent(
+            status="running",
+            message="分析用户请求",
+            details=("模型轮次：1", "上下文消息：1 条"),
+        )
+    )
     renderer.show_text("先读取文件")
     renderer.show_activity(
-        ActivityEvent(status="succeeded", message="读取文件完成（0.1s）")
+        ActivityEvent(
+            status="succeeded",
+            message="读取文件",
+            details=("路径：README.md", "结果：20 行，500 字符", "耗时：0.1s"),
+        )
     )
     renderer.show_text("最终回答")
     renderer.finish_answer()
 
     printed = [call.args[0] for call in console.print.call_args_list if call.args]
     assert printed == [
-        "[>] 正在分析请求…",
         "[bold green]Neil Agent[/bold green] > ",
         "先读取文件",
-        "[ok] 读取文件完成（0.1s）",
+        "[ok] 读取文件",
+        "    路径：README.md",
+        "    结果：20 行，500 字符",
+        "    耗时：0.1s",
         "[bold green]Neil Agent[/bold green] > ",
         "最终回答",
     ]
+    status.start.assert_called_once_with()
+    status.stop.assert_called_once_with()
+    status_label = console.status.call_args.args[0]
+    assert isinstance(status_label, cli.ActivityStatusLabel)
+    assert status_label.message == "分析用户请求"
+    assert status_label.detail == "模型轮次：1"
+    assert str(status_label.__rich__()).startswith("分析用户请求 · 模型轮次：1 · ")
     assert sum(not call.args for call in console.print.call_args_list) == 2
 
 
 def test_terminal_renderer_closes_answer_before_plan_update() -> None:
     console = MagicMock(spec=Console)
+    status = MagicMock()
+    console.status.return_value = status
     renderer = cli.TerminalRenderer(cast(Console, console))
 
+    renderer.show_activity(ActivityEvent(status="running", message="创建任务计划"))
     renderer.show_text("我先制定计划")
     renderer.show_plan("[>] Inspect\n[ ] Verify")
 
@@ -98,4 +122,5 @@ def test_terminal_renderer_closes_answer_before_plan_update() -> None:
         "[bold blue]任务计划已更新[/bold blue]",
         "[>] Inspect\n[ ] Verify",
     ]
+    status.stop.assert_called_once_with()
     assert sum(not call.args for call in console.print.call_args_list) == 1

@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MessageRole = Literal["user", "assistant"]
-ActivityStatus = Literal["running", "succeeded", "skipped", "failed"]
+ActivityStatus = Literal["running", "waiting", "succeeded", "skipped", "failed"]
 
 
 class ActivityEvent(BaseModel):
@@ -17,6 +17,7 @@ class ActivityEvent(BaseModel):
 
     status: ActivityStatus
     message: str = Field(min_length=1)
+    details: tuple[str, ...] = ()
 
 
 class Message(BaseModel):

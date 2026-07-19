@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from time import monotonic
+
 from pydantic import ValidationError
 from rich.console import Console
+from rich.status import Status
+from rich.text import Text
 
 from .agent import Agent
 from .config import get_settings
@@ -19,6 +24,22 @@ HELP_COMMANDS = {"help", "/help"}
 STATUS_COMMANDS = {"status", "/status"}
 
 
+@dataclass(slots=True)
+class ActivityStatusLabel:
+    """Render a live activity label with continuously updated elapsed time."""
+
+    message: str
+    detail: str | None = None
+    started_at: float = field(default_factory=monotonic)
+
+    def __rich__(self) -> Text:
+        label = Text(self.message)
+        if self.detail is not None:
+            label.append(f" · {self.detail}", style="dim")
+        label.append(f" · {monotonic() - self.started_at:.1f}s", style="dim")
+        return label
+
+
 class TerminalRenderer:
     """Coordinate activity, plan, and streamed answer output."""
 
@@ -26,13 +47,28 @@ class TerminalRenderer:
         self._console = console
         self._answer_active = False
         self._line_open = False
+        self._status: Status | None = None
 
     def show_activity(self, event: ActivityEvent) -> None:
-        """Print one safe activity update on its own line."""
+        """Animate running work and persist completed activity with details."""
 
+        self._stop_status()
         self.ensure_line_closed()
+        if event.status == "running":
+            label = ActivityStatusLabel(
+                event.message,
+                event.details[0] if event.details else None,
+            )
+            self._status = self._console.status(
+                label,
+                spinner="dots",
+                spinner_style="cyan",
+            )
+            self._status.start()
+            return
+
         marker, style = {
-            "running": ("[>]", "cyan"),
+            "waiting": ("[?]", "yellow"),
             "succeeded": ("[ok]", "green"),
             "skipped": ("[-]", "yellow"),
             "failed": ("[!]", "red"),
@@ -43,10 +79,19 @@ class TerminalRenderer:
             markup=False,
             highlight=False,
         )
+        for detail in event.details:
+            self._console.print(
+                f"    {detail}",
+                style="dim",
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
 
     def show_text(self, chunk: str) -> None:
         """Stream assistant text, reopening its prefix after activity output."""
 
+        self._stop_status()
         if not self._answer_active:
             self._console.print("[bold green]Neil Agent[/bold green] > ", end="")
             self._answer_active = True
@@ -62,6 +107,7 @@ class TerminalRenderer:
     def show_plan(self, plan: str) -> None:
         """Display a plan without corrupting an active answer line."""
 
+        self._stop_status()
         self.ensure_line_closed()
         self._console.print("[bold blue]任务计划已更新[/bold blue]")
         self._console.print(plan, markup=False, highlight=False, soft_wrap=True)
@@ -77,7 +123,14 @@ class TerminalRenderer:
     def finish_answer(self) -> None:
         """Finish the current answer segment if one was started."""
 
+        self._stop_status()
         self.ensure_line_closed()
+
+    def _stop_status(self) -> None:
+        if self._status is None:
+            return
+        self._status.stop()
+        self._status = None
 
 
 def main() -> None:

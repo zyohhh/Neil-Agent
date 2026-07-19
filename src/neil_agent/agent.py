@@ -5,8 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Iterator, Sequence
 from time import monotonic
 from typing import Protocol
-from unicodedata import category
 
+from .activity import (
+    ToolActivity,
+    describe_tool_call,
+    describe_tool_result,
+    safe_tool_name,
+)
 from .config import DEFAULT_SYSTEM_PROMPT
 from .errors import AgentError
 from .schemas import (
@@ -129,9 +134,17 @@ class Agent:
 
         while True:
             model_activity = (
-                "正在分析请求…" if tool_rounds == 0 else "正在根据工具结果继续处理…"
+                "分析用户请求" if tool_rounds == 0 else "根据工具结果继续处理"
             )
-            self._emit_activity("running", model_activity)
+            self._emit_activity(
+                "running",
+                model_activity,
+                (
+                    f"模型轮次：{tool_rounds + 1}",
+                    f"上下文消息：{len(request_messages)} 条",
+                    f"可用工具：{len(tool_definitions)} 个",
+                ),
+            )
             model_response: ModelResponse | None = None
             try:
                 for event in self._llm.stream(
@@ -163,6 +176,15 @@ class Agent:
             if not model_response.tool_calls:
                 self._commit_messages(pending_messages)
                 return
+
+            self._emit_activity(
+                "succeeded",
+                f"模型请求 {len(model_response.tool_calls)} 个工具",
+                tuple(
+                    f"{index}. {safe_tool_name(call.name)}"
+                    for index, call in enumerate(model_response.tool_calls, start=1)
+                ),
+            )
 
             if self._registry is None:
                 raise AgentError("模型请求了工具，但当前没有可用的工具注册表。")
@@ -248,8 +270,8 @@ class Agent:
 
     def _execute_tool_call(self, call: ToolCall) -> ToolResult:
         started_at = monotonic()
-        running_message, completed_message = self._tool_activity_messages(call)
-        self._emit_activity("running", running_message)
+        activity = describe_tool_call(call)
+        self._emit_activity("running", activity.title, activity.details)
 
         if self._registry is None:
             result = ToolResult(
@@ -260,7 +282,7 @@ class Agent:
             return self._finish_tool_call(
                 call,
                 result,
-                completed_message,
+                activity,
                 started_at,
             )
         if not self._registry.requires_approval(call.name):
@@ -268,7 +290,7 @@ class Agent:
             return self._finish_tool_call(
                 call,
                 result,
-                completed_message,
+                activity,
                 started_at,
             )
 
@@ -277,7 +299,7 @@ class Agent:
             return self._finish_tool_call(
                 call,
                 preview,
-                completed_message,
+                activity,
                 started_at,
             )
         if self._approval_handler is None:
@@ -289,9 +311,14 @@ class Agent:
             return self._finish_tool_call(
                 call,
                 result,
-                completed_message,
+                activity,
                 started_at,
             )
+        self._emit_activity(
+            "waiting",
+            f"等待批准：{activity.title}",
+            (*activity.details, "已生成操作预览，确认后才会执行"),
+        )
         if not self._approval_handler(call, preview.content):
             result = ToolResult(
                 tool_call_id=call.id,
@@ -301,10 +328,15 @@ class Agent:
             return self._finish_tool_call(
                 call,
                 result,
-                completed_message,
+                activity,
                 started_at,
                 skipped=True,
             )
+        self._emit_activity(
+            "running",
+            f"执行：{activity.title}",
+            activity.details,
+        )
         result = self._registry.execute(
             call,
             approved=True,
@@ -313,7 +345,7 @@ class Agent:
         return self._finish_tool_call(
             call,
             result,
-            completed_message,
+            activity,
             started_at,
         )
 
@@ -321,7 +353,7 @@ class Agent:
         self,
         call: ToolCall,
         result: ToolResult,
-        completed_message: str,
+        activity: ToolActivity,
         started_at: float,
         *,
         skipped: bool = False,
@@ -332,76 +364,46 @@ class Agent:
             self._task_tracker.record_tool_result(call, result)
         elapsed = monotonic() - started_at
         if skipped:
-            self._emit_activity("skipped", f"{completed_message}已跳过")
+            self._emit_activity(
+                "skipped",
+                activity.title,
+                (*activity.details, "结果：用户拒绝，未执行"),
+            )
         elif result.is_error:
-            self._emit_activity("failed", f"{completed_message}失败（{elapsed:.1f}s）")
+            self._emit_activity(
+                "failed",
+                activity.title,
+                (
+                    *activity.details,
+                    *describe_tool_result(call, result),
+                    f"耗时：{elapsed:.1f}s",
+                ),
+            )
         else:
             self._emit_activity(
                 "succeeded",
-                f"{completed_message}完成（{elapsed:.1f}s）",
+                activity.title,
+                (
+                    *activity.details,
+                    *describe_tool_result(call, result),
+                    f"耗时：{elapsed:.1f}s",
+                ),
             )
         return self._with_post_tool_guidance(call, result)
 
-    def _emit_activity(self, status: ActivityStatus, message: str) -> None:
+    def _emit_activity(
+        self,
+        status: ActivityStatus,
+        message: str,
+        details: tuple[str, ...] = (),
+    ) -> None:
         """Publish a high-level activity without exposing model reasoning."""
 
         if self._activity_handler is None:
             return
-        self._activity_handler(ActivityEvent(status=status, message=message))
-
-    @classmethod
-    def _tool_activity_messages(cls, call: ToolCall) -> tuple[str, str]:
-        """Return safe labels without echoing file content or secret arguments."""
-
-        path = cls._safe_text(call.arguments.get("path"), "未指定路径")
-        labels = {
-            "list_directory": (f"正在查看目录：{path}", "查看目录"),
-            "read_file": (f"正在读取文件：{path}", "读取文件"),
-            "search_text": ("正在搜索项目文本", "搜索项目文本"),
-            "write_file": (f"正在准备写入文件：{path}", "写入文件"),
-            "replace_text": (f"正在准备修改文件：{path}", "修改文件"),
-            "run_quality_check": (
-                f"正在运行质量检查：{cls._safe_text(call.arguments.get('check'))}",
-                "质量检查",
-            ),
-            "git_status": ("正在检查 Git 状态", "检查 Git 状态"),
-            "git_diff": ("正在查看 Git 差异", "查看 Git 差异"),
-            "git_stage": (
-                f"正在准备暂存 {cls._path_count(call.arguments.get('paths'))} 个文件",
-                "暂存文件",
-            ),
-            "git_commit": ("正在准备创建本地 Git 提交", "创建本地 Git 提交"),
-            "set_task_plan": ("正在创建任务计划", "创建任务计划"),
-            "update_task_step": (
-                f"正在更新任务步骤 {cls._safe_text(call.arguments.get('step_number'))}",
-                "更新任务步骤",
-            ),
-        }
-        if call.name in labels:
-            return labels[call.name]
-        tool_name = cls._safe_text(call.name, "未知工具")
-        return f"正在执行工具：{tool_name}", f"执行工具：{tool_name}"
-
-    @staticmethod
-    def _safe_text(value: object, fallback: str = "未知") -> str:
-        """Keep activity arguments single-line and short."""
-
-        if value is None:
-            return fallback
-        safe_value = "".join(
-            " " if category(character).startswith("C") else character
-            for character in str(value)
+        self._activity_handler(
+            ActivityEvent(status=status, message=message, details=details)
         )
-        text = " ".join(safe_value.split())
-        if not text:
-            return fallback
-        return text if len(text) <= 80 else f"{text[:77]}..."
-
-    @staticmethod
-    def _path_count(value: object) -> int:
-        if isinstance(value, list):
-            return len(value)
-        return 0
 
     @staticmethod
     def _with_post_tool_guidance(call: ToolCall, result: ToolResult) -> ToolResult:

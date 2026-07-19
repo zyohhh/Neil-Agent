@@ -189,7 +189,13 @@ def test_agent_records_quality_result_in_task_tracker() -> None:
         lambda check: "Command: python -m pytest -q\nExit code: 0\nOutput:\n2 passed",
     )
     tracker = TaskTracker()
-    agent = Agent(model, registry=registry, task_tracker=tracker)
+    activities: list[ActivityEvent] = []
+    agent = Agent(
+        model,
+        registry=registry,
+        task_tracker=tracker,
+        activity_handler=activities.append,
+    )
 
     chunks = list(agent.stream_chat("run tests"))
 
@@ -199,6 +205,14 @@ def test_agent_records_quality_result_in_task_tracker() -> None:
     assert record.check == "pytest"
     assert record.status == "passed"
     assert record.output == "2 passed"
+    quality_event = next(
+        event
+        for event in activities
+        if event.status == "succeeded" and event.message == "运行质量检查"
+    )
+    assert "命令：python -m pytest -q" in quality_event.details
+    assert "退出码：0" in quality_event.details
+    assert "结果摘要：2 passed" in quality_event.details
 
 
 def test_agent_executes_tool_and_returns_result_to_model() -> None:
@@ -273,14 +287,25 @@ def test_agent_reports_model_and_tool_activity_in_order() -> None:
 
     assert [event.status for event in activities] == [
         "running",
+        "succeeded",
         "running",
         "succeeded",
         "running",
     ]
-    assert activities[0].message == "正在分析请求…"
-    assert activities[1].message == "正在读取文件：README.md"
-    assert activities[2].message.startswith("读取文件完成（")
-    assert activities[3].message == "正在根据工具结果继续处理…"
+    assert activities[0].message == "分析用户请求"
+    assert activities[0].details == (
+        "模型轮次：1",
+        "上下文消息：1 条",
+        "可用工具：1 个",
+    )
+    assert activities[1].message == "模型请求 1 个工具"
+    assert activities[1].details == ("1. read_file",)
+    assert activities[2].message == "读取文件"
+    assert activities[2].details == ("路径：README.md",)
+    assert activities[3].message == "读取文件"
+    assert "路径：README.md" in activities[3].details
+    assert "结果：1 行，21 字符" in activities[3].details
+    assert activities[4].message == "根据工具结果继续处理"
 
 
 def test_agent_stops_when_tool_round_limit_is_exceeded() -> None:
@@ -331,10 +356,12 @@ def test_agent_previews_and_executes_approved_write_tool() -> None:
         preview_handler=lambda path, content: f"preview {path}:{content}",
     )
     previews: list[str] = []
+    activities: list[ActivityEvent] = []
     agent = Agent(
         model,
         registry=registry,
         approval_handler=lambda tool_call, preview: previews.append(preview) or True,
+        activity_handler=activities.append,
     )
 
     chunks = list(agent.stream_chat("update notes"))
@@ -344,6 +371,21 @@ def test_agent_previews_and_executes_approved_write_tool() -> None:
     assert writes == ["notes.txt:new"]
     assert model.requests[1][-1].tool_results[0].is_error is False
     assert "run_quality_check" in model.requests[1][-1].tool_results[0].content
+    write_events = [
+        event
+        for event in activities
+        if event.message in {"写入文件", "等待批准：写入文件", "执行：写入文件"}
+    ]
+    assert [event.status for event in write_events] == [
+        "running",
+        "waiting",
+        "running",
+        "succeeded",
+    ]
+    assert write_events[0].details == (
+        "路径：notes.txt",
+        "内容规模：1 行，3 字符",
+    )
 
 
 def test_agent_returns_denied_write_to_model_without_execution() -> None:
@@ -385,4 +427,8 @@ def test_agent_returns_denied_write_to_model_without_execution() -> None:
     assert denied_result.is_error is True
     assert "用户拒绝" in denied_result.content
     assert any(event.status == "skipped" for event in activities)
-    assert "TOP-SECRET-CONTENT" not in " ".join(event.message for event in activities)
+    activity_text = " ".join(
+        (event.message + " " + " ".join(event.details)) for event in activities
+    )
+    assert "TOP-SECRET-CONTENT" not in activity_text
+    assert "内容规模：1 行，18 字符" in activity_text
