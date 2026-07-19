@@ -6,7 +6,13 @@ import pytest
 
 from neil_agent.agent import Agent
 from neil_agent.errors import AgentError, LLMError
-from neil_agent.schemas import Message, ModelResponse, ToolCall, ToolDefinition
+from neil_agent.schemas import (
+    ActivityEvent,
+    Message,
+    ModelResponse,
+    ToolCall,
+    ToolDefinition,
+)
 from neil_agent.task import TaskTracker
 from neil_agent.tools.registry import ToolRegistry
 
@@ -70,12 +76,15 @@ def test_stream_chat_saves_complete_round() -> None:
 def test_failed_stream_does_not_change_history() -> None:
     model = FakeChatModel()
     model.fail_stream = True
-    agent = Agent(model)
+    activities: list[ActivityEvent] = []
+    agent = Agent(model, activity_handler=activities.append)
 
     with pytest.raises(LLMError, match="request failed"):
         list(agent.stream_chat("hello"))
 
     assert agent.messages == ()
+    assert [event.status for event in activities] == ["running", "failed"]
+    assert activities[-1].message == "模型请求失败"
 
 
 def test_max_rounds_keeps_only_recent_context() -> None:
@@ -228,6 +237,52 @@ def test_agent_executes_tool_and_returns_result_to_model() -> None:
     assert len(agent.messages) == 4
 
 
+def test_agent_reports_model_and_tool_activity_in_order() -> None:
+    model = FakeChatModel()
+    model.stream_responses = [
+        [
+            ModelResponse(
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name="read_file",
+                        arguments={"path": "README.md"},
+                    ),
+                )
+            )
+        ],
+        ["done", ModelResponse(content="done")],
+    ]
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_file",
+            description="Read a file.",
+            input_schema={"type": "object"},
+        ),
+        lambda path: f"contents of {path}",
+    )
+    activities: list[ActivityEvent] = []
+    agent = Agent(
+        model,
+        registry=registry,
+        activity_handler=activities.append,
+    )
+
+    assert list(agent.stream_chat("read the README")) == ["done"]
+
+    assert [event.status for event in activities] == [
+        "running",
+        "running",
+        "succeeded",
+        "running",
+    ]
+    assert activities[0].message == "正在分析请求…"
+    assert activities[1].message == "正在读取文件：README.md"
+    assert activities[2].message.startswith("读取文件完成（")
+    assert activities[3].message == "正在根据工具结果继续处理…"
+
+
 def test_agent_stops_when_tool_round_limit_is_exceeded() -> None:
     call = ToolCall(id="call-1", name="repeat", arguments={})
     model = FakeChatModel()
@@ -295,7 +350,7 @@ def test_agent_returns_denied_write_to_model_without_execution() -> None:
     call = ToolCall(
         id="call-write",
         name="write_file",
-        arguments={"path": "notes.txt", "content": "new"},
+        arguments={"path": "notes.txt", "content": "TOP-SECRET-CONTENT"},
     )
     model = FakeChatModel()
     model.stream_responses = [
@@ -314,10 +369,12 @@ def test_agent_returns_denied_write_to_model_without_execution() -> None:
         requires_approval=True,
         preview_handler=lambda path, content: f"preview {path}:{content}",
     )
+    activities: list[ActivityEvent] = []
     agent = Agent(
         model,
         registry=registry,
         approval_handler=lambda tool_call, preview: False,
+        activity_handler=activities.append,
     )
 
     chunks = list(agent.stream_chat("update notes"))
@@ -327,3 +384,5 @@ def test_agent_returns_denied_write_to_model_without_execution() -> None:
     denied_result = model.requests[1][-1].tool_results[0]
     assert denied_result.is_error is True
     assert "用户拒绝" in denied_result.content
+    assert any(event.status == "skipped" for event in activities)
+    assert "TOP-SECRET-CONTENT" not in " ".join(event.message for event in activities)

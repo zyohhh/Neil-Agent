@@ -9,7 +9,7 @@ from .agent import Agent
 from .config import get_settings
 from .errors import NeilAgentError
 from .llm import LLMClient
-from .schemas import ToolCall
+from .schemas import ActivityEvent, ToolCall
 from .task import TaskTracker
 from .tools import FileSystemTools, ShellTools, ToolRegistry
 
@@ -17,6 +17,67 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
 HELP_COMMANDS = {"help", "/help"}
 STATUS_COMMANDS = {"status", "/status"}
+
+
+class TerminalRenderer:
+    """Coordinate activity, plan, and streamed answer output."""
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._answer_active = False
+        self._line_open = False
+
+    def show_activity(self, event: ActivityEvent) -> None:
+        """Print one safe activity update on its own line."""
+
+        self.ensure_line_closed()
+        marker, style = {
+            "running": ("[>]", "cyan"),
+            "succeeded": ("[ok]", "green"),
+            "skipped": ("[-]", "yellow"),
+            "failed": ("[!]", "red"),
+        }[event.status]
+        self._console.print(
+            f"{marker} {event.message}",
+            style=style,
+            markup=False,
+            highlight=False,
+        )
+
+    def show_text(self, chunk: str) -> None:
+        """Stream assistant text, reopening its prefix after activity output."""
+
+        if not self._answer_active:
+            self._console.print("[bold green]Neil Agent[/bold green] > ", end="")
+            self._answer_active = True
+        self._console.print(
+            chunk,
+            end="",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+        self._line_open = not chunk.endswith(("\n", "\r"))
+
+    def show_plan(self, plan: str) -> None:
+        """Display a plan without corrupting an active answer line."""
+
+        self.ensure_line_closed()
+        self._console.print("[bold blue]任务计划已更新[/bold blue]")
+        self._console.print(plan, markup=False, highlight=False, soft_wrap=True)
+
+    def ensure_line_closed(self) -> None:
+        """Close the current answer segment before non-answer output."""
+
+        if self._answer_active and self._line_open:
+            self._console.print()
+        self._answer_active = False
+        self._line_open = False
+
+    def finish_answer(self) -> None:
+        """Finish the current answer segment if one was started."""
+
+        self.ensure_line_closed()
 
 
 def main() -> None:
@@ -47,9 +108,8 @@ def run(console: Console) -> None:
         max_output_chars=settings.max_command_output_chars,
     )
     shell_tools.register(registry)
-    task_tracker = TaskTracker(
-        change_handler=lambda plan: _show_plan_update(console, plan)
-    )
+    renderer = TerminalRenderer(console)
+    task_tracker = TaskTracker(change_handler=renderer.show_plan)
     task_tracker.register(registry)
 
     llm = LLMClient(settings)
@@ -65,6 +125,7 @@ def run(console: Console) -> None:
             preview,
         ),
         task_tracker=task_tracker,
+        activity_handler=renderer.show_activity,
     )
     _show_welcome(
         console,
@@ -98,24 +159,19 @@ def run(console: Console) -> None:
         if not user_input:
             continue
 
-        console.print("[bold green]Neil Agent[/bold green] > ", end="")
         response_stream = agent.stream_chat(user_input)
         try:
             for chunk in response_stream:
-                console.print(
-                    chunk,
-                    end="",
-                    markup=False,
-                    highlight=False,
-                    soft_wrap=True,
-                )
+                renderer.show_text(chunk)
         except KeyboardInterrupt:
             response_stream.close()
-            console.print("\n[yellow]已取消本次回答。[/yellow]")
+            renderer.finish_answer()
+            console.print("[yellow]已取消本次回答。[/yellow]")
         except NeilAgentError as error:
-            console.print(f"\n[bold red]请求失败：[/bold red]{error}")
+            renderer.finish_answer()
+            console.print(f"[bold red]请求失败：[/bold red]{error}")
         else:
-            console.print()
+            renderer.finish_answer()
 
 
 def _show_welcome(
@@ -140,13 +196,6 @@ def _show_help(console: Console) -> None:
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
     console.print("  /status 显示任务、检查和 Git 状态")
-
-
-def _show_plan_update(console: Console, plan: str) -> None:
-    """Display a plan immediately after the model creates or updates it."""
-
-    console.print("\n[bold blue]任务计划已更新[/bold blue]")
-    console.print(plan, markup=False, highlight=False, soft_wrap=True)
 
 
 def _show_status(

@@ -7,6 +7,16 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MessageRole = Literal["user", "assistant"]
+ActivityStatus = Literal["running", "succeeded", "skipped", "failed"]
+
+
+class ActivityEvent(BaseModel):
+    """One safe, user-visible update about the agent's current activity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: ActivityStatus
+    message: str = Field(min_length=1)
 
 
 class Message(BaseModel):

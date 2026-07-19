@@ -9,7 +9,7 @@ from rich.console import Console
 
 from neil_agent import cli
 from neil_agent.config import Settings
-from neil_agent.schemas import ToolCall
+from neil_agent.schemas import ActivityEvent, ToolCall
 
 
 def test_run_uses_injected_console(
@@ -60,3 +60,42 @@ def test_confirm_tool_call_requires_explicit_yes(answer: str, expected: bool) ->
     )
 
     assert approved is expected
+
+
+def test_terminal_renderer_coordinates_activity_and_streamed_text() -> None:
+    console = MagicMock(spec=Console)
+    renderer = cli.TerminalRenderer(cast(Console, console))
+
+    renderer.show_activity(ActivityEvent(status="running", message="正在分析请求…"))
+    renderer.show_text("先读取文件")
+    renderer.show_activity(
+        ActivityEvent(status="succeeded", message="读取文件完成（0.1s）")
+    )
+    renderer.show_text("最终回答")
+    renderer.finish_answer()
+
+    printed = [call.args[0] for call in console.print.call_args_list if call.args]
+    assert printed == [
+        "[>] 正在分析请求…",
+        "[bold green]Neil Agent[/bold green] > ",
+        "先读取文件",
+        "[ok] 读取文件完成（0.1s）",
+        "[bold green]Neil Agent[/bold green] > ",
+        "最终回答",
+    ]
+    assert sum(not call.args for call in console.print.call_args_list) == 2
+
+
+def test_terminal_renderer_closes_answer_before_plan_update() -> None:
+    console = MagicMock(spec=Console)
+    renderer = cli.TerminalRenderer(cast(Console, console))
+
+    renderer.show_text("我先制定计划")
+    renderer.show_plan("[>] Inspect\n[ ] Verify")
+
+    printed = [call.args[0] for call in console.print.call_args_list if call.args]
+    assert printed[-2:] == [
+        "[bold blue]任务计划已更新[/bold blue]",
+        "[>] Inspect\n[ ] Verify",
+    ]
+    assert sum(not call.args for call in console.print.call_args_list) == 1
