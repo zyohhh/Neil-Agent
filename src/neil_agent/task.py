@@ -70,6 +70,27 @@ class TaskTracker:
         self._steps = ()
         self._latest_quality_check = None
 
+    def restore(
+        self,
+        steps: tuple[TaskStep, ...],
+        latest_quality_check: QualityCheckRecord | None,
+    ) -> None:
+        """Replace task state after validating a persisted snapshot."""
+
+        if len(steps) > MAX_TASK_STEPS:
+            raise ValueError(f"restored plan exceeds {MAX_TASK_STEPS} steps")
+        if steps:
+            try:
+                titles = self._validate_steps([step.title for step in steps])
+            except ToolError as error:
+                raise ValueError(str(error)) from error
+            if titles != tuple(step.title for step in steps):
+                raise ValueError("restored plan titles are not normalized")
+            self._validate_restored_statuses(steps)
+
+        self._steps = tuple(steps)
+        self._latest_quality_check = latest_quality_check
+
     def set_task_plan(self, steps: list[str]) -> str:
         """Replace the current plan and start its first step."""
 
@@ -220,6 +241,24 @@ class TaskTracker:
                 raise ToolError("任务计划不能包含重复步骤。")
             titles.append(title)
         return tuple(titles)
+
+    @staticmethod
+    def _validate_restored_statuses(steps: tuple[TaskStep, ...]) -> None:
+        in_progress = [
+            index for index, step in enumerate(steps) if step.status == "in_progress"
+        ]
+        if len(in_progress) > 1:
+            raise ValueError("restored plan has multiple in-progress steps")
+        if not in_progress:
+            if any(step.status != "completed" for step in steps):
+                raise ValueError("unfinished restored plan needs an in-progress step")
+            return
+
+        active_index = in_progress[0]
+        if any(step.status != "completed" for step in steps[:active_index]):
+            raise ValueError("steps before the active step must be completed")
+        if any(step.status != "pending" for step in steps[active_index + 1 :]):
+            raise ValueError("steps after the active step must be pending")
 
     @staticmethod
     def _field_value(content: str, field: str) -> str | None:

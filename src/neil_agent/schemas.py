@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -13,7 +14,7 @@ ActivityStatus = Literal["running", "waiting", "succeeded", "skipped", "failed"]
 class ActivityEvent(BaseModel):
     """One safe, user-visible update about the agent's current activity."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     status: ActivityStatus
     message: str = Field(min_length=1)
@@ -23,7 +24,7 @@ class ActivityEvent(BaseModel):
 class Message(BaseModel):
     """One API-compatible message, including optional tool content."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: MessageRole
     content: str = ""
@@ -61,7 +62,7 @@ class Message(BaseModel):
 class ThinkingContent(BaseModel):
     """Thinking content that must be replayed during a tool-use turn."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     thinking: str
     signature: str
@@ -77,7 +78,7 @@ class ThinkingContent(BaseModel):
 class ToolCall(BaseModel):
     """A tool invocation requested by the model."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
@@ -95,7 +96,7 @@ class ToolCall(BaseModel):
 class ToolResult(BaseModel):
     """The result returned after executing a tool call."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool_call_id: str = Field(min_length=1)
     content: str
@@ -113,7 +114,7 @@ class ToolResult(BaseModel):
 class ToolDefinition(BaseModel):
     """A tool description and JSON input schema exposed to the model."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
@@ -130,8 +131,45 @@ class ToolDefinition(BaseModel):
 class ModelResponse(BaseModel):
     """The accumulated response produced by one model request."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     content: str = ""
     thinking: tuple[ThinkingContent, ...] = ()
     tool_calls: tuple[ToolCall, ...] = ()
+
+
+def validate_message_history(messages: Sequence[Message]) -> None:
+    """Validate that messages contain only complete conversation rounds."""
+
+    expected = "user"
+    pending_tool_ids: tuple[str, ...] = ()
+    for index, message in enumerate(messages, start=1):
+        if expected == "user":
+            if message.role != "user" or message.tool_results:
+                raise ValueError(f"message {index} must start a user round")
+            expected = "assistant"
+            continue
+
+        if expected == "assistant":
+            if message.role != "assistant":
+                raise ValueError(f"message {index} must be an assistant response")
+            if message.tool_calls:
+                pending_tool_ids = tuple(call.id for call in message.tool_calls)
+                if len(set(pending_tool_ids)) != len(pending_tool_ids):
+                    raise ValueError(
+                        f"message {index} contains duplicate tool call ids"
+                    )
+                expected = "tool_results"
+            else:
+                expected = "user"
+            continue
+
+        if message.role != "user" or not message.tool_results or message.content:
+            raise ValueError(f"message {index} must contain tool results")
+        result_ids = tuple(result.tool_call_id for result in message.tool_results)
+        if result_ids != pending_tool_ids:
+            raise ValueError(f"message {index} tool results do not match tool calls")
+        expected = "assistant"
+
+    if expected != "user":
+        raise ValueError("message history ends with an incomplete conversation round")

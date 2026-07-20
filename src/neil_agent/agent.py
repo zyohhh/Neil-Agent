@@ -22,6 +22,7 @@ from .schemas import (
     ToolCall,
     ToolDefinition,
     ToolResult,
+    validate_message_history,
 )
 from .task import TaskTracker
 from .tools.registry import ToolRegistry
@@ -109,6 +110,20 @@ class Agent:
         self._messages.clear()
         if self._task_tracker is not None:
             self._task_tracker.clear()
+
+    def restore_messages(self, messages: Sequence[Message]) -> None:
+        """Replace history with validated, complete persisted rounds."""
+
+        validate_message_history(messages)
+        restored = list(messages)
+        round_starts = [
+            index
+            for index, message in enumerate(restored)
+            if message.role == "user" and not message.tool_results
+        ]
+        if len(round_starts) > self._max_rounds:
+            restored = restored[round_starts[-self._max_rounds] :]
+        self._messages = restored
 
     def chat(self, user_input: str) -> str:
         """Send one user message and return the complete assistant response."""

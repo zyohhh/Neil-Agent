@@ -12,9 +12,10 @@ from rich.text import Text
 
 from .agent import Agent
 from .config import get_settings
-from .errors import NeilAgentError
+from .errors import NeilAgentError, SessionError
 from .llm import LLMClient
 from .schemas import ActivityEvent, ToolCall
+from .session import SessionHandle, SessionStore
 from .task import TaskTracker
 from .tools import FileSystemTools, ShellTools, ToolRegistry
 
@@ -22,6 +23,8 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
 HELP_COMMANDS = {"help", "/help"}
 STATUS_COMMANDS = {"status", "/status"}
+SESSIONS_COMMANDS = {"sessions", "/sessions"}
+RESUME_COMMANDS = {"resume", "/resume"}
 
 
 @dataclass(slots=True)
@@ -155,6 +158,8 @@ def run(console: Console) -> None:
         console.print(f"[bold red]工作区配置错误：[/bold red]{error}")
         raise SystemExit(1) from None
     filesystem_tools.register(registry)
+    session_store = SessionStore(filesystem_tools.root)
+    current_session = session_store.new_session()
     shell_tools = ShellTools(
         settings.workspace_root,
         timeout=settings.command_timeout,
@@ -186,6 +191,7 @@ def run(console: Console) -> None:
         settings.thinking_enabled,
         str(filesystem_tools.root),
         len(registry.definitions),
+        current_session.session_id,
     )
 
     while True:
@@ -195,19 +201,37 @@ def run(console: Console) -> None:
             _show_goodbye(console)
             return
 
-        command = user_input.lower()
-        if command in EXIT_COMMANDS:
+        command_name, _, command_argument = user_input.partition(" ")
+        command = command_name.lower()
+        if command in EXIT_COMMANDS and not command_argument:
             _show_goodbye(console)
             return
-        if command in CLEAR_COMMANDS:
+        if command in CLEAR_COMMANDS and not command_argument:
             agent.clear()
-            console.print("[dim]对话、任务计划和检查记录已清空。[/dim]")
+            current_session = session_store.new_session()
+            console.print(
+                f"[dim]已开始新的本地会话：{current_session.session_id}[/dim]"
+            )
             continue
-        if command in HELP_COMMANDS:
+        if command in HELP_COMMANDS and not command_argument:
             _show_help(console)
             continue
-        if command in STATUS_COMMANDS:
-            _show_status(console, task_tracker, shell_tools)
+        if command in STATUS_COMMANDS and not command_argument:
+            _show_status(console, task_tracker, shell_tools, current_session)
+            continue
+        if command in SESSIONS_COMMANDS and not command_argument:
+            _show_sessions(console, session_store, current_session.session_id)
+            continue
+        if command in RESUME_COMMANDS:
+            restored_session = _resume_session(
+                console,
+                session_store,
+                command_argument.strip(),
+                agent,
+                task_tracker,
+            )
+            if restored_session is not None:
+                current_session = restored_session
             continue
         if not user_input:
             continue
@@ -225,6 +249,15 @@ def run(console: Console) -> None:
             console.print(f"[bold red]请求失败：[/bold red]{error}")
         else:
             renderer.finish_answer()
+            try:
+                session_store.save(
+                    current_session,
+                    agent.messages,
+                    task_tracker.steps,
+                    task_tracker.latest_quality_check,
+                )
+            except SessionError as error:
+                console.print(f"[yellow]本地会话未保存：[/yellow]{error}")
 
 
 def _show_welcome(
@@ -233,12 +266,14 @@ def _show_welcome(
     thinking_enabled: bool,
     workspace_root: str,
     tool_count: int,
+    session_id: str,
 ) -> None:
     console.print("[bold green]Neil Agent[/bold green] 已启动")
     console.print(f"[dim]模型：{model}[/dim]")
     thinking_status = "开启" if thinking_enabled else "关闭"
     console.print(f"[dim]思考模式：{thinking_status}[/dim]")
     console.print(f"[dim]工作区：{workspace_root}[/dim]")
+    console.print(f"[dim]当前会话：{session_id}[/dim]")
     console.print(f"[dim]可用工具：{tool_count} 个（高风险操作需确认）[/dim]")
     console.print("[dim]输入 /help 查看命令。[/dim]")
 
@@ -248,6 +283,8 @@ def _show_help(console: Console) -> None:
     console.print("  /clear  清空对话历史")
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
+    console.print("  /sessions 显示本地会话")
+    console.print("  /resume <id> 恢复指定会话")
     console.print("  /status 显示任务、检查和 Git 状态")
 
 
@@ -255,6 +292,7 @@ def _show_status(
     console: Console,
     task_tracker: TaskTracker,
     shell_tools: ShellTools,
+    current_session: SessionHandle,
 ) -> None:
     """Display current in-memory task state and a fresh local Git snapshot."""
 
@@ -262,12 +300,89 @@ def _show_status(
         git_status = shell_tools.git_status_snapshot()
     except NeilAgentError as error:
         git_status = f"不可用：{error}"
+    status = (
+        f"当前会话\n  {current_session.session_id}\n\n"
+        f"{task_tracker.format_status(git_status)}"
+    )
     console.print(
-        task_tracker.format_status(git_status),
+        status,
         markup=False,
         highlight=False,
         soft_wrap=True,
     )
+
+
+def _show_sessions(
+    console: Console,
+    session_store: SessionStore,
+    current_session_id: str,
+) -> None:
+    """List newest valid local sessions without calling the model."""
+
+    try:
+        index = session_store.list_sessions()
+    except SessionError as error:
+        console.print(f"[bold red]无法读取本地会话：[/bold red]{error}")
+        return
+
+    console.print("[bold]本地会话[/bold]")
+    if not index.sessions:
+        console.print("  （尚无已保存会话）")
+    for summary in index.sessions:
+        marker = "*" if summary.session_id == current_session_id else " "
+        updated_at = summary.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        console.print(
+            f"{marker} {summary.session_id}  {updated_at}  {summary.round_count} 轮",
+            markup=False,
+            highlight=False,
+        )
+        console.print(
+            f"    {summary.preview}",
+            style="dim",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+    if index.invalid_count:
+        console.print(
+            f"[yellow]已跳过 {index.invalid_count} 个损坏或不兼容的会话文件。[/yellow]"
+        )
+
+
+def _resume_session(
+    console: Console,
+    session_store: SessionStore,
+    session_id: str,
+    agent: Agent,
+    task_tracker: TaskTracker,
+) -> SessionHandle | None:
+    """Restore one exact session ID into the active in-memory state."""
+
+    if not session_id:
+        console.print("[yellow]用法：/resume <session-id>[/yellow]")
+        return None
+    try:
+        snapshot = session_store.load(session_id)
+        agent.restore_messages(snapshot.messages)
+        task_tracker.restore(
+            snapshot.restored_steps(),
+            snapshot.restored_quality_check(),
+        )
+    except (SessionError, ValueError) as error:
+        console.print(f"[bold red]恢复会话失败：[/bold red]{error}")
+        return None
+
+    console.print(
+        f"[green]已恢复本地会话：{snapshot.session_id}"
+        f"（{len(snapshot.messages)} 条消息）[/green]"
+    )
+    console.print(
+        task_tracker.format_plan(),
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    return session_store.handle_for(snapshot)
 
 
 def _show_goodbye(console: Console) -> None:

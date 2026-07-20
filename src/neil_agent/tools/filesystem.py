@@ -18,6 +18,7 @@ MAX_DIFF_PREVIEW_CHARS = 20_000
 BLOCKED_DIRECTORIES = frozenset(
     {
         ".git",
+        ".neil-agent",
         ".agents",
         ".codex",
         ".mypy_cache",

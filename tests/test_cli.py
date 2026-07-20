@@ -1,6 +1,7 @@
 """Tests for the injectable command-line interface."""
 
 from pathlib import Path
+from collections.abc import Iterator, Sequence
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -9,7 +10,38 @@ from rich.console import Console
 
 from neil_agent import cli
 from neil_agent.config import Settings
-from neil_agent.schemas import ActivityEvent, ToolCall
+from neil_agent.schemas import (
+    ActivityEvent,
+    Message,
+    ModelResponse,
+    ToolCall,
+    ToolDefinition,
+)
+from neil_agent.session import SessionStore
+from neil_agent.task import TaskStep
+
+
+class FakeLLMClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        system_prompt: str,
+    ) -> str:
+        return "saved reply"
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        system_prompt: str,
+        tools: Sequence[ToolDefinition] = (),
+    ) -> Iterator[str | ModelResponse]:
+        yield "saved reply"
+        yield ModelResponse(content="saved reply")
 
 
 def test_run_uses_injected_console(
@@ -41,7 +73,80 @@ def test_run_uses_injected_console(
     assert "最近质量检查" in printed_text
     assert "## main...origin/main" in printed_text
     assert "/status" in printed_text
+    assert "/sessions" in printed_text
+    assert "/resume <id>" in printed_text
     assert "Neil Agent 已退出" in printed_text
+
+
+def test_run_lists_and_restores_an_explicit_local_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    store = SessionStore(tmp_path)
+    handle = store.new_session()
+    store.save(
+        handle,
+        (
+            Message(role="user", content="continue the saved task"),
+            Message(role="assistant", content="saved answer"),
+        ),
+        (TaskStep("Inspect saved state", "in_progress"),),
+        None,
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        cli.ShellTools,
+        "git_status_snapshot",
+        lambda self: "## main...origin/main",
+    )
+    console = MagicMock(spec=Console)
+    console.input.side_effect = [
+        "/sessions",
+        f"/resume {handle.session_id}",
+        "/status",
+        "/exit",
+    ]
+
+    cli.run(cast(Console, console))
+
+    printed_text = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "本地会话" in printed_text
+    assert handle.session_id in printed_text
+    assert "continue the saved task" in printed_text
+    assert "已恢复本地会话" in printed_text
+    assert "Inspect saved state" in printed_text
+
+
+def test_successful_chat_is_saved_automatically(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    console = MagicMock(spec=Console)
+    console.input.side_effect = ["remember this", "/exit"]
+
+    cli.run(cast(Console, console))
+
+    index = SessionStore(tmp_path).list_sessions()
+    assert len(index.sessions) == 1
+    snapshot = SessionStore(tmp_path).load(index.sessions[0].session_id)
+    assert [message.content for message in snapshot.messages] == [
+        "remember this",
+        "saved reply",
+    ]
 
 
 @pytest.mark.parametrize(

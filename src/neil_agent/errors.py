@@ -15,3 +15,7 @@ class AgentError(NeilAgentError):
 
 class ToolError(NeilAgentError):
     """An expected tool validation or execution error."""
+
+
+class SessionError(NeilAgentError):
+    """A local session storage or validation error."""

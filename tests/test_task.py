@@ -6,7 +6,7 @@ import pytest
 
 from neil_agent.errors import ToolError
 from neil_agent.schemas import ToolCall, ToolResult
-from neil_agent.task import TaskTracker
+from neil_agent.task import QualityCheckRecord, TaskStep, TaskTracker
 from neil_agent.tools.registry import ToolRegistry
 
 
@@ -164,3 +164,32 @@ def test_format_status_and_clear_cover_all_session_state() -> None:
     assert "M app.py" in status
     assert tracker.steps == ()
     assert tracker.latest_quality_check is None
+
+
+def test_restore_replaces_valid_state_and_rejects_invalid_plan_order() -> None:
+    tracker = TaskTracker()
+    quality = QualityCheckRecord(
+        check="ruff",
+        status="passed",
+        command="python -m ruff check .",
+        exit_code=0,
+        output="All checks passed!",
+    )
+    steps = (
+        TaskStep("Inspect", "completed"),
+        TaskStep("Verify", "in_progress"),
+    )
+
+    tracker.restore(steps, quality)
+
+    assert tracker.steps == steps
+    assert tracker.latest_quality_check == quality
+    with pytest.raises(ValueError, match="before the active"):
+        tracker.restore(
+            (
+                TaskStep("Inspect", "pending"),
+                TaskStep("Verify", "in_progress"),
+            ),
+            None,
+        )
+    assert tracker.steps == steps

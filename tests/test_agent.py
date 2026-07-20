@@ -120,6 +120,35 @@ def test_clear_removes_conversation_history() -> None:
     assert tracker.steps == ()
 
 
+def test_restore_messages_validates_and_trims_complete_rounds() -> None:
+    agent = Agent(FakeChatModel(), max_rounds=2)
+    messages = tuple(
+        message
+        for round_number in range(1, 4)
+        for message in (
+            Message(role="user", content=f"user {round_number}"),
+            Message(role="assistant", content=f"assistant {round_number}"),
+        )
+    )
+
+    agent.restore_messages(messages)
+
+    assert [message.content for message in agent.messages] == [
+        "user 2",
+        "assistant 2",
+        "user 3",
+        "assistant 3",
+    ]
+    with pytest.raises(ValueError, match="incomplete"):
+        agent.restore_messages((Message(role="user", content="unfinished"),))
+    assert [message.content for message in agent.messages] == [
+        "user 2",
+        "assistant 2",
+        "user 3",
+        "assistant 3",
+    ]
+
+
 def test_agent_passes_custom_system_prompt_to_model() -> None:
     model = FakeChatModel()
     agent = Agent(model, system_prompt="You are a Python tutor.")

@@ -24,6 +24,7 @@ STATUS_TIMEOUT_SECONDS = 5.0
 BLOCKED_GIT_DIRECTORIES = frozenset(
     {
         ".git",
+        ".neil-agent",
         ".agents",
         ".codex",
         ".mypy_cache",

@@ -43,12 +43,18 @@ def test_search_skips_blocked_directories(tmp_path: Path) -> None:
     blocked = tmp_path / ".venv"
     blocked.mkdir()
     (blocked / "hidden.txt").write_text("needle", encoding="utf-8")
+    sessions = tmp_path / ".neil-agent" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "private.json").write_text("needle", encoding="utf-8")
     tools = FileSystemTools(tmp_path)
 
     result = tools.search_text("needle")
 
     assert "visible.txt:1" in result
     assert "hidden.txt" not in result
+    assert "private.json" not in result
+    with pytest.raises(ToolError, match="受保护"):
+        tools.read_file(".neil-agent/sessions/private.json")
 
 
 def test_write_tools_cannot_modify_sensitive_or_outside_files(tmp_path: Path) -> None:
