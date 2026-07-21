@@ -4,7 +4,7 @@ from collections.abc import Iterator, Sequence
 
 import pytest
 
-from neil_agent.agent import Agent
+from neil_agent.agent import COMPACTION_CHECKPOINT_USER, Agent
 from neil_agent.errors import AgentError, LLMError
 from neil_agent.schemas import (
     ActivityEvent,
@@ -12,6 +12,7 @@ from neil_agent.schemas import (
     ModelResponse,
     ToolCall,
     ToolDefinition,
+    ToolResult,
 )
 from neil_agent.task import TaskTracker
 from neil_agent.tools.registry import ToolRegistry
@@ -156,6 +157,192 @@ def test_agent_passes_custom_system_prompt_to_model() -> None:
     agent.chat("hello")
 
     assert model.system_prompts == ["You are a Python tutor."]
+
+
+def test_agent_appends_project_instructions_without_storing_them_as_messages() -> None:
+    model = FakeChatModel()
+    agent = Agent(
+        model,
+        system_prompt="Base prompt.",
+        project_instructions="PROJECT-RULE: use pytest.",
+    )
+
+    agent.chat("hello")
+
+    assert model.system_prompts == ["Base prompt.\n\nPROJECT-RULE: use pytest."]
+    assert "PROJECT-RULE" not in " ".join(message.content for message in agent.messages)
+
+
+def test_compaction_is_prepared_without_mutation_and_keeps_recent_tool_round() -> None:
+    model = FakeChatModel(response="Durable summary of rounds one and two.")
+    agent = Agent(model)
+    tool_call = ToolCall(id="call-compact", name="read_file", arguments={})
+    messages = (
+        Message(role="user", content="round one request"),
+        Message(role="assistant", content="round one answer " + "x" * 1_000),
+        Message(role="user", content="round two request"),
+        Message(role="assistant", content="round two answer " + "y" * 1_000),
+        Message(role="user", content="round three request"),
+        Message(role="assistant", tool_calls=(tool_call,)),
+        Message(
+            role="user",
+            tool_results=(
+                ToolResult(tool_call_id=tool_call.id, content="tool output"),
+            ),
+        ),
+        Message(role="assistant", content="round three answer"),
+        Message(role="user", content="round four request"),
+        Message(role="assistant", content="round four answer"),
+    )
+    agent.restore_messages(messages)
+
+    prepared = agent.prepare_compaction()
+
+    assert agent.messages == messages
+    assert prepared.summarized_rounds == 2
+    assert prepared.kept_rounds == 2
+    assert prepared.model_requests == 1
+    assert "round one request" in model.requests[0][0].content
+    assert "round two request" in model.requests[0][0].content
+    assert "round three request" not in model.requests[0][0].content
+    assert "Conversation compaction requirements" in model.system_prompts[0]
+
+    agent.apply_compaction(prepared)
+
+    assert len(agent.messages) == 8
+    assert agent.messages[0].content.startswith("[Neil Agent /compact checkpoint]")
+    assert "Durable summary" in agent.messages[1].content
+    assert agent.messages[3].tool_calls == (tool_call,)
+    assert agent.messages[4].tool_results[0].content == "tool output"
+    assert agent.messages[-2].content == "round four request"
+
+
+def test_failed_compaction_keeps_original_history() -> None:
+    model = FakeChatModel(response="x" * 8_001)
+    agent = Agent(model)
+    messages = tuple(
+        message
+        for number in range(1, 4)
+        for message in (
+            Message(role="user", content=f"user {number}"),
+            Message(role="assistant", content=f"assistant {number}"),
+        )
+    )
+    agent.restore_messages(messages)
+
+    with pytest.raises(AgentError, match="压缩摘要超过"):
+        agent.prepare_compaction()
+
+    assert agent.messages == messages
+
+
+def test_compaction_rejects_stale_prepared_history() -> None:
+    model = FakeChatModel(response="summary")
+    agent = Agent(model)
+    messages = tuple(
+        message
+        for number in range(1, 4)
+        for message in (
+            Message(role="user", content=f"user {number}"),
+            Message(
+                role="assistant",
+                content=("x" * 1_000 if number == 1 else f"assistant {number}"),
+            ),
+        )
+    )
+    agent.restore_messages(messages)
+    prepared = agent.prepare_compaction()
+    agent.chat("new request")
+
+    with pytest.raises(AgentError, match="过期结果"):
+        agent.apply_compaction(prepared)
+
+    assert agent.messages[-2].content == "new request"
+
+
+def test_compaction_bounds_one_oversized_old_round_to_fit_request_budget() -> None:
+    model = FakeChatModel(response="bounded summary")
+    agent = Agent(model, max_context_chars=2_500)
+    messages = (
+        Message(role="user", content="large old request"),
+        Message(role="assistant", content="x" * 30_000),
+        Message(role="user", content="recent two"),
+        Message(role="assistant", content="answer two"),
+        Message(role="user", content="recent three"),
+        Message(role="assistant", content="answer three"),
+    )
+    agent.restore_messages(messages)
+
+    prepared = agent.prepare_compaction()
+
+    assert prepared.model_requests == 1
+    assert "truncated for compaction" in model.requests[0][0].content
+    assert agent.messages == messages
+
+
+def test_compaction_checkpoint_remains_pinned_at_round_limit() -> None:
+    model = FakeChatModel(response="durable summary")
+    agent = Agent(model, max_rounds=4)
+    messages = tuple(
+        message
+        for number in range(1, 5)
+        for message in (
+            Message(role="user", content=f"user {number}"),
+            Message(
+                role="assistant",
+                content=(str(number) * 1_000 if number <= 2 else f"assistant {number}"),
+            ),
+        )
+    )
+    agent.restore_messages(messages)
+    agent.apply_compaction(agent.prepare_compaction())
+
+    for number in range(5, 9):
+        agent.chat(f"user {number}")
+
+    assert agent.messages[0].content == COMPACTION_CHECKPOINT_USER
+    assert len([message for message in agent.messages if message.role == "user"]) == 4
+    assert model.requests[-1][0].content == COMPACTION_CHECKPOINT_USER
+    assert agent.context_stats().selected_rounds == 3
+
+
+def test_compaction_stops_at_model_request_safety_limit() -> None:
+    model = FakeChatModel(response="rolling summary")
+    agent = Agent(model, max_rounds=12, max_context_chars=2_500)
+    messages = tuple(
+        message
+        for number in range(1, 13)
+        for message in (
+            Message(role="user", content=f"user {number}"),
+            Message(role="assistant", content=str(number) * 3_000),
+        )
+    )
+    agent.restore_messages(messages)
+
+    with pytest.raises(AgentError, match="超过 8 次模型请求"):
+        agent.prepare_compaction()
+
+    assert len(model.requests) == 8
+    assert agent.messages == messages
+
+
+def test_compaction_rejects_a_candidate_that_would_grow_history() -> None:
+    model = FakeChatModel(response="summary")
+    agent = Agent(model)
+    messages = tuple(
+        message
+        for number in range(1, 4)
+        for message in (
+            Message(role="user", content=f"u{number}"),
+            Message(role="assistant", content=f"a{number}"),
+        )
+    )
+    agent.restore_messages(messages)
+
+    with pytest.raises(AgentError, match="没有减少历史占用"):
+        agent.prepare_compaction()
+
+    assert agent.messages == messages
 
 
 def test_agent_adds_quality_workflow_when_write_and_check_tools_exist() -> None:

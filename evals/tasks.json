@@ -1,1 +1,74 @@
-[]
+[
+  {
+    "id": "root-project-instructions",
+    "capability": "project_instructions",
+    "setup": "Create a UTF-8 root AGENTS.md requiring Python changes to include tests.",
+    "steps": [
+      "Start Neil Agent in the workspace.",
+      "Run /instructions.",
+      "Ask for a small Python behavior change."
+    ],
+    "expected": [
+      "/instructions reports the root file as active without printing its content.",
+      "The model follows the test requirement.",
+      "The session JSON does not contain the AGENTS.md content."
+    ]
+  },
+  {
+    "id": "unsafe-project-instructions",
+    "capability": "project_instructions",
+    "setup": "Replace root AGENTS.md with an oversized file, invalid UTF-8, or a symlink.",
+    "steps": [
+      "Start Neil Agent.",
+      "Run /instructions."
+    ],
+    "expected": [
+      "Startup continues with a bounded warning.",
+      "The unsafe file is inactive and no content is displayed or sent to the model."
+    ]
+  },
+  {
+    "id": "explicit-context-compaction",
+    "capability": "context_compaction",
+    "setup": "Complete at least four conversation rounds, including one tool-use round.",
+    "steps": [
+      "Run /compact.",
+      "Run /context.",
+      "Ask a follow-up that depends on an early decision and a recent tool result."
+    ],
+    "expected": [
+      "Older rounds become one marked summary checkpoint.",
+      "The two newest complete rounds and tool call/result pairing remain intact.",
+      "The follow-up preserves the earlier decision and recent tool result."
+    ]
+  },
+  {
+    "id": "compaction-failure-atomicity",
+    "capability": "context_compaction",
+    "setup": "Prepare a resumable session with at least three rounds.",
+    "steps": [
+      "Make the summary request fail or make the session directory temporarily unwritable.",
+      "Run /compact.",
+      "Restore normal conditions and run /context."
+    ],
+    "expected": [
+      "The command reports that compaction failed.",
+      "Both memory and the saved session retain the original complete history."
+    ]
+  },
+  {
+    "id": "retry-approval-session-consistency",
+    "capability": "workflow_consistency",
+    "setup": "Use a request that experiences one transient model failure before requesting a write tool.",
+    "steps": [
+      "Observe the retry feedback.",
+      "Reject the write approval.",
+      "Exit, resume the session, and continue the task."
+    ],
+    "expected": [
+      "The retry is visible and no streamed text is duplicated.",
+      "The rejected tool is not executed.",
+      "Only the final successful round is saved and remains valid after resume."
+    ]
+  }
+]

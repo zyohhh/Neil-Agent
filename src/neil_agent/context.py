@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .schemas import Message, ToolDefinition
@@ -33,6 +33,20 @@ class ContextStats:
     selected_messages: int
     selected_message_chars: int
     omitted_rounds: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCompaction:
+    """Validated replacement history that has not been applied yet."""
+
+    original_messages: tuple[Message, ...] = field(repr=False)
+    compacted_messages: tuple[Message, ...] = field(repr=False)
+    summarized_rounds: int
+    kept_rounds: int
+    old_message_chars: int
+    new_message_chars: int
+    summary_chars: int
+    model_requests: int
 
 
 def estimate_message_chars(message: Message) -> int:
@@ -86,7 +100,7 @@ def select_recent_rounds(
     if max_chars < 0:
         raise ValueError("max_chars cannot be negative")
 
-    rounds = _split_rounds(messages)
+    rounds = split_rounds(messages)
     selected_reversed: list[tuple[Message, ...]] = []
     selected_chars = 0
     for conversation_round in reversed(rounds[-max_rounds:] if max_rounds else []):
@@ -110,7 +124,9 @@ def select_recent_rounds(
     )
 
 
-def _split_rounds(messages: Sequence[Message]) -> tuple[tuple[Message, ...], ...]:
+def split_rounds(messages: Sequence[Message]) -> tuple[tuple[Message, ...], ...]:
+    """Split already validated history into complete top-level user rounds."""
+
     starts = [
         index
         for index, message in enumerate(messages)

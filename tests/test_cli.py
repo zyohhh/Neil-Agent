@@ -9,7 +9,9 @@ import pytest
 from rich.console import Console
 
 from neil_agent import cli
+from neil_agent.agent import Agent
 from neil_agent.config import Settings
+from neil_agent.errors import SessionError
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -18,7 +20,7 @@ from neil_agent.schemas import (
     ToolDefinition,
 )
 from neil_agent.session import SessionStore
-from neil_agent.task import TaskStep
+from neil_agent.task import TaskStep, TaskTracker
 
 
 class FakeLLMClient:
@@ -53,6 +55,8 @@ def test_run_uses_injected_console(
         deepseek_api_key="test-key",
         workspace_root=tmp_path,
     )
+    instruction_content = "PRIVATE-PROJECT-INSTRUCTION"
+    (tmp_path / "AGENTS.md").write_text(instruction_content, encoding="utf-8")
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     monkeypatch.setattr(
         cli.ShellTools,
@@ -60,7 +64,14 @@ def test_run_uses_injected_console(
         lambda self: "## main...origin/main",
     )
     console = MagicMock(spec=Console)
-    console.input.side_effect = ["/context", "/doctor", "/status", "/help", "/exit"]
+    console.input.side_effect = [
+        "/context",
+        "/doctor",
+        "/instructions",
+        "/status",
+        "/help",
+        "/exit",
+    ]
 
     cli.run(cast(Console, console))
 
@@ -74,6 +85,9 @@ def test_run_uses_injected_console(
     assert "Neil Agent Doctor" in printed_text
     assert "API Key：已配置（值已隐藏）" in printed_text
     assert "test-key" not in printed_text
+    assert "项目指令" in printed_text
+    assert "已生效" in printed_text
+    assert instruction_content not in printed_text
     assert "最近质量检查" in printed_text
     assert "## main...origin/main" in printed_text
     assert "/status" in printed_text
@@ -81,6 +95,8 @@ def test_run_uses_injected_console(
     assert "/resume <id>" in printed_text
     assert "/delete-session <id>" in printed_text
     assert "/doctor" in printed_text
+    assert "/instructions" in printed_text
+    assert "/compact" in printed_text
     assert "Neil Agent 已退出" in printed_text
 
 
@@ -140,6 +156,8 @@ def test_successful_chat_is_saved_automatically(
         deepseek_api_key="test-key",
         workspace_root=tmp_path,
     )
+    instruction_content = "PRIVATE-PROJECT-INSTRUCTION"
+    (tmp_path / "AGENTS.md").write_text(instruction_content, encoding="utf-8")
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
     console = MagicMock(spec=Console)
@@ -154,6 +172,82 @@ def test_successful_chat_is_saved_automatically(
         "remember this",
         "saved reply",
     ]
+    payload = (
+        SessionStore(tmp_path).root / f"{index.sessions[0].session_id}.json"
+    ).read_text(encoding="utf-8")
+    assert instruction_content not in payload
+
+
+def test_run_explicitly_compacts_and_persists_complete_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    console = MagicMock(spec=Console)
+    console.input.side_effect = [
+        "first " + "x" * 1_000,
+        "second",
+        "third",
+        "/compact",
+        "/exit",
+    ]
+
+    cli.run(cast(Console, console))
+
+    index = SessionStore(tmp_path).list_sessions()
+    snapshot = SessionStore(tmp_path).load(index.sessions[0].session_id)
+    printed_text = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "对话压缩完成" in printed_text
+    assert len(snapshot.messages) == 6
+    assert snapshot.messages[0].content.startswith("[Neil Agent /compact checkpoint]")
+    assert "saved reply" in snapshot.messages[1].content
+    assert [snapshot.messages[index].content for index in (2, 4)] == [
+        "second",
+        "third",
+    ]
+
+
+def test_compaction_save_failure_keeps_original_in_memory_history(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    agent = Agent(FakeLLMClient(settings))
+    for user_input in ("first " + "x" * 1_000, "second", "third"):
+        agent.chat(user_input)
+    original_messages = agent.messages
+    real_store = SessionStore(tmp_path)
+    session_store = MagicMock(spec=SessionStore)
+    session_store.save.side_effect = SessionError("simulated save failure")
+    console = MagicMock(spec=Console)
+    renderer = cli.TerminalRenderer(cast(Console, console))
+
+    cli._compact_session(
+        cast(Console, console),
+        renderer,
+        agent,
+        cast(SessionStore, session_store),
+        real_store.new_session(),
+        TaskTracker(),
+    )
+
+    assert agent.messages == original_messages
+    printed_text = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "压缩结果未保存" in printed_text
+    assert "原历史未改变" in printed_text
 
 
 @pytest.mark.parametrize(

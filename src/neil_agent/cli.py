@@ -15,6 +15,7 @@ from .agent import Agent
 from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import NeilAgentError, SessionError
+from .instructions import ProjectInstructions, load_project_instructions
 from .llm import LLMClient
 from .schemas import ActivityEvent, ToolCall
 from .session import SessionHandle, SessionStore
@@ -27,6 +28,8 @@ HELP_COMMANDS = {"help", "/help"}
 STATUS_COMMANDS = {"status", "/status"}
 CONTEXT_COMMANDS = {"context", "/context"}
 DOCTOR_COMMANDS = {"doctor", "/doctor"}
+INSTRUCTIONS_COMMANDS = {"instructions", "/instructions"}
+COMPACT_COMMANDS = {"compact", "/compact"}
 SESSIONS_COMMANDS = {"sessions", "/sessions"}
 RESUME_COMMANDS = {"resume", "/resume"}
 DELETE_SESSION_COMMANDS = {"delete-session", "/delete-session"}
@@ -163,6 +166,7 @@ def run(console: Console) -> None:
         console.print(f"[bold red]工作区配置错误：[/bold red]{error}")
         raise SystemExit(1) from None
     filesystem_tools.register(registry)
+    project_instructions = load_project_instructions(filesystem_tools.root)
     session_store = SessionStore(filesystem_tools.root)
     current_session = session_store.new_session()
     shell_tools = ShellTools(
@@ -179,6 +183,7 @@ def run(console: Console) -> None:
     agent = Agent(
         llm,
         system_prompt=settings.system_prompt,
+        project_instructions=project_instructions.prompt_section(),
         max_rounds=settings.max_rounds,
         max_context_chars=settings.max_context_chars,
         registry=registry,
@@ -199,6 +204,7 @@ def run(console: Console) -> None:
         len(registry.definitions),
         current_session.session_id,
     )
+    _show_instruction_startup(console, project_instructions)
 
     while True:
         try:
@@ -241,6 +247,25 @@ def run(console: Console) -> None:
                     filesystem_tools.root,
                     session_store,
                     shell_tools,
+                )
+            continue
+        if command in INSTRUCTIONS_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/instructions[/yellow]")
+            else:
+                _show_instructions(console, project_instructions)
+            continue
+        if command in COMPACT_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/compact[/yellow]")
+            else:
+                _compact_session(
+                    console,
+                    renderer,
+                    agent,
+                    session_store,
+                    current_session,
+                    task_tracker,
                 )
             continue
         if command in SESSIONS_COMMANDS and not command_argument:
@@ -317,6 +342,8 @@ def _show_help(console: Console) -> None:
     console.print("  /help   显示帮助")
     console.print("  /context 显示上下文预算和当前占用")
     console.print("  /doctor 检查本地配置和运行环境")
+    console.print("  /instructions 显示项目指令加载状态")
+    console.print("  /compact 压缩较早的完整对话轮次")
     console.print("  /sessions 显示本地会话")
     console.print("  /resume <id> 恢复指定会话")
     console.print("  /delete-session <id> 确认后删除指定会话")
@@ -416,6 +443,116 @@ def _show_context(console: Console, agent: Agent) -> None:
     console.print(
         "[dim]字符数按 API JSON 近似计算；下一条用户输入也会占用预算。"
         "当前请求及其工具链不会被截断。[/dim]"
+    )
+
+
+def _show_instruction_startup(
+    console: Console,
+    instructions: ProjectInstructions,
+) -> None:
+    if instructions.active:
+        console.print(
+            f"[dim]项目指令：已加载 AGENTS.md（{instructions.size_bytes} 字节）[/dim]"
+        )
+    elif instructions.status == "invalid":
+        console.print(f"[yellow]项目指令未加载：{instructions.reason}[/yellow]")
+
+
+def _show_instructions(
+    console: Console,
+    instructions: ProjectInstructions,
+) -> None:
+    """Show instruction metadata without printing its content."""
+
+    status_text = {
+        "active": "已生效",
+        "missing": "未找到",
+        "empty": "文件为空",
+        "invalid": "未加载",
+    }[instructions.status]
+    console.print("[bold]项目指令[/bold]")
+    console.print(
+        f"  状态：{status_text}\n"
+        f"  来源：{instructions.source}\n"
+        f"  大小：{instructions.size_bytes} 字节 / {instructions.char_count} 字符",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    if instructions.reason:
+        console.print(f"[yellow]  原因：{instructions.reason}[/yellow]")
+    if instructions.active:
+        console.print(
+            "[dim]内容已加入本进程的模型系统上下文；不会显示在此处，也不会写入会话快照。[/dim]"
+        )
+    else:
+        console.print("[dim]当前没有项目指令加入模型上下文。[/dim]")
+
+
+def _compact_session(
+    console: Console,
+    renderer: TerminalRenderer,
+    agent: Agent,
+    session_store: SessionStore,
+    current_session: SessionHandle,
+    task_tracker: TaskTracker,
+) -> None:
+    """Prepare, persist, then atomically apply an explicit history compaction."""
+
+    renderer.show_activity(
+        ActivityEvent(
+            status="running",
+            message="压缩较早的对话历史",
+            details=("保留最近 2 个完整轮次",),
+        )
+    )
+    try:
+        prepared = agent.prepare_compaction()
+    except KeyboardInterrupt:
+        renderer.show_activity(
+            ActivityEvent(status="skipped", message="已取消对话压缩")
+        )
+        return
+    except NeilAgentError as error:
+        renderer.show_activity(
+            ActivityEvent(
+                status="failed",
+                message="对话压缩失败",
+                details=(f"原因：{error}", "原历史未改变"),
+            )
+        )
+        return
+
+    try:
+        session_store.save(
+            current_session,
+            prepared.compacted_messages,
+            task_tracker.steps,
+            task_tracker.latest_quality_check,
+        )
+    except SessionError as error:
+        renderer.show_activity(
+            ActivityEvent(
+                status="failed",
+                message="压缩结果未保存",
+                details=(f"原因：{error}", "原历史未改变"),
+            )
+        )
+        return
+
+    agent.apply_compaction(prepared)
+    saved_chars = max(prepared.old_message_chars - prepared.new_message_chars, 0)
+    renderer.show_activity(
+        ActivityEvent(
+            status="succeeded",
+            message="对话压缩完成",
+            details=(
+                f"已总结：{prepared.summarized_rounds} 轮",
+                f"完整保留：{prepared.kept_rounds} 轮",
+                f"摘要请求：{prepared.model_requests} 次",
+                f"历史减少：约 {saved_chars:,} 字符",
+            ),
+        )
     )
 
 
