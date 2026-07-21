@@ -10,10 +10,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 from unicodedata import category
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from .errors import SessionError
 from .schemas import Message, validate_message_history
@@ -28,11 +36,15 @@ from .task import (
     TaskTracker,
 )
 
-SESSION_FORMAT_VERSION: Literal[1] = 1
+LEGACY_SESSION_FORMAT_VERSION: Literal[1] = 1
+SESSION_FORMAT_VERSION: Literal[2] = 2
 SESSION_STATE_DIRECTORY = ".neil-agent"
 SESSION_DIRECTORY = "sessions"
 MAX_SESSION_FILE_BYTES = 25_000_000
 MAX_LISTED_SESSIONS = 50
+MAX_SESSION_TITLE_CHARS = 80
+MAX_SESSION_QUERY_CHARS = 80
+UNTITLED_SESSION = "新会话"
 SESSION_ID_PATTERN_TEXT = r"^\d{8}T\d{12}Z-[0-9a-f]{8}$"
 SESSION_ID_PATTERN = re.compile(SESSION_ID_PATTERN_TEXT)
 
@@ -84,12 +96,11 @@ class StoredQualityCheck(BaseModel):
         )
 
 
-class SessionSnapshot(BaseModel):
-    """Version 1 of one complete, resumable local session."""
+class SessionState(BaseModel):
+    """Fields shared by supported local session versions."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    version: Literal[1] = SESSION_FORMAT_VERSION
     session_id: str = Field(pattern=SESSION_ID_PATTERN_TEXT)
     created_at: AwareDatetime
     updated_at: AwareDatetime
@@ -98,7 +109,7 @@ class SessionSnapshot(BaseModel):
     latest_quality_check: StoredQualityCheck | None = None
 
     @model_validator(mode="after")
-    def validate_snapshot_state(self) -> SessionSnapshot:
+    def validate_snapshot_state(self) -> Self:
         if self.updated_at < self.created_at:
             raise ValueError("updated_at cannot be earlier than created_at")
         validate_message_history(self.messages)
@@ -121,12 +132,47 @@ class SessionSnapshot(BaseModel):
         return self.latest_quality_check.to_record()
 
 
+class SessionSnapshotV1(SessionState):
+    """Legacy snapshot retained for strict, read-only migration."""
+
+    version: Literal[1] = LEGACY_SESSION_FORMAT_VERSION
+
+    def migrate(self) -> SessionSnapshot:
+        return SessionSnapshot(
+            session_id=self.session_id,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            title=_default_session_title(self.messages),
+            messages=self.messages,
+            plan=self.plan,
+            latest_quality_check=self.latest_quality_check,
+        )
+
+
+class SessionSnapshot(SessionState):
+    """Current version of one complete, resumable local session."""
+
+    version: Literal[2] = SESSION_FORMAT_VERSION
+    title: str = Field(min_length=1, max_length=MAX_SESSION_TITLE_CHARS)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_be_safe(cls, value: str) -> str:
+        return normalize_session_title(value)
+
+
+SESSION_SNAPSHOT_ADAPTER: TypeAdapter[SessionSnapshot | SessionSnapshotV1] = (
+    TypeAdapter(SessionSnapshot | SessionSnapshotV1)
+)
+
+
 @dataclass(frozen=True, slots=True)
 class SessionHandle:
     """Identity and original creation time for the active session."""
 
     session_id: str
     created_at: datetime
+    title: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +180,7 @@ class SessionSummary:
     """Small session record displayed by ``/sessions``."""
 
     session_id: str
+    title: str
     updated_at: datetime
     round_count: int
     size_bytes: int
@@ -146,6 +193,7 @@ class SessionIndex:
 
     sessions: tuple[SessionSummary, ...]
     valid_count: int = 0
+    matched_count: int = 0
     invalid_count: int = 0
     total_size_bytes: int = 0
 
@@ -186,6 +234,7 @@ class SessionStore:
         return SessionHandle(
             session_id=snapshot.session_id,
             created_at=snapshot.created_at,
+            title=snapshot.title,
         )
 
     def save(
@@ -201,10 +250,16 @@ class SessionStore:
         created_at = self._normalize_time(handle.created_at)
         updated_at = max(self._now(), created_at)
         try:
+            title = (
+                normalize_session_title(handle.title)
+                if handle.title
+                else _default_session_title(messages)
+            )
             snapshot = SessionSnapshot(
                 session_id=handle.session_id,
                 created_at=created_at,
                 updated_at=updated_at,
+                title=title,
                 messages=tuple(messages),
                 plan=tuple(StoredTaskStep.from_task_step(step) for step in steps),
                 latest_quality_check=(
@@ -216,42 +271,40 @@ class SessionStore:
         except ValueError as error:
             raise SessionError(f"无法保存无效会话：{error}") from error
 
-        payload = (snapshot.model_dump_json(indent=2) + "\n").encode("utf-8")
-        if len(payload) > MAX_SESSION_FILE_BYTES:
-            raise SessionError(
-                f"会话快照超过 {MAX_SESSION_FILE_BYTES} 字节，未执行保存。"
-            )
-
-        root = self._resolved_root(create=True)
-        assert root is not None
-        target = root / f"{handle.session_id}.json"
-        descriptor = -1
-        temporary_path: Path | None = None
-        try:
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{handle.session_id}.",
-                suffix=".tmp",
-                dir=root,
-            )
-            temporary_path = Path(temporary_name)
-            output = os.fdopen(descriptor, "wb")
-            descriptor = -1
-            with output:
-                output.write(payload)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary_path, target)
-        except OSError as error:
-            raise SessionError(f"本地会话保存失败：{error}") from error
-        finally:
-            if descriptor != -1:
-                os.close(descriptor)
-            if temporary_path is not None and temporary_path.exists():
-                try:
-                    temporary_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        self._write_snapshot(snapshot)
         return snapshot
+
+    def rename(self, session_id: str, title: str) -> SessionSnapshot:
+        """Atomically rename one saved session without changing its contents."""
+
+        normalized = normalize_session_title(title)
+        snapshot = self.load(session_id)
+        renamed = SessionSnapshot(
+            session_id=snapshot.session_id,
+            created_at=snapshot.created_at,
+            updated_at=max(self._now(), snapshot.updated_at),
+            title=normalized,
+            messages=snapshot.messages,
+            plan=snapshot.plan,
+            latest_quality_check=snapshot.latest_quality_check,
+        )
+        self._write_snapshot(renamed)
+        return renamed
+
+    def has_saved(self, session_id: str) -> bool:
+        """Return whether any exact session path already exists."""
+
+        self._validate_session_id(session_id)
+        root = self._resolved_root(create=False)
+        if root is None:
+            return False
+        try:
+            (root / f"{session_id}.json").lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise SessionError("无法检查本地会话文件。") from error
+        return True
 
     def load(self, session_id: str) -> SessionSnapshot:
         """Load one explicitly selected session by its exact ID."""
@@ -287,9 +340,10 @@ class SessionStore:
             raise SessionError(f"删除本地会话失败：{error}") from error
         return summary
 
-    def list_sessions(self) -> SessionIndex:
+    def list_sessions(self, query: str = "") -> SessionIndex:
         """Return newest valid snapshots without failing on one corrupt file."""
 
+        normalized_query = normalize_session_query(query)
         root = self._resolved_root(create=False)
         if root is None:
             return SessionIndex(())
@@ -312,11 +366,14 @@ class SessionStore:
             except SessionError:
                 invalid_count += 1
                 continue
-            summaries.append(self._summary(snapshot, size_bytes=size_bytes))
+            summary = self._summary(snapshot, size_bytes=size_bytes)
+            if not normalized_query or _summary_matches(summary, normalized_query):
+                summaries.append(summary)
         summaries.sort(key=lambda item: item.updated_at, reverse=True)
         return SessionIndex(
             sessions=tuple(summaries[:MAX_LISTED_SESSIONS]),
-            valid_count=len(summaries),
+            valid_count=len(paths) - invalid_count,
+            matched_count=len(summaries),
             invalid_count=invalid_count,
             total_size_bytes=total_size_bytes,
         )
@@ -332,7 +389,10 @@ class SessionStore:
             if resolved.stat().st_size > MAX_SESSION_FILE_BYTES:
                 raise SessionError("会话快照过大，拒绝读取。")
             payload = resolved.read_bytes()
-            snapshot = SessionSnapshot.model_validate_json(payload)
+            parsed = SESSION_SNAPSHOT_ADAPTER.validate_json(payload)
+            snapshot = (
+                parsed.migrate() if isinstance(parsed, SessionSnapshotV1) else parsed
+            )
         except SessionError:
             raise
         except (OSError, ValueError) as error:
@@ -340,6 +400,43 @@ class SessionStore:
         if snapshot.session_id != expected_id:
             raise SessionError("会话文件名与内部 ID 不一致。")
         return snapshot
+
+    def _write_snapshot(self, snapshot: SessionSnapshot) -> None:
+        payload = (snapshot.model_dump_json(indent=2) + "\n").encode("utf-8")
+        if len(payload) > MAX_SESSION_FILE_BYTES:
+            raise SessionError(
+                f"会话快照超过 {MAX_SESSION_FILE_BYTES} 字节，未执行保存。"
+            )
+
+        root = self._resolved_root(create=True)
+        assert root is not None
+        target = root / f"{snapshot.session_id}.json"
+        descriptor = -1
+        temporary_path: Path | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{snapshot.session_id}.",
+                suffix=".tmp",
+                dir=root,
+            )
+            temporary_path = Path(temporary_name)
+            output = os.fdopen(descriptor, "wb")
+            descriptor = -1
+            with output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary_path, target)
+        except OSError as error:
+            raise SessionError(f"本地会话保存失败：{error}") from error
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+            if temporary_path is not None and temporary_path.exists():
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _resolved_root(self, *, create: bool) -> Path | None:
         try:
@@ -386,11 +483,55 @@ class SessionStore:
         preview = _single_line(user_messages[-1] if user_messages else "（空会话）")
         return SessionSummary(
             session_id=snapshot.session_id,
+            title=snapshot.title,
             updated_at=snapshot.updated_at,
             round_count=len(user_messages),
             size_bytes=size_bytes,
             preview=preview,
         )
+
+
+def normalize_session_title(value: str) -> str:
+    """Validate and normalize one human-entered local session title."""
+
+    title = value.strip()
+    if not title:
+        raise SessionError("会话标题不能为空。")
+    if len(title) > MAX_SESSION_TITLE_CHARS:
+        raise SessionError(f"会话标题最多 {MAX_SESSION_TITLE_CHARS} 个字符。")
+    if any(category(character).startswith("C") for character in title):
+        raise SessionError("会话标题不能包含控制或格式字符。")
+    return title
+
+
+def normalize_session_query(value: str) -> str:
+    """Validate a bounded, single-line local session search query."""
+
+    query = value.strip()
+    if len(query) > MAX_SESSION_QUERY_CHARS:
+        raise SessionError(f"会话搜索最多 {MAX_SESSION_QUERY_CHARS} 个字符。")
+    if any(category(character).startswith("C") for character in query):
+        raise SessionError("会话搜索不能包含控制或格式字符。")
+    return query.casefold()
+
+
+def _default_session_title(messages: Sequence[Message]) -> str:
+    first_request = next(
+        (
+            message.content
+            for message in messages
+            if message.role == "user" and not message.tool_results
+        ),
+        UNTITLED_SESSION,
+    )
+    return _single_line(first_request, max_chars=MAX_SESSION_TITLE_CHARS)
+
+
+def _summary_matches(summary: SessionSummary, query: str) -> bool:
+    return any(
+        query in value.casefold()
+        for value in (summary.session_id, summary.title, summary.preview)
+    )
 
 
 def _single_line(value: str, max_chars: int = 80) -> str:

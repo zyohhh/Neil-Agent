@@ -1,7 +1,13 @@
-"""Structural checks for the repository's manual regression scenarios."""
+"""Structural and executable checks for repository regression scenarios."""
 
 import json
+import sys
 from pathlib import Path
+
+import pytest
+
+from neil_agent import evals as eval_module
+from neil_agent.evals import run_offline_evals
 
 
 def test_eval_tasks_have_unique_ids_and_actionable_expectations() -> None:
@@ -14,3 +20,23 @@ def test_eval_tasks_have_unique_ids_and_actionable_expectations() -> None:
         assert task["capability"]
         assert task["steps"]
         assert task["expected"]
+
+
+def test_all_declared_offline_evals_pass_without_network_access() -> None:
+    path = Path(__file__).parents[1] / "evals" / "tasks.json"
+
+    results = run_offline_evals(path)
+
+    assert len(results) >= 5
+    assert all(result.passed for result in results), results
+
+
+def test_real_eval_requires_separate_api_cost_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["neil-agent-eval", "--real-deepseek"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        eval_module.main()
+
+    assert exit_info.value.code == 2

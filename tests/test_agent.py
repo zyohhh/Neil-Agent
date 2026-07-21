@@ -173,6 +173,25 @@ def test_agent_appends_project_instructions_without_storing_them_as_messages() -
     assert "PROJECT-RULE" not in " ".join(message.content for message in agent.messages)
 
 
+def test_agent_reloads_project_instructions_without_changing_history() -> None:
+    model = FakeChatModel()
+    agent = Agent(
+        model,
+        system_prompt="Base prompt.",
+        project_instructions="OLD-RULE",
+    )
+    agent.chat("first")
+    original = agent.messages
+
+    agent.set_project_instructions("NEW-RULE")
+    agent.chat("second")
+
+    assert agent.messages[:2] == original
+    assert "OLD-RULE" in model.system_prompts[0]
+    assert "NEW-RULE" in model.system_prompts[1]
+    assert "OLD-RULE" not in model.system_prompts[1]
+
+
 def test_compaction_is_prepared_without_mutation_and_keeps_recent_tool_round() -> None:
     model = FakeChatModel(response="Durable summary of rounds one and two.")
     agent = Agent(model)

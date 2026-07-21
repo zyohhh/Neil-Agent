@@ -122,11 +122,12 @@ class Agent:
             raise ValueError("max_tool_rounds must be at least 1")
 
         self._llm = llm
-        prompt = self._with_project_instructions(system_prompt, project_instructions)
-        self._system_prompt = self._with_tool_workflow(prompt, registry)
+        self._base_system_prompt = system_prompt
+        self._project_instructions = project_instructions
+        self._registry = registry
+        self._system_prompt = self._build_system_prompt()
         self._max_rounds = max_rounds
         self._max_context_chars = max_context_chars
-        self._registry = registry
         self._max_tool_rounds = max_tool_rounds
         self._approval_handler = approval_handler
         self._task_tracker = task_tracker
@@ -145,6 +146,17 @@ class Agent:
         self._messages.clear()
         if self._task_tracker is not None:
             self._task_tracker.clear()
+
+    def set_project_instructions(self, project_instructions: str) -> None:
+        """Atomically replace project instructions without changing history."""
+
+        rebuilt = self._with_project_instructions(
+            self._base_system_prompt,
+            project_instructions,
+        )
+        rebuilt = self._with_tool_workflow(rebuilt, self._registry)
+        self._project_instructions = project_instructions
+        self._system_prompt = rebuilt
 
     def context_stats(self) -> ContextStats:
         """Describe stored history and the history available to the next request."""
@@ -569,6 +581,13 @@ class Agent:
         if not instructions:
             return system_prompt
         return f"{system_prompt.rstrip()}\n\n{instructions}"
+
+    def _build_system_prompt(self) -> str:
+        prompt = self._with_project_instructions(
+            self._base_system_prompt,
+            self._project_instructions,
+        )
+        return self._with_tool_workflow(prompt, self._registry)
 
     @staticmethod
     def _with_tool_workflow(

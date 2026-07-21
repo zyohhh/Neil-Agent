@@ -19,3 +19,7 @@ class ToolError(NeilAgentError):
 
 class SessionError(NeilAgentError):
     """A local session storage or validation error."""
+
+
+class InstructionError(NeilAgentError):
+    """A project-instruction load, initialization, or reload error."""

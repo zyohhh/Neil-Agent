@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 neil-agent = "neil_agent:main"
+neil-agent-eval = "neil_agent.evals:main"
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

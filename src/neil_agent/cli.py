@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import monotonic
 
@@ -15,10 +15,15 @@ from .agent import Agent
 from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import NeilAgentError, SessionError
-from .instructions import ProjectInstructions, load_project_instructions
+from .instructions import (
+    ProjectInstructions,
+    apply_project_instructions_init,
+    load_project_instructions,
+    prepare_project_instructions_init,
+)
 from .llm import LLMClient
 from .schemas import ActivityEvent, ToolCall
-from .session import SessionHandle, SessionStore
+from .session import SessionHandle, SessionStore, normalize_session_title
 from .task import TaskTracker
 from .tools import FileSystemTools, ShellTools, ToolRegistry
 
@@ -29,10 +34,13 @@ STATUS_COMMANDS = {"status", "/status"}
 CONTEXT_COMMANDS = {"context", "/context"}
 DOCTOR_COMMANDS = {"doctor", "/doctor"}
 INSTRUCTIONS_COMMANDS = {"instructions", "/instructions"}
+RELOAD_INSTRUCTIONS_COMMANDS = {"reload-instructions", "/reload-instructions"}
+INIT_COMMANDS = {"init", "/init"}
 COMPACT_COMMANDS = {"compact", "/compact"}
 SESSIONS_COMMANDS = {"sessions", "/sessions"}
 RESUME_COMMANDS = {"resume", "/resume"}
 DELETE_SESSION_COMMANDS = {"delete-session", "/delete-session"}
+RENAME_SESSION_COMMANDS = {"rename-session", "/rename-session"}
 
 
 @dataclass(slots=True)
@@ -166,7 +174,11 @@ def run(console: Console) -> None:
         console.print(f"[bold red]工作区配置错误：[/bold red]{error}")
         raise SystemExit(1) from None
     filesystem_tools.register(registry)
-    project_instructions = load_project_instructions(filesystem_tools.root)
+    instruction_target = _instruction_target(filesystem_tools.root)
+    project_instructions = load_project_instructions(
+        filesystem_tools.root,
+        instruction_target,
+    )
     session_store = SessionStore(filesystem_tools.root)
     current_session = session_store.new_session()
     shell_tools = ShellTools(
@@ -255,6 +267,34 @@ def run(console: Console) -> None:
             else:
                 _show_instructions(console, project_instructions)
             continue
+        if command in RELOAD_INSTRUCTIONS_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/reload-instructions[/yellow]")
+            else:
+                reloaded = _reload_instructions(
+                    console,
+                    agent,
+                    filesystem_tools.root,
+                    instruction_target,
+                    project_instructions,
+                )
+                if reloaded is not None:
+                    project_instructions = reloaded
+            continue
+        if command in INIT_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/init[/yellow]")
+            else:
+                initialized = _initialize_instructions(
+                    console,
+                    agent,
+                    filesystem_tools.root,
+                    instruction_target,
+                    project_instructions,
+                )
+                if initialized is not None:
+                    project_instructions = initialized
+            continue
         if command in COMPACT_COMMANDS:
             if command_argument:
                 console.print("[yellow]用法：/compact[/yellow]")
@@ -268,8 +308,13 @@ def run(console: Console) -> None:
                     task_tracker,
                 )
             continue
-        if command in SESSIONS_COMMANDS and not command_argument:
-            _show_sessions(console, session_store, current_session.session_id)
+        if command in SESSIONS_COMMANDS:
+            _show_sessions(
+                console,
+                session_store,
+                current_session.session_id,
+                command_argument.strip(),
+            )
             continue
         if command in RESUME_COMMANDS:
             restored_session = _resume_session(
@@ -290,6 +335,16 @@ def run(console: Console) -> None:
                 current_session.session_id,
             )
             continue
+        if command in RENAME_SESSION_COMMANDS:
+            renamed = _rename_session(
+                console,
+                session_store,
+                current_session,
+                command_argument,
+            )
+            if renamed is not None:
+                current_session = renamed
+            continue
         if not user_input:
             continue
 
@@ -307,12 +362,13 @@ def run(console: Console) -> None:
         else:
             renderer.finish_answer()
             try:
-                session_store.save(
+                snapshot = session_store.save(
                     current_session,
                     agent.messages,
                     task_tracker.steps,
                     task_tracker.latest_quality_check,
                 )
+                current_session = session_store.handle_for(snapshot)
             except SessionError as error:
                 console.print(f"[yellow]本地会话未保存：[/yellow]{error}")
 
@@ -343,9 +399,12 @@ def _show_help(console: Console) -> None:
     console.print("  /context 显示上下文预算和当前占用")
     console.print("  /doctor 检查本地配置和运行环境")
     console.print("  /instructions 显示项目指令加载状态")
+    console.print("  /reload-instructions 重新加载项目指令")
+    console.print("  /init   预览并创建根 AGENTS.md（仅限不存在时）")
     console.print("  /compact 压缩较早的完整对话轮次")
-    console.print("  /sessions 显示本地会话")
+    console.print("  /sessions [关键词] 显示或搜索本地会话")
     console.print("  /resume <id> 恢复指定会话")
+    console.print("  /rename-session <标题> 重命名当前会话")
     console.print("  /delete-session <id> 确认后删除指定会话")
     console.print("  /status 显示任务、检查和 Git 状态")
 
@@ -363,7 +422,8 @@ def _show_status(
     except NeilAgentError as error:
         git_status = f"不可用：{error}"
     status = (
-        f"当前会话\n  {current_session.session_id}\n\n"
+        f"当前会话\n  {current_session.title or '新会话'}\n"
+        f"  {current_session.session_id}\n\n"
         f"{task_tracker.format_status(git_status)}"
     )
     console.print(
@@ -378,35 +438,38 @@ def _show_sessions(
     console: Console,
     session_store: SessionStore,
     current_session_id: str,
+    query: str = "",
 ) -> None:
     """List newest valid local sessions without calling the model."""
 
     try:
-        index = session_store.list_sessions()
+        index = session_store.list_sessions(query)
     except SessionError as error:
         console.print(f"[bold red]无法读取本地会话：[/bold red]{error}")
         return
 
-    console.print("[bold]本地会话[/bold]")
+    heading = "本地会话" if not query else f"本地会话搜索：{query}"
+    console.print(heading, style="bold", markup=False, highlight=False)
     console.print(
         f"  存储占用：{_format_bytes(index.total_size_bytes)}；"
-        f"有效会话：{index.valid_count} 个",
+        f"有效会话：{index.valid_count} 个；匹配：{index.matched_count} 个",
         markup=False,
         highlight=False,
     )
     if not index.sessions:
-        console.print("  （尚无已保存会话）")
+        empty_text = "（没有匹配会话）" if query else "（尚无已保存会话）"
+        console.print(f"  {empty_text}")
     for summary in index.sessions:
         marker = "*" if summary.session_id == current_session_id else " "
         updated_at = summary.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
         console.print(
-            f"{marker} {summary.session_id}  {updated_at}  "
+            f"{marker} {summary.title}  {updated_at}  "
             f"{summary.round_count} 轮  {_format_bytes(summary.size_bytes)}",
             markup=False,
             highlight=False,
         )
         console.print(
-            f"    {summary.preview}",
+            f"    {summary.session_id} · {summary.preview}",
             style="dim",
             markup=False,
             highlight=False,
@@ -452,7 +515,8 @@ def _show_instruction_startup(
 ) -> None:
     if instructions.active:
         console.print(
-            f"[dim]项目指令：已加载 AGENTS.md（{instructions.size_bytes} 字节）[/dim]"
+            f"[dim]项目指令：已加载 {len(instructions.active_sources)} 个 "
+            f"AGENTS.md（共 {instructions.size_bytes} 字节）[/dim]"
         )
     elif instructions.status == "invalid":
         console.print(f"[yellow]项目指令未加载：{instructions.reason}[/yellow]")
@@ -473,12 +537,20 @@ def _show_instructions(
     console.print("[bold]项目指令[/bold]")
     console.print(
         f"  状态：{status_text}\n"
-        f"  来源：{instructions.source}\n"
-        f"  大小：{instructions.size_bytes} 字节 / {instructions.char_count} 字符",
+        f"  目标：{instructions.target}\n"
+        f"  合计：{instructions.size_bytes} 字节 / {instructions.char_count} 字符",
         markup=False,
         highlight=False,
         soft_wrap=True,
     )
+    for index, source in enumerate(instructions.active_sources, start=1):
+        console.print(
+            f"  {index}. {source.source}（{source.size_bytes} 字节，"
+            f"作用域：{source.scope}）",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
     if instructions.reason:
         console.print(f"[yellow]  原因：{instructions.reason}[/yellow]")
     if instructions.active:
@@ -487,6 +559,108 @@ def _show_instructions(
         )
     else:
         console.print("[dim]当前没有项目指令加入模型上下文。[/dim]")
+
+
+def _reload_instructions(
+    console: Console,
+    agent: Agent,
+    workspace_root: Path,
+    instruction_target: Path,
+    current: ProjectInstructions,
+) -> ProjectInstructions | None:
+    """Reload a complete instruction chain, retaining the old snapshot on failure."""
+
+    try:
+        candidate = load_project_instructions(workspace_root, instruction_target)
+    except ValueError as error:
+        console.print(f"[bold red]项目指令重新加载失败：[/bold red]{error}")
+        console.print("[yellow]继续使用旧的有效指令快照。[/yellow]")
+        return None
+    if candidate.status == "invalid":
+        console.print(f"[bold red]项目指令重新加载失败：[/bold red]{candidate.reason}")
+        if current.active:
+            console.print("[yellow]继续使用旧的有效指令快照。[/yellow]")
+        else:
+            console.print("[yellow]模型上下文仍不包含项目指令。[/yellow]")
+        return None
+
+    agent.set_project_instructions(candidate.prompt_section())
+    if candidate.active:
+        console.print(
+            f"[green]已重新加载 {len(candidate.active_sources)} 个项目指令文件。[/green]"
+        )
+    else:
+        console.print("[green]重新加载完成；当前没有生效的项目指令。[/green]")
+    return candidate
+
+
+def _initialize_instructions(
+    console: Console,
+    agent: Agent,
+    workspace_root: Path,
+    instruction_target: Path,
+    current: ProjectInstructions,
+) -> ProjectInstructions | None:
+    """Preview and explicitly approve a non-overwriting root instruction draft."""
+
+    try:
+        candidate = prepare_project_instructions_init(workspace_root)
+    except NeilAgentError as error:
+        console.print(f"[bold red]无法初始化项目指令：[/bold red]{error}")
+        return None
+
+    console.print("\n[bold yellow]创建根目录 AGENTS.md[/bold yellow]")
+    console.print(
+        f"目标：{candidate.source}\n大小：{candidate.size_bytes} 字节",
+        markup=False,
+        highlight=False,
+    )
+    console.print(candidate.preview, markup=False, highlight=False, soft_wrap=True)
+    try:
+        answer = console.input("[bold yellow]创建该文件？[y/N][/bold yellow] ")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer.strip().lower() not in {"y", "yes"}:
+        console.print("[yellow]已取消创建。[/yellow]")
+        return None
+
+    try:
+        apply_project_instructions_init(candidate)
+    except NeilAgentError as error:
+        console.print(f"[bold red]创建项目指令失败：[/bold red]{error}")
+        return None
+    console.print(
+        f"已创建：{candidate.source}",
+        style="green",
+        markup=False,
+        highlight=False,
+    )
+    reloaded = _reload_instructions(
+        console,
+        agent,
+        workspace_root,
+        instruction_target,
+        current,
+    )
+    if reloaded is not None:
+        console.print("[green]AGENTS.md 已创建并加入当前模型上下文。[/green]")
+    else:
+        console.print(
+            "[yellow]根 AGENTS.md 已创建，但完整指令链未能加载；"
+            "请修复提示的问题后运行 /reload-instructions。[/yellow]"
+        )
+    return reloaded
+
+
+def _instruction_target(workspace_root: Path) -> Path:
+    """Use the launch directory when it is safely inside the configured workspace."""
+
+    try:
+        current = Path.cwd().resolve(strict=True)
+        current.relative_to(workspace_root)
+    except (OSError, ValueError):
+        return workspace_root
+    return current if current.is_dir() else workspace_root
 
 
 def _compact_session(
@@ -656,6 +830,45 @@ def _delete_session(
     console.print(f"[green]已删除本地会话：{session_id}[/green]")
 
 
+def _rename_session(
+    console: Console,
+    session_store: SessionStore,
+    current_session: SessionHandle,
+    title: str,
+) -> SessionHandle | None:
+    """Rename the current session locally without calling the model."""
+
+    try:
+        normalized = normalize_session_title(title)
+    except SessionError as error:
+        console.print(
+            f"[yellow]用法：/rename-session <标题>（最多 80 个字符）[/yellow]\n{error}"
+        )
+        return None
+
+    if not session_store.has_saved(current_session.session_id):
+        renamed = replace(current_session, title=normalized)
+        console.print(
+            f"当前会话已命名为：{normalized}（首次回答后保存）",
+            style="green",
+            markup=False,
+            highlight=False,
+        )
+        return renamed
+    try:
+        snapshot = session_store.rename(current_session.session_id, normalized)
+    except SessionError as error:
+        console.print(f"[bold red]重命名会话失败：[/bold red]{error}")
+        return None
+    console.print(
+        f"当前会话已重命名为：{snapshot.title}",
+        style="green",
+        markup=False,
+        highlight=False,
+    )
+    return session_store.handle_for(snapshot)
+
+
 def _format_bytes(size_bytes: int) -> str:
     """Format a small local-storage value with binary units."""
 
@@ -693,8 +906,11 @@ def _resume_session(
         return None
 
     console.print(
-        f"[green]已恢复本地会话：{snapshot.session_id}"
-        f"（{len(snapshot.messages)} 条消息）[/green]"
+        f"已恢复本地会话：{snapshot.title} · {snapshot.session_id}"
+        f"（{len(snapshot.messages)} 条消息）",
+        style="green",
+        markup=False,
+        highlight=False,
     )
     console.print(
         task_tracker.format_plan(),

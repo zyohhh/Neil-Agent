@@ -12,6 +12,7 @@ from neil_agent import cli
 from neil_agent.agent import Agent
 from neil_agent.config import Settings
 from neil_agent.errors import SessionError
+from neil_agent.instructions import load_project_instructions
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -26,6 +27,7 @@ from neil_agent.task import TaskStep, TaskTracker
 class FakeLLMClient:
     def __init__(self, settings: Settings, retry_handler: object | None = None) -> None:
         self.settings = settings
+        self.system_prompts: list[str] = []
 
     def complete(
         self,
@@ -33,6 +35,7 @@ class FakeLLMClient:
         *,
         system_prompt: str,
     ) -> str:
+        self.system_prompts.append(system_prompt)
         return "saved reply"
 
     def stream(
@@ -42,6 +45,7 @@ class FakeLLMClient:
         system_prompt: str,
         tools: Sequence[ToolDefinition] = (),
     ) -> Iterator[str | ModelResponse]:
+        self.system_prompts.append(system_prompt)
         yield "saved reply"
         yield ModelResponse(content="saved reply")
 
@@ -96,7 +100,10 @@ def test_run_uses_injected_console(
     assert "/delete-session <id>" in printed_text
     assert "/doctor" in printed_text
     assert "/instructions" in printed_text
+    assert "/reload-instructions" in printed_text
+    assert "/init" in printed_text
     assert "/compact" in printed_text
+    assert "/rename-session <标题>" in printed_text
     assert "Neil Agent 已退出" in printed_text
 
 
@@ -248,6 +255,119 @@ def test_compaction_save_failure_keeps_original_in_memory_history(
     )
     assert "压缩结果未保存" in printed_text
     assert "原历史未改变" in printed_text
+
+
+def test_reload_instructions_keeps_old_snapshot_when_new_chain_is_invalid(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "AGENTS.md"
+    source.write_text("OLD-RULE", encoding="utf-8")
+    current = load_project_instructions(tmp_path)
+    model = FakeLLMClient(
+        Settings(_env_file=None, deepseek_api_key="test-key", workspace_root=tmp_path)
+    )
+    agent = Agent(model, project_instructions=current.prompt_section())
+    console = MagicMock(spec=Console)
+    source.write_bytes(b"\xff\xfe")
+
+    reloaded = cli._reload_instructions(
+        cast(Console, console),
+        agent,
+        tmp_path,
+        tmp_path,
+        current,
+    )
+    agent.chat("verify")
+
+    assert reloaded is None
+    assert "OLD-RULE" in model.system_prompts[-1]
+    printed_text = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "继续使用旧的有效指令快照" in printed_text
+
+
+def test_reload_instructions_replaces_prompt_without_restarting(tmp_path: Path) -> None:
+    source = tmp_path / "AGENTS.md"
+    source.write_text("OLD-RULE", encoding="utf-8")
+    current = load_project_instructions(tmp_path)
+    model = FakeLLMClient(
+        Settings(_env_file=None, deepseek_api_key="test-key", workspace_root=tmp_path)
+    )
+    agent = Agent(model, project_instructions=current.prompt_section())
+    console = MagicMock(spec=Console)
+    source.write_text("NEW-RULE", encoding="utf-8")
+
+    reloaded = cli._reload_instructions(
+        cast(Console, console),
+        agent,
+        tmp_path,
+        tmp_path,
+        current,
+    )
+    agent.chat("verify")
+
+    assert reloaded is not None
+    assert "NEW-RULE" in model.system_prompts[-1]
+    assert "OLD-RULE" not in model.system_prompts[-1]
+
+
+@pytest.mark.parametrize("answer", ["", "y"])
+def test_init_requires_approval_and_never_overwrites(
+    answer: str,
+    tmp_path: Path,
+) -> None:
+    current = load_project_instructions(tmp_path)
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    agent = Agent(FakeLLMClient(settings))
+    console = MagicMock(spec=Console)
+    console.input.return_value = answer
+
+    initialized = cli._initialize_instructions(
+        cast(Console, console),
+        agent,
+        tmp_path,
+        tmp_path,
+        current,
+    )
+
+    assert (tmp_path / "AGENTS.md").exists() is (answer == "y")
+    assert (initialized is not None) is (answer == "y")
+
+
+def test_run_renames_and_searches_current_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    console = MagicMock(spec=Console)
+    console.input.side_effect = [
+        "investigate parser behavior",
+        "/rename-session Parser work",
+        "/sessions parser",
+        "/exit",
+    ]
+
+    cli.run(cast(Console, console))
+
+    index = SessionStore(tmp_path).list_sessions("parser")
+    assert index.matched_count == 1
+    assert index.sessions[0].title == "Parser work"
+    printed_text = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "本地会话搜索：parser" in printed_text
+    assert "Parser work" in printed_text
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,7 @@ import pytest
 from neil_agent import session as session_module
 from neil_agent.errors import SessionError
 from neil_agent.schemas import Message
-from neil_agent.session import SessionStore
+from neil_agent.session import MAX_SESSION_TITLE_CHARS, SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 
 NOW = datetime(2026, 7, 20, 8, 30, tzinfo=timezone.utc)
@@ -53,11 +53,13 @@ def test_session_round_trip_is_versioned_and_excludes_environment_secrets(
     index = store.list_sessions()
     payload = (store.root / f"{handle.session_id}.json").read_text(encoding="utf-8")
 
-    assert saved.version == 1
+    assert saved.version == 2
+    assert saved.title == "inspect the project"
     assert loaded == saved
     assert loaded.restored_steps() == steps
     assert loaded.restored_quality_check() == quality
-    assert '"version": 1' in payload
+    assert '"version": 2' in payload
+    assert '"title": "inspect the project"' in payload
     assert "must-not-be-persisted" not in payload
     assert list(store.root.glob("*.tmp")) == []
     assert index.invalid_count == 0
@@ -99,7 +101,7 @@ def test_listing_skips_corrupt_files_and_load_rejects_invalid_ids(
     current_payload = (store.root / f"{handle.session_id}.json").read_text(
         encoding="utf-8"
     )
-    future_payload = current_payload.replace('"version": 1', '"version": 2').replace(
+    future_payload = current_payload.replace('"version": 2', '"version": 3').replace(
         handle.session_id,
         future_id,
     )
@@ -140,3 +142,45 @@ def test_session_summary_and_explicit_delete_update_storage_usage(
     assert index.total_size_bytes == 0
     with pytest.raises(SessionError, match="未找到本地会话"):
         store.delete(handle.session_id)
+
+
+def test_loads_legacy_v1_snapshot_and_migrates_on_next_save(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    handle = store.new_session()
+    current = store.save(handle, _messages(), (), None)
+    path = store.root / f"{handle.session_id}.json"
+    legacy_payload = current.model_dump(mode="json")
+    legacy_payload["version"] = 1
+    legacy_payload.pop("title")
+    import json
+
+    path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    migrated = store.load(handle.session_id)
+    rewritten = store.save(store.handle_for(migrated), migrated.messages, (), None)
+
+    assert migrated.version == 2
+    assert migrated.title == "inspect the project"
+    assert rewritten.version == 2
+    assert '"version": 2' in path.read_text(encoding="utf-8")
+
+
+def test_session_titles_can_be_renamed_and_searched_locally(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    handle = store.new_session()
+    saved = store.save(handle, _messages(), (), None)
+
+    renamed = store.rename(saved.session_id, "Parser investigation")
+    by_title = store.list_sessions("parser")
+    by_preview = store.list_sessions("inspect")
+    missing = store.list_sessions("unrelated")
+
+    assert renamed.title == "Parser investigation"
+    assert by_title.sessions[0].title == "Parser investigation"
+    assert by_preview.matched_count == 1
+    assert missing.valid_count == 1
+    assert missing.matched_count == 0
+    with pytest.raises(SessionError, match="最多"):
+        store.rename(saved.session_id, "x" * (MAX_SESSION_TITLE_CHARS + 1))
+    with pytest.raises(SessionError, match="控制"):
+        store.list_sessions("unsafe\nquery")
