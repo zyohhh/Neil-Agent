@@ -22,7 +22,7 @@ from neil_agent.task import TaskStep
 
 
 class FakeLLMClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, retry_handler: object | None = None) -> None:
         self.settings = settings
 
     def complete(
@@ -60,7 +60,7 @@ def test_run_uses_injected_console(
         lambda self: "## main...origin/main",
     )
     console = MagicMock(spec=Console)
-    console.input.side_effect = ["/context", "/status", "/help", "/exit"]
+    console.input.side_effect = ["/context", "/doctor", "/status", "/help", "/exit"]
 
     cli.run(cast(Console, console))
 
@@ -71,12 +71,16 @@ def test_run_uses_injected_console(
     assert "可用工具：12 个（高风险操作需确认）" in printed_text
     assert "当前任务计划" in printed_text
     assert "上下文状态" in printed_text
+    assert "Neil Agent Doctor" in printed_text
+    assert "API Key：已配置（值已隐藏）" in printed_text
+    assert "test-key" not in printed_text
     assert "最近质量检查" in printed_text
     assert "## main...origin/main" in printed_text
     assert "/status" in printed_text
     assert "/sessions" in printed_text
     assert "/resume <id>" in printed_text
     assert "/delete-session <id>" in printed_text
+    assert "/doctor" in printed_text
     assert "Neil Agent 已退出" in printed_text
 
 

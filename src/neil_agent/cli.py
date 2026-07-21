@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
 
 from pydantic import ValidationError
@@ -11,7 +12,8 @@ from rich.status import Status
 from rich.text import Text
 
 from .agent import Agent
-from .config import get_settings
+from .config import Settings, get_settings
+from .diagnostics import run_diagnostics
 from .errors import NeilAgentError, SessionError
 from .llm import LLMClient
 from .schemas import ActivityEvent, ToolCall
@@ -24,6 +26,7 @@ CLEAR_COMMANDS = {"clear", "/clear"}
 HELP_COMMANDS = {"help", "/help"}
 STATUS_COMMANDS = {"status", "/status"}
 CONTEXT_COMMANDS = {"context", "/context"}
+DOCTOR_COMMANDS = {"doctor", "/doctor"}
 SESSIONS_COMMANDS = {"sessions", "/sessions"}
 RESUME_COMMANDS = {"resume", "/resume"}
 DELETE_SESSION_COMMANDS = {"delete-session", "/delete-session"}
@@ -172,7 +175,7 @@ def run(console: Console) -> None:
     task_tracker = TaskTracker(change_handler=renderer.show_plan)
     task_tracker.register(registry)
 
-    llm = LLMClient(settings)
+    llm = LLMClient(settings, retry_handler=renderer.show_activity)
     agent = Agent(
         llm,
         system_prompt=settings.system_prompt,
@@ -227,6 +230,18 @@ def run(console: Console) -> None:
                 console.print("[yellow]用法：/context[/yellow]")
             else:
                 _show_context(console, agent)
+            continue
+        if command in DOCTOR_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/doctor[/yellow]")
+            else:
+                _show_doctor(
+                    console,
+                    settings,
+                    filesystem_tools.root,
+                    session_store,
+                    shell_tools,
+                )
             continue
         if command in SESSIONS_COMMANDS and not command_argument:
             _show_sessions(console, session_store, current_session.session_id)
@@ -301,6 +316,7 @@ def _show_help(console: Console) -> None:
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
     console.print("  /context 显示上下文预算和当前占用")
+    console.print("  /doctor 检查本地配置和运行环境")
     console.print("  /sessions 显示本地会话")
     console.print("  /resume <id> 恢复指定会话")
     console.print("  /delete-session <id> 确认后删除指定会话")
@@ -401,6 +417,58 @@ def _show_context(console: Console, agent: Agent) -> None:
         "[dim]字符数按 API JSON 近似计算；下一条用户输入也会占用预算。"
         "当前请求及其工具链不会被截断。[/dim]"
     )
+
+
+def _show_doctor(
+    console: Console,
+    settings: Settings,
+    workspace_root: Path,
+    session_store: SessionStore,
+    shell_tools: ShellTools,
+) -> None:
+    """Display read-only local diagnostics without calling DeepSeek."""
+
+    report = run_diagnostics(
+        settings,
+        workspace_root,
+        session_store,
+        shell_tools,
+    )
+    console.print("[bold]Neil Agent Doctor[/bold]")
+    marker_styles = {
+        "ok": ("[ok]", "green"),
+        "warning": ("[!]", "yellow"),
+        "error": ("[x]", "red"),
+    }
+    for check in report.checks:
+        marker, style = marker_styles[check.status]
+        console.print(
+            f"{marker} {check.name}：{check.summary}",
+            style=style,
+            markup=False,
+            highlight=False,
+        )
+        for detail in check.details:
+            console.print(
+                f"    {detail}",
+                style="dim",
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
+    if report.error_count:
+        conclusion = (
+            f"诊断完成：{report.error_count} 个错误，{report.warning_count} 个警告。"
+        )
+        style = "red"
+    elif report.warning_count:
+        conclusion = f"诊断完成：无错误，{report.warning_count} 个警告。"
+        style = "yellow"
+    else:
+        conclusion = "诊断完成：本地检查全部通过。"
+        style = "green"
+    console.print(conclusion, style=style)
+    console.print("[dim]未发送 API 请求；API Key 值未显示。[/dim]")
 
 
 def _delete_session(

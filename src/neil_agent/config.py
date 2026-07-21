@@ -2,8 +2,9 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SYSTEM_PROMPT = """You are Neil Agent, a helpful local coding assistant.
@@ -76,6 +77,24 @@ class Settings(BaseSettings):
         gt=0,
         description="Model request timeout in seconds.",
     )
+    max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        description="Maximum retries for one transient model request failure.",
+    )
+    retry_base_delay: float = Field(
+        default=1.0,
+        ge=0,
+        le=60,
+        description="Initial model retry delay in seconds.",
+    )
+    retry_max_delay: float = Field(
+        default=8.0,
+        gt=0,
+        le=60,
+        description="Maximum delay before one model request retry.",
+    )
     command_timeout: float = Field(
         default=120.0,
         gt=0,
@@ -95,6 +114,14 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("system prompt must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def retry_delay_is_ordered(self) -> Self:
+        """Keep exponential retry delays within the configured upper bound."""
+
+        if self.retry_base_delay > self.retry_max_delay:
+            raise ValueError("retry base delay cannot exceed retry max delay")
+        return self
 
 
 @lru_cache(maxsize=1)
