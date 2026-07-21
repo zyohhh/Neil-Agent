@@ -7,8 +7,10 @@ from pathlib import Path
 from time import monotonic
 
 from pydantic import ValidationError
-from rich.console import Console
+from rich.console import Console, Group
+from rich.panel import Panel
 from rich.status import Status
+from rich.table import Table
 from rich.text import Text
 
 from .agent import Agent
@@ -214,9 +216,13 @@ def run(console: Console) -> None:
         settings.thinking_enabled,
         str(filesystem_tools.root),
         len(registry.definitions),
+        sum(
+            registry.requires_approval(definition.name)
+            for definition in registry.definitions
+        ),
         current_session.session_id,
+        project_instructions,
     )
-    _show_instruction_startup(console, project_instructions)
 
     while True:
         try:
@@ -379,16 +385,81 @@ def _show_welcome(
     thinking_enabled: bool,
     workspace_root: str,
     tool_count: int,
+    approval_tool_count: int,
     session_id: str,
+    instructions: ProjectInstructions,
 ) -> None:
-    console.print("[bold green]Neil Agent[/bold green] 已启动")
-    console.print(f"[dim]模型：{model}[/dim]")
-    thinking_status = "开启" if thinking_enabled else "关闭"
-    console.print(f"[dim]思考模式：{thinking_status}[/dim]")
-    console.print(f"[dim]工作区：{workspace_root}[/dim]")
-    console.print(f"[dim]当前会话：{session_id}[/dim]")
-    console.print(f"[dim]可用工具：{tool_count} 个（高风险操作需确认）[/dim]")
-    console.print("[dim]输入 /help 查看命令。[/dim]")
+    """Render one cohesive startup dashboard before the first prompt."""
+
+    console.print(
+        _build_welcome_panel(
+            model=model,
+            thinking_enabled=thinking_enabled,
+            workspace_root=workspace_root,
+            tool_count=tool_count,
+            approval_tool_count=approval_tool_count,
+            session_id=session_id,
+            instructions=instructions,
+        )
+    )
+
+
+def _build_welcome_panel(
+    *,
+    model: str,
+    thinking_enabled: bool,
+    workspace_root: str,
+    tool_count: int,
+    approval_tool_count: int,
+    session_id: str,
+    instructions: ProjectInstructions,
+) -> Panel:
+    """Build a responsive Rich panel without interpolating runtime markup."""
+
+    brand = Text()
+    brand.append("◆  NEIL AGENT", style="bold bright_green")
+    brand.append("\n   本地 Coding Agent 已准备就绪", style="dim")
+
+    details = Table.grid(expand=True, padding=(0, 2))
+    details.add_column(width=10, no_wrap=True, style="dim")
+    details.add_column(ratio=1, overflow="fold")
+    details.add_row("模型", Text(model, style="cyan"))
+    details.add_row("思考模式", "开启" if thinking_enabled else "关闭")
+    details.add_row("工作区", Text(workspace_root, overflow="fold"))
+    details.add_row("会话", Text(session_id, overflow="fold"))
+    details.add_row(
+        "工具",
+        f"{tool_count} 个可用 · {approval_tool_count} 个操作需要批准",
+    )
+    details.add_row("项目指令", _welcome_instruction_status(instructions))
+
+    shortcuts = Text("开始使用  ", style="dim")
+    for index, command in enumerate(("/help", "/doctor", "/instructions")):
+        if index:
+            shortcuts.append("  ·  ", style="dim")
+        shortcuts.append(command, style="bold cyan")
+    shortcuts.append("\nCtrl+C 可取消当前回答，/exit 退出。", style="dim")
+
+    return Panel(
+        Group(brand, Text(), details, Text(), shortcuts),
+        border_style="bright_green",
+        padding=(1, 2),
+        subtitle=Text(" local workspace · approval aware ", style="dim"),
+    )
+
+
+def _welcome_instruction_status(instructions: ProjectInstructions) -> Text:
+    if instructions.active:
+        return Text(
+            f"已加载 {len(instructions.active_sources)} 个来源 · "
+            f"{instructions.size_bytes} 字节",
+            style="green",
+        )
+    if instructions.status == "invalid":
+        return Text(f"未加载 · {instructions.reason}", style="yellow")
+    if instructions.status == "empty":
+        return Text("AGENTS.md 为空 · 修改后使用 /reload-instructions", style="yellow")
+    return Text("未配置 · 使用 /init 创建", style="dim")
 
 
 def _show_help(console: Console) -> None:
@@ -507,19 +578,6 @@ def _show_context(console: Console, agent: Agent) -> None:
         "[dim]字符数按 API JSON 近似计算；下一条用户输入也会占用预算。"
         "当前请求及其工具链不会被截断。[/dim]"
     )
-
-
-def _show_instruction_startup(
-    console: Console,
-    instructions: ProjectInstructions,
-) -> None:
-    if instructions.active:
-        console.print(
-            f"[dim]项目指令：已加载 {len(instructions.active_sources)} 个 "
-            f"AGENTS.md（共 {instructions.size_bytes} 字节）[/dim]"
-        )
-    elif instructions.status == "invalid":
-        console.print(f"[yellow]项目指令未加载：{instructions.reason}[/yellow]")
 
 
 def _show_instructions(

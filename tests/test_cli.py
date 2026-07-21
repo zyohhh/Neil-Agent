@@ -1,12 +1,14 @@
 """Tests for the injectable command-line interface."""
 
-from pathlib import Path
 from collections.abc import Iterator, Sequence
+from io import StringIO
+from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
 from rich.console import Console
+from rich.panel import Panel
 
 from neil_agent import cli
 from neil_agent.agent import Agent
@@ -82,8 +84,18 @@ def test_run_uses_injected_console(
     printed_text = "\n".join(
         str(call.args[0]) for call in console.print.call_args_list if call.args
     )
+    welcome_panels = [
+        call.args[0]
+        for call in console.print.call_args_list
+        if call.args and isinstance(call.args[0], Panel)
+    ]
+    assert len(welcome_panels) == 1
+    welcome_text = _render(welcome_panels[0], width=100)
+    assert "NEIL AGENT" in welcome_text
+    assert "deepseek-v4-flash" in welcome_text
+    assert "12 个可用 · 5 个操作需要批准" in welcome_text
+    assert "已加载 1 个来源" in welcome_text
     assert "可用命令" in printed_text
-    assert "可用工具：12 个（高风险操作需确认）" in printed_text
     assert "当前任务计划" in printed_text
     assert "上下文状态" in printed_text
     assert "Neil Agent Doctor" in printed_text
@@ -105,6 +117,67 @@ def test_run_uses_injected_console(
     assert "/compact" in printed_text
     assert "/rename-session <标题>" in printed_text
     assert "Neil Agent 已退出" in printed_text
+
+
+def test_welcome_panel_remains_readable_in_a_narrow_terminal(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("PRIVATE-RULE", encoding="utf-8")
+    panel = cli._build_welcome_panel(
+        model="deepseek-v4-flash",
+        thinking_enabled=True,
+        workspace_root=str(tmp_path / "a-very-long-workspace-directory"),
+        tool_count=12,
+        approval_tool_count=5,
+        session_id="20260721T120000000000Z-deadbeef",
+        instructions=load_project_instructions(tmp_path),
+    )
+
+    output = _render(panel, width=52)
+
+    assert "NEIL AGENT" in output
+    assert "本地 Coding Agent 已准备就绪" in output
+    assert "deepseek-v4-flash" in output
+    assert "开启" in output
+    assert "/help" in output
+    assert "PRIVATE-RULE" not in output
+
+
+@pytest.mark.parametrize(
+    ("invalid", "expected"),
+    [
+        (False, "未配置 · 使用 /init 创建"),
+        (True, "未加载 · 项目指令必须使用 UTF-8 编码"),
+    ],
+)
+def test_welcome_panel_explains_inactive_instruction_state(
+    invalid: bool,
+    expected: str,
+    tmp_path: Path,
+) -> None:
+    if invalid:
+        (tmp_path / "AGENTS.md").write_bytes(b"\xff\xfe")
+    panel = cli._build_welcome_panel(
+        model="deepseek-v4-flash",
+        thinking_enabled=False,
+        workspace_root=str(tmp_path),
+        tool_count=12,
+        approval_tool_count=5,
+        session_id="20260721T120000000000Z-deadbeef",
+        instructions=load_project_instructions(tmp_path),
+    )
+
+    assert expected in _render(panel, width=100)
+
+
+def _render(renderable: object, *, width: int) -> str:
+    output = StringIO()
+    console = Console(
+        file=output,
+        width=width,
+        color_system=None,
+        force_terminal=False,
+    )
+    console.print(renderable)
+    return output.getvalue()
 
 
 def test_run_lists_and_restores_an_explicit_local_session(
