@@ -61,6 +61,9 @@ def test_session_round_trip_is_versioned_and_excludes_environment_secrets(
     assert "must-not-be-persisted" not in payload
     assert list(store.root.glob("*.tmp")) == []
     assert index.invalid_count == 0
+    assert index.valid_count == 1
+    assert index.total_size_bytes == index.sessions[0].size_bytes
+    assert index.sessions[0].size_bytes > 0
     assert index.sessions[0].round_count == 1
     assert index.sessions[0].preview == "inspect the project"
 
@@ -106,6 +109,8 @@ def test_listing_skips_corrupt_files_and_load_rejects_invalid_ids(
 
     assert len(index.sessions) == 1
     assert index.invalid_count == 2
+    assert index.valid_count == 1
+    assert index.total_size_bytes > index.sessions[0].size_bytes
     with pytest.raises(SessionError, match="ID 格式无效"):
         store.load("../outside")
     with pytest.raises(SessionError, match="无效会话"):
@@ -115,3 +120,23 @@ def test_listing_skips_corrupt_files_and_load_rejects_invalid_ids(
             (),
             None,
         )
+
+
+def test_session_summary_and_explicit_delete_update_storage_usage(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    handle = store.new_session()
+    store.save(handle, _messages(), (), None)
+
+    summary = store.get_summary(handle.session_id)
+    deleted = store.delete(handle.session_id)
+    index = store.list_sessions()
+
+    assert deleted == summary
+    assert summary.size_bytes > 0
+    assert not (store.root / f"{handle.session_id}.json").exists()
+    assert index.valid_count == 0
+    assert index.total_size_bytes == 0
+    with pytest.raises(SessionError, match="未找到本地会话"):
+        store.delete(handle.session_id)

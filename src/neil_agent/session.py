@@ -136,6 +136,7 @@ class SessionSummary:
     session_id: str
     updated_at: datetime
     round_count: int
+    size_bytes: int
     preview: str
 
 
@@ -144,7 +145,9 @@ class SessionIndex:
     """Valid session summaries plus the number of unreadable files."""
 
     sessions: tuple[SessionSummary, ...]
+    valid_count: int = 0
     invalid_count: int = 0
+    total_size_bytes: int = 0
 
 
 class SessionStore:
@@ -262,6 +265,28 @@ class SessionStore:
             raise SessionError(f"未找到本地会话：{session_id}")
         return self._load_path(path, expected_id=session_id)
 
+    def get_summary(self, session_id: str) -> SessionSummary:
+        """Return a safe preview for one exact session before an action."""
+
+        snapshot = self.load(session_id)
+        path = self._root / f"{session_id}.json"
+        try:
+            size_bytes = path.stat().st_size
+        except OSError as error:
+            raise SessionError(f"无法读取本地会话大小：{error}") from error
+        return self._summary(snapshot, size_bytes=size_bytes)
+
+    def delete(self, session_id: str) -> SessionSummary:
+        """Delete one exact, valid session after the caller obtains approval."""
+
+        summary = self.get_summary(session_id)
+        path = self._root / f"{session_id}.json"
+        try:
+            path.unlink()
+        except OSError as error:
+            raise SessionError(f"删除本地会话失败：{error}") from error
+        return summary
+
     def list_sessions(self) -> SessionIndex:
         """Return newest valid snapshots without failing on one corrupt file."""
 
@@ -270,21 +295,30 @@ class SessionStore:
             return SessionIndex(())
         summaries: list[SessionSummary] = []
         invalid_count = 0
+        total_size_bytes = 0
         try:
             paths = tuple(root.glob("*.json"))
         except OSError as error:
             raise SessionError(f"无法列出本地会话：{error}") from error
         for path in paths:
             try:
+                size_bytes = path.lstat().st_size
+                total_size_bytes += size_bytes
+            except OSError:
+                invalid_count += 1
+                continue
+            try:
                 snapshot = self._load_path(path, expected_id=path.stem)
             except SessionError:
                 invalid_count += 1
                 continue
-            summaries.append(self._summary(snapshot))
+            summaries.append(self._summary(snapshot, size_bytes=size_bytes))
         summaries.sort(key=lambda item: item.updated_at, reverse=True)
         return SessionIndex(
             sessions=tuple(summaries[:MAX_LISTED_SESSIONS]),
+            valid_count=len(summaries),
             invalid_count=invalid_count,
+            total_size_bytes=total_size_bytes,
         )
 
     def _load_path(self, path: Path, *, expected_id: str) -> SessionSnapshot:
@@ -339,7 +373,11 @@ class SessionStore:
             raise SessionError("会话 ID 格式无效。")
 
     @staticmethod
-    def _summary(snapshot: SessionSnapshot) -> SessionSummary:
+    def _summary(
+        snapshot: SessionSnapshot,
+        *,
+        size_bytes: int,
+    ) -> SessionSummary:
         user_messages = [
             message.content
             for message in snapshot.messages
@@ -350,6 +388,7 @@ class SessionStore:
             session_id=snapshot.session_id,
             updated_at=snapshot.updated_at,
             round_count=len(user_messages),
+            size_bytes=size_bytes,
             preview=preview,
         )
 

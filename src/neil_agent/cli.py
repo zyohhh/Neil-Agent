@@ -23,8 +23,10 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
 HELP_COMMANDS = {"help", "/help"}
 STATUS_COMMANDS = {"status", "/status"}
+CONTEXT_COMMANDS = {"context", "/context"}
 SESSIONS_COMMANDS = {"sessions", "/sessions"}
 RESUME_COMMANDS = {"resume", "/resume"}
+DELETE_SESSION_COMMANDS = {"delete-session", "/delete-session"}
 
 
 @dataclass(slots=True)
@@ -175,6 +177,7 @@ def run(console: Console) -> None:
         llm,
         system_prompt=settings.system_prompt,
         max_rounds=settings.max_rounds,
+        max_context_chars=settings.max_context_chars,
         registry=registry,
         max_tool_rounds=settings.max_tool_rounds,
         approval_handler=lambda call, preview: _confirm_tool_call(
@@ -219,6 +222,12 @@ def run(console: Console) -> None:
         if command in STATUS_COMMANDS and not command_argument:
             _show_status(console, task_tracker, shell_tools, current_session)
             continue
+        if command in CONTEXT_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/context[/yellow]")
+            else:
+                _show_context(console, agent)
+            continue
         if command in SESSIONS_COMMANDS and not command_argument:
             _show_sessions(console, session_store, current_session.session_id)
             continue
@@ -232,6 +241,14 @@ def run(console: Console) -> None:
             )
             if restored_session is not None:
                 current_session = restored_session
+            continue
+        if command in DELETE_SESSION_COMMANDS:
+            _delete_session(
+                console,
+                session_store,
+                command_argument.strip(),
+                current_session.session_id,
+            )
             continue
         if not user_input:
             continue
@@ -283,8 +300,10 @@ def _show_help(console: Console) -> None:
     console.print("  /clear  清空对话历史")
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
+    console.print("  /context 显示上下文预算和当前占用")
     console.print("  /sessions 显示本地会话")
     console.print("  /resume <id> 恢复指定会话")
+    console.print("  /delete-session <id> 确认后删除指定会话")
     console.print("  /status 显示任务、检查和 Git 状态")
 
 
@@ -326,13 +345,20 @@ def _show_sessions(
         return
 
     console.print("[bold]本地会话[/bold]")
+    console.print(
+        f"  存储占用：{_format_bytes(index.total_size_bytes)}；"
+        f"有效会话：{index.valid_count} 个",
+        markup=False,
+        highlight=False,
+    )
     if not index.sessions:
         console.print("  （尚无已保存会话）")
     for summary in index.sessions:
         marker = "*" if summary.session_id == current_session_id else " "
         updated_at = summary.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
         console.print(
-            f"{marker} {summary.session_id}  {updated_at}  {summary.round_count} 轮",
+            f"{marker} {summary.session_id}  {updated_at}  "
+            f"{summary.round_count} 轮  {_format_bytes(summary.size_bytes)}",
             markup=False,
             highlight=False,
         )
@@ -347,6 +373,95 @@ def _show_sessions(
         console.print(
             f"[yellow]已跳过 {index.invalid_count} 个损坏或不兼容的会话文件。[/yellow]"
         )
+
+
+def _show_context(console: Console, agent: Agent) -> None:
+    """Display approximate request usage without calling the model."""
+
+    stats = agent.context_stats()
+    selected_total = stats.fixed_chars + stats.selected_message_chars
+    console.print("[bold]上下文状态[/bold]")
+    console.print(
+        f"  预算：{stats.budget_chars:,} 字符\n"
+        f"  固定开销：{stats.fixed_chars:,} 字符（系统提示词和工具定义）\n"
+        f"  已保存历史：{stats.stored_rounds} 轮 / {stats.stored_messages} 条消息 / "
+        f"约 {stats.stored_message_chars:,} 字符\n"
+        f"  下次请求可带历史：{stats.selected_rounds} 轮 / "
+        f"{stats.selected_messages} 条消息 / 约 {stats.selected_message_chars:,} 字符\n"
+        f"  下次请求基础占用：约 {selected_total:,} 字符",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    if stats.omitted_rounds:
+        console.print(
+            f"[yellow]  已从下次请求省略 {stats.omitted_rounds} 轮旧历史。[/yellow]"
+        )
+    console.print(
+        "[dim]字符数按 API JSON 近似计算；下一条用户输入也会占用预算。"
+        "当前请求及其工具链不会被截断。[/dim]"
+    )
+
+
+def _delete_session(
+    console: Console,
+    session_store: SessionStore,
+    session_id: str,
+    current_session_id: str,
+) -> None:
+    """Preview and explicitly confirm deletion of one inactive session."""
+
+    if not session_id:
+        console.print("[yellow]用法：/delete-session <session-id>[/yellow]")
+        return
+    if session_id == current_session_id:
+        console.print(
+            "[yellow]不能删除当前会话；请先使用 /clear 或 /resume 切换会话。[/yellow]"
+        )
+        return
+    try:
+        summary = session_store.get_summary(session_id)
+    except SessionError as error:
+        console.print(f"[bold red]无法删除本地会话：[/bold red]{error}")
+        return
+
+    updated_at = summary.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    console.print("\n[bold yellow]删除本地会话[/bold yellow]")
+    console.print(
+        f"  ID：{summary.session_id}\n"
+        f"  更新时间：{updated_at}\n"
+        f"  内容：{summary.round_count} 轮，{_format_bytes(summary.size_bytes)}\n"
+        f"  最近请求：{summary.preview}",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    try:
+        answer = console.input("[bold yellow]永久删除？[y/N][/bold yellow] ")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer.strip().lower() not in {"y", "yes"}:
+        console.print("[yellow]已取消删除。[/yellow]")
+        return
+    try:
+        session_store.delete(session_id)
+    except SessionError as error:
+        console.print(f"[bold red]删除本地会话失败：[/bold red]{error}")
+        return
+    console.print(f"[green]已删除本地会话：{session_id}[/green]")
+
+
+def _format_bytes(size_bytes: int) -> str:
+    """Format a small local-storage value with binary units."""
+
+    size = float(size_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    raise AssertionError("unreachable")
 
 
 def _resume_session(

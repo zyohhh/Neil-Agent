@@ -37,6 +37,7 @@ def test_workspace_and_tool_limit_load_from_environment(
     workspace.mkdir()
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("MAX_TOOL_ROUNDS", "3")
+    monkeypatch.setenv("MAX_CONTEXT_CHARS", "64000")
     monkeypatch.setenv("COMMAND_TIMEOUT", "45")
     monkeypatch.setenv("MAX_COMMAND_OUTPUT_CHARS", "12000")
 
@@ -44,5 +45,6 @@ def test_workspace_and_tool_limit_load_from_environment(
 
     assert settings.workspace_root == workspace
     assert settings.max_tool_rounds == 3
+    assert settings.max_context_chars == 64_000
     assert settings.command_timeout == 45
     assert settings.max_command_output_chars == 12_000

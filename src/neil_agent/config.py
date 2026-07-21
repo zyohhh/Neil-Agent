@@ -57,6 +57,11 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum number of conversation rounds retained in history.",
     )
+    max_context_chars: int = Field(
+        default=120_000,
+        ge=1_000,
+        description="Approximate request character budget for model context.",
+    )
     max_tool_rounds: int = Field(
         default=5,
         ge=1,

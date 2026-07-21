@@ -60,7 +60,7 @@ def test_run_uses_injected_console(
         lambda self: "## main...origin/main",
     )
     console = MagicMock(spec=Console)
-    console.input.side_effect = ["/status", "/help", "/exit"]
+    console.input.side_effect = ["/context", "/status", "/help", "/exit"]
 
     cli.run(cast(Console, console))
 
@@ -70,11 +70,13 @@ def test_run_uses_injected_console(
     assert "可用命令" in printed_text
     assert "可用工具：12 个（高风险操作需确认）" in printed_text
     assert "当前任务计划" in printed_text
+    assert "上下文状态" in printed_text
     assert "最近质量检查" in printed_text
     assert "## main...origin/main" in printed_text
     assert "/status" in printed_text
     assert "/sessions" in printed_text
     assert "/resume <id>" in printed_text
+    assert "/delete-session <id>" in printed_text
     assert "Neil Agent 已退出" in printed_text
 
 
@@ -118,6 +120,7 @@ def test_run_lists_and_restores_an_explicit_local_session(
         str(call.args[0]) for call in console.print.call_args_list if call.args
     )
     assert "本地会话" in printed_text
+    assert "存储占用" in printed_text
     assert handle.session_id in printed_text
     assert "continue the saved task" in printed_text
     assert "已恢复本地会话" in printed_text
@@ -165,6 +168,61 @@ def test_confirm_tool_call_requires_explicit_yes(answer: str, expected: bool) ->
     )
 
     assert approved is expected
+
+
+@pytest.mark.parametrize(
+    ("answer", "deleted"),
+    [("y", True), ("", False)],
+)
+def test_delete_session_requires_explicit_yes(
+    answer: str,
+    deleted: bool,
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path)
+    handle = store.new_session()
+    store.save(
+        handle,
+        (
+            Message(role="user", content="old request"),
+            Message(role="assistant", content="old answer"),
+        ),
+        (),
+        None,
+    )
+    console = MagicMock(spec=Console)
+    console.input.return_value = answer
+
+    cli._delete_session(
+        cast(Console, console),
+        store,
+        handle.session_id,
+        "20990101T000000000000Z-feedface",
+    )
+
+    path = store.root / f"{handle.session_id}.json"
+    assert path.exists() is not deleted
+    printed_text = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "old request" in printed_text
+    assert ("已删除本地会话" in printed_text) is deleted
+
+
+def test_delete_session_refuses_current_session(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    handle = store.new_session()
+    console = MagicMock(spec=Console)
+
+    cli._delete_session(
+        cast(Console, console),
+        store,
+        handle.session_id,
+        handle.session_id,
+    )
+
+    console.input.assert_not_called()
+    assert "不能删除当前会话" in str(console.print.call_args.args[0])
 
 
 def test_terminal_renderer_coordinates_activity_and_streamed_text() -> None:

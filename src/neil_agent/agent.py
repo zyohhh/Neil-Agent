@@ -13,6 +13,14 @@ from .activity import (
     safe_tool_name,
 )
 from .config import DEFAULT_SYSTEM_PROMPT
+from .context import (
+    ContextStats,
+    count_rounds,
+    estimate_fixed_chars,
+    estimate_message_chars,
+    estimate_messages_chars,
+    select_recent_rounds,
+)
 from .errors import AgentError
 from .schemas import (
     ActivityEvent,
@@ -77,6 +85,7 @@ class Agent:
         *,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_rounds: int = 20,
+        max_context_chars: int = 120_000,
         registry: ToolRegistry | None = None,
         max_tool_rounds: int = 5,
         approval_handler: ToolApprovalHandler | None = None,
@@ -85,12 +94,15 @@ class Agent:
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
+        if max_context_chars < 1:
+            raise ValueError("max_context_chars must be at least 1")
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be at least 1")
 
         self._llm = llm
         self._system_prompt = self._with_tool_workflow(system_prompt, registry)
         self._max_rounds = max_rounds
+        self._max_context_chars = max_context_chars
         self._registry = registry
         self._max_tool_rounds = max_tool_rounds
         self._approval_handler = approval_handler
@@ -110,6 +122,27 @@ class Agent:
         self._messages.clear()
         if self._task_tracker is not None:
             self._task_tracker.clear()
+
+    def context_stats(self) -> ContextStats:
+        """Describe stored history and the history available to the next request."""
+
+        fixed_chars = self._fixed_context_chars()
+        selection = select_recent_rounds(
+            self._messages,
+            max_rounds=self._max_rounds - 1,
+            max_chars=max(self._max_context_chars - fixed_chars, 0),
+        )
+        return ContextStats(
+            budget_chars=self._max_context_chars,
+            fixed_chars=fixed_chars,
+            stored_rounds=count_rounds(self._messages),
+            stored_messages=len(self._messages),
+            stored_message_chars=estimate_messages_chars(self._messages),
+            selected_rounds=selection.round_count,
+            selected_messages=len(selection.messages),
+            selected_message_chars=selection.message_chars,
+            omitted_rounds=selection.omitted_round_count,
+        )
 
     def restore_messages(self, messages: Sequence[Message]) -> None:
         """Replace history with validated, complete persisted rounds."""
@@ -233,15 +266,18 @@ class Agent:
         return Message(role="assistant", content=response)
 
     def _request_messages(self, user_message: Message) -> list[Message]:
-        previous_round_limit = self._max_rounds - 1
-        if previous_round_limit == 0:
-            return [user_message]
-        round_starts = self._conversation_round_starts()
-        if len(round_starts) > previous_round_limit:
-            history = self._messages[round_starts[-previous_round_limit] :]
-        else:
-            history = self._messages
-        return [*history, user_message]
+        available_history_chars = max(
+            self._max_context_chars
+            - self._fixed_context_chars()
+            - estimate_message_chars(user_message),
+            0,
+        )
+        selection = select_recent_rounds(
+            self._messages,
+            max_rounds=self._max_rounds - 1,
+            max_chars=available_history_chars,
+        )
+        return [*selection.messages, user_message]
 
     def _commit_messages(self, messages: Sequence[Message]) -> None:
         self._messages.extend(messages)
@@ -260,6 +296,9 @@ class Agent:
         if self._registry is None:
             return ()
         return self._registry.definitions
+
+    def _fixed_context_chars(self) -> int:
+        return estimate_fixed_chars(self._system_prompt, self._tool_definitions())
 
     @staticmethod
     def _with_tool_workflow(
