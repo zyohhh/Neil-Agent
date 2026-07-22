@@ -286,6 +286,31 @@ def test_compaction_is_prepared_without_mutation_and_keeps_recent_tool_round() -
     assert agent.messages[-2].content == "round four request"
 
 
+def test_compaction_accepts_a_bounded_user_focus() -> None:
+    model = FakeChatModel(response="focused summary")
+    agent = Agent(model)
+    agent.restore_messages(
+        tuple(
+            message
+            for number in range(1, 4)
+            for message in (
+                Message(role="user", content=f"request {number}"),
+                Message(
+                    role="assistant",
+                    content=("x" * 1_000 if number == 1 else f"answer {number}"),
+                ),
+            )
+        )
+    )
+
+    agent.prepare_compaction(focus="保留数据库迁移风险")
+
+    assert "User-requested summary focus" in model.requests[0][0].content
+    assert "保留数据库迁移风险" in model.requests[0][0].content
+    with pytest.raises(AgentError, match="最多"):
+        agent.prepare_compaction(focus="x" * 501)
+
+
 def test_failed_compaction_keeps_original_history() -> None:
     model = FakeChatModel(response="x" * 8_001)
     agent = Agent(model)

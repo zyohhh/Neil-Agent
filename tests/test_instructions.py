@@ -30,6 +30,7 @@ def test_loads_utf8_root_agents_file_and_hides_content_from_repr(
     assert instructions.char_count == len(instructions.content)
     assert "Use pytest" not in repr(instructions)
     assert "BEGIN PROJECT INSTRUCTIONS" in instructions.prompt_section()
+    assert "untrusted repository context" in instructions.prompt_section()
 
 
 def test_missing_and_empty_instruction_files_are_inactive(tmp_path: Path) -> None:

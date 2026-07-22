@@ -24,9 +24,13 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/sessions [选项] [关键词]`：本地分页、排序、搜索，并按计划/检查失败/压缩状态筛选。
 - `/rename-session <标题>`：重命名当前本地会话。
 - `/resume <id>`：恢复指定会话。
+- `/branch [标题]`：复制当前会话并切换到新 ID，原会话保持不变。
 - `/export [id]`：预览后导出当前或指定会话。
 - `/import <文件名>`：预览后导入 `.neil-agent/exports/` 中的严格版本化文件。
-- `/compact`：总结较早轮次并保留最近完整上下文。
+- `/compact [关注点]`：总结较早轮次、保留最近完整上下文，并保存压缩前会话副本。
+- `/permissions`：显示真正由代码执行的工具审批和工作区边界。
+
+Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。
 
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 

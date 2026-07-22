@@ -69,6 +69,7 @@ MAX_COMPACTION_SUMMARY_CHARS = 8_000
 MAX_COMPACTION_ROUND_CHARS = 20_000
 MAX_COMPACTION_MODEL_REQUESTS = 8
 MIN_COMPACTION_TRANSCRIPT_CHARS = 200
+MAX_COMPACTION_FOCUS_CHARS = 500
 
 COMPACTION_SYSTEM_INSTRUCTIONS = """Conversation compaction requirements:
 - Summarize only the conversation transcript provided by the user message.
@@ -209,11 +210,22 @@ class Agent:
         self,
         *,
         keep_recent_rounds: int = COMPACTION_KEEP_ROUNDS,
+        focus: str = "",
     ) -> PreparedCompaction:
         """Build a compact replacement without mutating current history."""
 
         if keep_recent_rounds < 1:
             raise ValueError("keep_recent_rounds must be at least 1")
+        normalized_focus = focus.strip()
+        if len(normalized_focus) > MAX_COMPACTION_FOCUS_CHARS:
+            raise AgentError(
+                f"压缩关注点最多 {MAX_COMPACTION_FOCUS_CHARS} 个字符。"
+            )
+        if any(
+            ord(character) < 32 and character not in {"\t"}
+            for character in normalized_focus
+        ):
+            raise AgentError("压缩关注点不能包含控制字符。")
         original_messages = tuple(self._messages)
         rounds = split_rounds(original_messages)
         if len(rounds) <= keep_recent_rounds:
@@ -246,6 +258,7 @@ class Agent:
                     compaction_system_prompt,
                     summary,
                     candidate,
+                    normalized_focus,
                 ):
                     break
                 chunk.append(transcripts[next_index])
@@ -256,6 +269,7 @@ class Agent:
                     compaction_system_prompt,
                     summary,
                     transcripts[transcript_index],
+                    normalized_focus,
                 )
                 if fitted is None:
                     raise AgentError("当前 MAX_CONTEXT_CHARS 太小，无法容纳压缩请求。")
@@ -264,7 +278,11 @@ class Agent:
 
             request = Message(
                 role="user",
-                content=self._compaction_prompt(summary, "\n\n".join(chunk)),
+                content=self._compaction_prompt(
+                    summary,
+                    "\n\n".join(chunk),
+                    normalized_focus,
+                ),
             )
             if model_requests >= MAX_COMPACTION_MODEL_REQUESTS:
                 raise AgentError(
@@ -546,10 +564,11 @@ class Agent:
         system_prompt: str,
         existing_summary: str,
         transcript: str,
+        focus: str = "",
     ) -> bool:
         request = Message(
             role="user",
-            content=self._compaction_prompt(existing_summary, transcript),
+            content=self._compaction_prompt(existing_summary, transcript, focus),
         )
         request_chars = estimate_fixed_chars(
             system_prompt, ()
@@ -568,6 +587,7 @@ class Agent:
         system_prompt: str,
         existing_summary: str,
         transcript: str,
+        focus: str = "",
     ) -> str | None:
         lower = MIN_COMPACTION_TRANSCRIPT_CHARS
         upper = len(transcript)
@@ -579,6 +599,7 @@ class Agent:
                 system_prompt,
                 existing_summary,
                 candidate,
+                focus,
             ):
                 best = candidate
                 lower = midpoint + 1
@@ -616,13 +637,23 @@ class Agent:
         return f"{text[:beginning]}{marker}{text[-ending:]}"
 
     @staticmethod
-    def _compaction_prompt(existing_summary: str, transcript: str) -> str:
+    def _compaction_prompt(
+        existing_summary: str,
+        transcript: str,
+        focus: str = "",
+    ) -> str:
         previous = existing_summary or "（尚无摘要，这是第一批历史。）"
+        focus_section = (
+            f"\n\nUser-requested summary focus:\n{focus}"
+            if focus
+            else ""
+        )
         return (
             "Update the durable conversation summary using the next batch of "
             "older history.\n\n"
             f"Existing durable summary:\n{previous}\n\n"
-            f"Historical transcript batch:\n{transcript}\n\n"
+            f"Historical transcript batch:\n{transcript}"
+            f"{focus_section}\n\n"
             "Return only the updated durable summary."
         )
 

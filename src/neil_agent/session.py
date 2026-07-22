@@ -290,6 +290,8 @@ class SessionStore:
         messages: Sequence[Message],
         steps: Sequence[TaskStep],
         latest_quality_check: QualityCheckRecord | None,
+        *,
+        create_only: bool = False,
     ) -> SessionSnapshot:
         """Atomically replace one versioned snapshot."""
 
@@ -318,7 +320,10 @@ class SessionStore:
         except ValueError as error:
             raise SessionError(f"无法保存无效会话：{error}") from error
 
-        self._write_snapshot(snapshot)
+        if create_only:
+            self._write_new_snapshot(snapshot)
+        else:
+            self._write_snapshot(snapshot)
         return snapshot
 
     def rename(self, session_id: str, title: str) -> SessionSnapshot:
@@ -337,6 +342,30 @@ class SessionStore:
         )
         self._write_snapshot(renamed)
         return renamed
+
+    def branch(self, session_id: str, title: str = "") -> SessionSnapshot:
+        """Copy one complete session to a new ID, leaving the source unchanged."""
+
+        source = self.load(session_id)
+        branch_title = (
+            normalize_session_title(title)
+            if title.strip()
+            else _branch_session_title(source.title)
+        )
+        handle = self.new_session()
+        if self.has_saved(handle.session_id):
+            raise SessionError("新会话 ID 发生冲突，请重试。")
+        return self.save(
+            SessionHandle(
+                session_id=handle.session_id,
+                created_at=handle.created_at,
+                title=branch_title,
+            ),
+            source.messages,
+            source.restored_steps(),
+            source.restored_quality_check(),
+            create_only=True,
+        )
 
     def has_saved(self, session_id: str) -> bool:
         """Return whether any exact session path already exists."""
@@ -623,6 +652,17 @@ class SessionStore:
                 except OSError:
                     pass
 
+    def _write_new_snapshot(self, snapshot: SessionSnapshot) -> None:
+        payload = (snapshot.model_dump_json(indent=2) + "\n").encode("utf-8")
+        if len(payload) > MAX_SESSION_FILE_BYTES:
+            raise SessionError(
+                f"会话快照超过 {MAX_SESSION_FILE_BYTES} 字节，未执行保存。"
+            )
+        root = self._resolved_root(create=True)
+        assert root is not None
+        target = root / f"{snapshot.session_id}.json"
+        self._write_exclusive(target, payload, "新会话保存")
+
     def _resolved_root(self, *, create: bool) -> Path | None:
         try:
             if create:
@@ -781,6 +821,12 @@ def _default_session_title(messages: Sequence[Message]) -> str:
         UNTITLED_SESSION,
     )
     return _single_line(first_request, max_chars=MAX_SESSION_TITLE_CHARS)
+
+
+def _branch_session_title(title: str) -> str:
+    suffix = "（分支）"
+    base = title[: MAX_SESSION_TITLE_CHARS - len(suffix)].rstrip()
+    return f"{base}{suffix}" if base else "会话分支"
 
 
 def _summary_matches(summary: SessionSummary, query: str) -> bool:

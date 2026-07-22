@@ -55,6 +55,8 @@ DELETE_SESSION_COMMANDS = {"delete-session", "/delete-session"}
 RENAME_SESSION_COMMANDS = {"rename-session", "/rename-session"}
 EXPORT_SESSION_COMMANDS = {"export", "/export"}
 IMPORT_SESSION_COMMANDS = {"import", "/import"}
+BRANCH_SESSION_COMMANDS = {"branch", "/branch"}
+PERMISSIONS_COMMANDS = {"permissions", "/permissions"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +276,12 @@ def run(console: Console) -> None:
         if command in STATUS_COMMANDS and not command_argument:
             _show_status(console, task_tracker, shell_tools, current_session)
             continue
+        if command in PERMISSIONS_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/permissions[/yellow]")
+            else:
+                _show_permissions(console, registry, filesystem_tools.root)
+            continue
         if command in CONTEXT_COMMANDS:
             if command_argument:
                 console.print("[yellow]用法：/context[/yellow]")
@@ -324,17 +332,15 @@ def run(console: Console) -> None:
                     instruction_manager.current = initialized
             continue
         if command in COMPACT_COMMANDS:
-            if command_argument:
-                console.print("[yellow]用法：/compact[/yellow]")
-            else:
-                _compact_session(
-                    console,
-                    renderer,
-                    agent,
-                    session_store,
-                    current_session,
-                    task_tracker,
-                )
+            _compact_session(
+                console,
+                renderer,
+                agent,
+                session_store,
+                current_session,
+                task_tracker,
+                focus=command_argument.strip(),
+            )
             continue
         if command in SESSIONS_COMMANDS:
             _show_sessions(
@@ -353,6 +359,18 @@ def run(console: Console) -> None:
             continue
         if command in IMPORT_SESSION_COMMANDS:
             _import_session(console, session_store, command_argument.strip())
+            continue
+        if command in BRANCH_SESSION_COMMANDS:
+            branched = _branch_session(
+                console,
+                session_store,
+                current_session,
+                command_argument,
+                agent,
+                task_tracker,
+            )
+            if branched is not None:
+                current_session = branched
             continue
         if command in RESUME_COMMANDS:
             restored_session = _resume_session(
@@ -501,14 +519,16 @@ def _show_help(console: Console) -> None:
     console.print("  /help   显示帮助")
     console.print("  /context 显示上下文预算和当前占用")
     console.print("  /doctor 检查本地配置和运行环境")
+    console.print("  /permissions 显示工具审批与工作区安全边界")
     console.print("  /instructions 显示项目指令加载状态")
     console.print("  /reload-instructions 重新加载项目指令")
     console.print("  /init   预览并创建根 AGENTS.md（仅限不存在时）")
-    console.print("  /compact 压缩较早的完整对话轮次")
+    console.print("  /compact [关注点] 压缩较早轮次并保留压缩前备份")
     console.print("  /sessions [选项] [关键词] 分页、排序或筛选本地会话")
     console.print("  /resume <id> 恢复指定会话")
     console.print("  /export [id] 预览并导出会话（默认当前会话）")
     console.print("  /import <文件名> 预览并导入 exports 目录中的会话")
+    console.print("  /branch [标题] 复制并切换到新的会话分支")
     console.print("  /rename-session <标题> 重命名当前会话")
     console.print("  /delete-session <id> 确认后删除指定会话")
     console.print("  /status 显示任务、检查和 Git 状态")
@@ -533,6 +553,38 @@ def _show_status(
     )
     console.print(
         status,
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+
+
+def _show_permissions(
+    console: Console,
+    registry: ToolRegistry,
+    workspace_root: Path,
+) -> None:
+    """Explain enforceable local boundaries without exposing hidden prompts."""
+
+    direct = [
+        definition.name
+        for definition in registry.definitions
+        if not registry.requires_approval(definition.name)
+    ]
+    approval = [
+        definition.name
+        for definition in registry.definitions
+        if registry.requires_approval(definition.name)
+    ]
+    console.print("[bold]权限与安全边界[/bold]")
+    console.print(
+        f"  工作区：{workspace_root}\n"
+        f"  直接执行：{', '.join(direct) or '无'}\n"
+        f"  每次需要批准：{', '.join(approval) or '无'}\n"
+        "  文件：拒绝工作区外路径、.env、私钥和受保护目录\n"
+        "  命令：仅固定质量检查和受限 Git 操作，不提供任意 shell\n"
+        "  网络：只有模型 API 客户端可用；本地工具不提供网络访问\n"
+        "  OS 沙箱：当前未实现，安全边界由工具白名单、路径校验和审批共同执行",
         markup=False,
         highlight=False,
         soft_wrap=True,
@@ -749,6 +801,33 @@ def _confirm_local_action(console: Console, prompt: str) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
+def _branch_session(
+    console: Console,
+    session_store: SessionStore,
+    current_session: SessionHandle,
+    title: str,
+    agent: Agent,
+    task_tracker: TaskTracker,
+) -> SessionHandle | None:
+    """Create a new session ID and switch without changing the original."""
+
+    try:
+        snapshot = session_store.branch(current_session.session_id, title)
+    except SessionError as error:
+        console.print(f"[bold red]无法创建会话分支：[/bold red]{error}")
+        return None
+    agent.restore_messages(snapshot.messages)
+    task_tracker.restore(
+        snapshot.restored_steps(),
+        snapshot.restored_quality_check(),
+    )
+    console.print(
+        f"[green]已创建并切换到会话分支：{snapshot.session_id}[/green]\n"
+        f"[dim]原会话保持不变：{current_session.session_id}[/dim]"
+    )
+    return session_store.handle_for(snapshot)
+
+
 def _show_context(console: Console, agent: Agent) -> None:
     """Display approximate request usage without calling the model."""
 
@@ -961,6 +1040,8 @@ def _compact_session(
     session_store: SessionStore,
     current_session: SessionHandle,
     task_tracker: TaskTracker,
+    *,
+    focus: str = "",
 ) -> None:
     """Prepare, persist, then atomically apply an explicit history compaction."""
 
@@ -972,7 +1053,7 @@ def _compact_session(
         )
     )
     try:
-        prepared = agent.prepare_compaction()
+        prepared = agent.prepare_compaction(focus=focus)
     except KeyboardInterrupt:
         renderer.show_activity(
             ActivityEvent(status="skipped", message="已取消对话压缩")
@@ -983,6 +1064,23 @@ def _compact_session(
             ActivityEvent(
                 status="failed",
                 message="对话压缩失败",
+                details=(f"原因：{error}", "原历史未改变"),
+            )
+        )
+        return
+
+    try:
+        current_summary = session_store.get_summary(current_session.session_id)
+        backup_title = _session_title_with_suffix(
+            current_summary.title,
+            "（压缩前）",
+        )
+        backup = session_store.branch(current_session.session_id, backup_title)
+    except SessionError as error:
+        renderer.show_activity(
+            ActivityEvent(
+                status="failed",
+                message="压缩前备份未创建",
                 details=(f"原因：{error}", "原历史未改变"),
             )
         )
@@ -1016,9 +1114,16 @@ def _compact_session(
                 f"完整保留：{prepared.kept_rounds} 轮",
                 f"摘要请求：{prepared.model_requests} 次",
                 f"历史减少：约 {saved_chars:,} 字符",
+                f"压缩前备份：{backup.session_id}",
             ),
         )
     )
+
+
+def _session_title_with_suffix(title: str, suffix: str) -> str:
+    maximum = 80
+    base = title[: maximum - len(suffix)].rstrip()
+    return f"{base}{suffix}" if base else suffix.strip("（）")
 
 
 def _show_doctor(

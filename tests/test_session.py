@@ -256,3 +256,22 @@ def test_import_rechecks_source_after_preview(tmp_path: Path) -> None:
 
     with pytest.raises(SessionError, match="发生变化"):
         target.apply_import(prepared)
+
+
+def test_branch_copies_state_to_new_id_and_preserves_source(tmp_path: Path) -> None:
+    identifiers = iter(("aaaaaaaa", "bbbbbbbb"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    source_handle = store.new_session()
+    source = store.save(source_handle, _messages(), (), None)
+
+    branch = store.branch(source.session_id, "Try another approach")
+
+    assert branch.session_id != source.session_id
+    assert branch.title == "Try another approach"
+    assert branch.messages == source.messages
+    assert store.load(source.session_id) == source
+    assert store.list_sessions().valid_count == 2

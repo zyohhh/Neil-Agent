@@ -74,6 +74,7 @@ def test_run_uses_injected_console(
         "/context",
         "/doctor",
         "/instructions",
+        "/permissions",
         "/status",
         "/help",
         "/exit",
@@ -102,6 +103,8 @@ def test_run_uses_injected_console(
     assert "API Key：已配置（值已隐藏）" in printed_text
     assert "test-key" not in printed_text
     assert "项目指令" in printed_text
+    assert "权限与安全边界" in printed_text
+    assert "OS 沙箱：当前未实现" in printed_text
     assert "已生效" in printed_text
     assert instruction_content not in printed_text
     assert "最近质量检查" in printed_text
@@ -293,6 +296,13 @@ def test_run_explicitly_compacts_and_persists_complete_history(
         "second",
         "third",
     ]
+    assert index.valid_count == 2
+    backup = next(item for item in index.sessions if item.session_id != snapshot.session_id)
+    backup_snapshot = SessionStore(tmp_path).load(backup.session_id)
+    assert len(backup_snapshot.messages) == 6
+    assert not backup_snapshot.messages[0].content.startswith(
+        "[Neil Agent /compact checkpoint]"
+    )
 
 
 def test_compaction_save_failure_keeps_original_in_memory_history(
