@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import stat
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from hashlib import sha256
 from typing import Literal, Self
 from unicodedata import category
 
@@ -40,13 +42,22 @@ LEGACY_SESSION_FORMAT_VERSION: Literal[1] = 1
 SESSION_FORMAT_VERSION: Literal[2] = 2
 SESSION_STATE_DIRECTORY = ".neil-agent"
 SESSION_DIRECTORY = "sessions"
+SESSION_EXPORT_DIRECTORY = "exports"
+SESSION_EXPORT_FORMAT_VERSION: Literal[1] = 1
 MAX_SESSION_FILE_BYTES = 25_000_000
 MAX_LISTED_SESSIONS = 50
 MAX_SESSION_TITLE_CHARS = 80
 MAX_SESSION_QUERY_CHARS = 80
+MAX_SESSION_PAGE_SIZE = 50
 UNTITLED_SESSION = "新会话"
 SESSION_ID_PATTERN_TEXT = r"^\d{8}T\d{12}Z-[0-9a-f]{8}$"
 SESSION_ID_PATTERN = re.compile(SESSION_ID_PATTERN_TEXT)
+EXPORT_FILENAME_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.json$"
+)
+SessionSort = Literal["updated", "title"]
+SessionOrder = Literal["asc", "desc"]
+SessionStateFilter = Literal["all", "planned", "failed", "compacted"]
 
 
 class StoredTaskStep(BaseModel):
@@ -161,6 +172,16 @@ class SessionSnapshot(SessionState):
         return normalize_session_title(value)
 
 
+class SessionExportEnvelope(BaseModel):
+    """Strict portable envelope containing no runtime configuration."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    export_version: Literal[1] = SESSION_EXPORT_FORMAT_VERSION
+    exported_at: AwareDatetime
+    session: SessionSnapshot
+
+
 SESSION_SNAPSHOT_ADAPTER: TypeAdapter[SessionSnapshot | SessionSnapshotV1] = (
     TypeAdapter(SessionSnapshot | SessionSnapshotV1)
 )
@@ -185,6 +206,9 @@ class SessionSummary:
     round_count: int
     size_bytes: int
     preview: str
+    has_plan: bool = False
+    failed_check: bool = False
+    has_compaction: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +220,29 @@ class SessionIndex:
     matched_count: int = 0
     invalid_count: int = 0
     total_size_bytes: int = 0
+    page: int = 1
+    page_size: int = MAX_SESSION_PAGE_SIZE
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSessionExport:
+    """Bounded export candidate requiring explicit caller approval."""
+
+    summary: SessionSummary
+    target: Path
+    size_bytes: int
+    payload: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSessionImport:
+    """Validated import candidate protected against approval-time changes."""
+
+    summary: SessionSummary
+    source: Path
+    size_bytes: int
+    payload_hash: str
+    snapshot: SessionSnapshot = field(repr=False)
 
 
 class SessionStore:
@@ -340,13 +387,32 @@ class SessionStore:
             raise SessionError(f"删除本地会话失败：{error}") from error
         return summary
 
-    def list_sessions(self, query: str = "") -> SessionIndex:
+    def list_sessions(
+        self,
+        query: str = "",
+        *,
+        page: int = 1,
+        page_size: int = MAX_SESSION_PAGE_SIZE,
+        sort_by: SessionSort = "updated",
+        order: SessionOrder = "desc",
+        state: SessionStateFilter = "all",
+    ) -> SessionIndex:
         """Return newest valid snapshots without failing on one corrupt file."""
 
         normalized_query = normalize_session_query(query)
+        if page < 1:
+            raise SessionError("会话页码必须大于等于 1。")
+        if page_size < 1 or page_size > MAX_SESSION_PAGE_SIZE:
+            raise SessionError(f"每页数量必须在 1 到 {MAX_SESSION_PAGE_SIZE} 之间。")
+        if sort_by not in {"updated", "title"}:
+            raise SessionError("会话排序只支持 updated 或 title。")
+        if order not in {"asc", "desc"}:
+            raise SessionError("会话顺序只支持 asc 或 desc。")
+        if state not in {"all", "planned", "failed", "compacted"}:
+            raise SessionError("会话状态筛选值无效。")
         root = self._resolved_root(create=False)
         if root is None:
-            return SessionIndex(())
+            return SessionIndex((), page=page, page_size=page_size)
         summaries: list[SessionSummary] = []
         invalid_count = 0
         total_size_bytes = 0
@@ -367,16 +433,135 @@ class SessionStore:
                 invalid_count += 1
                 continue
             summary = self._summary(snapshot, size_bytes=size_bytes)
-            if not normalized_query or _summary_matches(summary, normalized_query):
+            if (
+                (not normalized_query or _summary_matches(summary, normalized_query))
+                and _summary_has_state(summary, state)
+            ):
                 summaries.append(summary)
-        summaries.sort(key=lambda item: item.updated_at, reverse=True)
+        key = (
+            (lambda item: item.updated_at)
+            if sort_by == "updated"
+            else (lambda item: (item.title.casefold(), item.session_id))
+        )
+        summaries.sort(key=key, reverse=order == "desc")
+        offset = (page - 1) * page_size
         return SessionIndex(
-            sessions=tuple(summaries[:MAX_LISTED_SESSIONS]),
+            sessions=tuple(summaries[offset : offset + page_size]),
             valid_count=len(paths) - invalid_count,
             matched_count=len(summaries),
             invalid_count=invalid_count,
             total_size_bytes=total_size_bytes,
+            page=page,
+            page_size=page_size,
         )
+
+    def prepare_export(self, session_id: str) -> PreparedSessionExport:
+        """Build a strict export preview without writing a file."""
+
+        snapshot = self.load(session_id)
+        envelope = SessionExportEnvelope(
+            exported_at=self._now(),
+            session=snapshot,
+        )
+        payload = (envelope.model_dump_json(indent=2) + "\n").encode("utf-8")
+        if len(payload) > MAX_SESSION_FILE_BYTES:
+            raise SessionError("会话导出超过大小上限。")
+        export_root = self._resolved_export_root(create=False)
+        if export_root is None:
+            export_root = (
+                self._workspace_root
+                / SESSION_STATE_DIRECTORY
+                / SESSION_EXPORT_DIRECTORY
+            )
+        target = export_root / f"{session_id}.export.json"
+        if target.exists():
+            raise SessionError(f"导出文件已存在，不会覆盖：{target.name}")
+        return PreparedSessionExport(
+            summary=self._summary(snapshot, size_bytes=len(payload)),
+            target=target,
+            size_bytes=len(payload),
+            payload=payload,
+        )
+
+    def apply_export(self, prepared: PreparedSessionExport) -> Path:
+        """Exclusively create an unchanged, explicitly approved export."""
+
+        export_root = self._resolved_export_root(create=True)
+        assert export_root is not None
+        if prepared.target.parent != export_root:
+            raise SessionError("导出目标越过工作区边界。")
+        self._write_exclusive(prepared.target, prepared.payload, "会话导出")
+        return prepared.target
+
+    def prepare_import(self, filename: str) -> PreparedSessionImport:
+        """Validate one export filename and return a safe local preview."""
+
+        normalized = filename.strip()
+        if not EXPORT_FILENAME_PATTERN.fullmatch(normalized):
+            raise SessionError("导入文件名无效；只能使用 exports 目录内的 .json 文件名。")
+        export_root = self._resolved_export_root(create=False)
+        if export_root is None:
+            raise SessionError("尚无本地会话导出目录。")
+        source = export_root / normalized
+        try:
+            file_stat = source.lstat()
+            resolved = source.resolve(strict=True)
+            if (
+                resolved.parent != export_root
+                or resolved != source
+                or source.is_symlink()
+                or not stat.S_ISREG(file_stat.st_mode)
+            ):
+                raise SessionError("导入源必须是 exports 目录内的真实普通文件。")
+            if file_stat.st_size > MAX_SESSION_FILE_BYTES:
+                raise SessionError("会话导入文件超过大小上限。")
+            payload = source.read_bytes()
+            envelope = SessionExportEnvelope.model_validate_json(payload)
+        except SessionError:
+            raise
+        except (OSError, ValueError) as error:
+            raise SessionError(f"会话导入文件无效：{normalized}") from error
+        if self.has_saved(envelope.session.session_id):
+            raise SessionError(f"会话 ID 已存在：{envelope.session.session_id}")
+        return PreparedSessionImport(
+            summary=self._summary(envelope.session, size_bytes=len(payload)),
+            source=source,
+            size_bytes=len(payload),
+            payload_hash=sha256(payload).hexdigest(),
+            snapshot=envelope.session,
+        )
+
+    def apply_import(self, prepared: PreparedSessionImport) -> SessionSnapshot:
+        """Import only if the approved source and destination are unchanged."""
+
+        try:
+            export_root = self._resolved_export_root(create=False)
+            if export_root is None:
+                raise SessionError("批准后会话导出目录已不存在。")
+            resolved = prepared.source.resolve(strict=True)
+            if (
+                resolved.parent != export_root
+                or resolved != prepared.source
+                or prepared.source.is_symlink()
+            ):
+                raise SessionError("批准后导入源路径发生变化。")
+            payload = prepared.source.read_bytes()
+        except SessionError:
+            raise
+        except OSError as error:
+            raise SessionError("批准后无法重新读取导入文件。") from error
+        if sha256(payload).hexdigest() != prepared.payload_hash:
+            raise SessionError("批准后导入文件发生变化，未执行导入。")
+        if self.has_saved(prepared.snapshot.session_id):
+            raise SessionError(f"会话 ID 已存在：{prepared.snapshot.session_id}")
+        root = self._resolved_root(create=True)
+        assert root is not None
+        target = root / f"{prepared.snapshot.session_id}.json"
+        snapshot_payload = (
+            prepared.snapshot.model_dump_json(indent=2) + "\n"
+        ).encode("utf-8")
+        self._write_exclusive(target, snapshot_payload, "会话导入")
+        return prepared.snapshot
 
     def _load_path(self, path: Path, *, expected_id: str) -> SessionSnapshot:
         try:
@@ -455,6 +640,55 @@ class SessionStore:
             raise SessionError("本地会话目录越过工作区边界。") from error
         return resolved
 
+    def _resolved_export_root(self, *, create: bool) -> Path | None:
+        export_root = (
+            self._workspace_root / SESSION_STATE_DIRECTORY / SESSION_EXPORT_DIRECTORY
+        )
+        try:
+            if create:
+                export_root.mkdir(parents=True, exist_ok=True)
+            elif not export_root.exists():
+                return None
+            resolved = export_root.resolve(strict=True)
+        except OSError as error:
+            raise SessionError(f"无法访问会话导出目录：{error}") from error
+        if resolved != export_root or not resolved.is_dir():
+            raise SessionError("会话导出目录必须是工作区内的真实目录。")
+        try:
+            resolved.relative_to(self._workspace_root)
+        except ValueError as error:
+            raise SessionError("会话导出目录越过工作区边界。") from error
+        return resolved
+
+    @staticmethod
+    def _write_exclusive(target: Path, payload: bytes, label: str) -> None:
+        descriptor = -1
+        created = False
+        try:
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            created = True
+            with os.fdopen(descriptor, "wb") as output:
+                descriptor = -1
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+        except FileExistsError as error:
+            raise SessionError(f"{label}目标已存在，未执行覆盖。") from error
+        except OSError as error:
+            if created:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise SessionError(f"{label}失败：{error}") from error
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+
     def _now(self) -> datetime:
         return self._normalize_time(self._clock())
 
@@ -488,6 +722,16 @@ class SessionStore:
             round_count=len(user_messages),
             size_bytes=size_bytes,
             preview=preview,
+            has_plan=bool(snapshot.plan),
+            failed_check=(
+                snapshot.latest_quality_check is not None
+                and snapshot.latest_quality_check.status == "failed"
+            ),
+            has_compaction=any(
+                message.role == "user"
+                and message.content.startswith("[Neil Agent /compact checkpoint]")
+                for message in snapshot.messages
+            ),
         )
 
 
@@ -513,6 +757,18 @@ def normalize_session_query(value: str) -> str:
     if any(category(character).startswith("C") for character in query):
         raise SessionError("会话搜索不能包含控制或格式字符。")
     return query.casefold()
+
+
+def _summary_has_state(
+    summary: SessionSummary,
+    state: SessionStateFilter,
+) -> bool:
+    return {
+        "all": True,
+        "planned": summary.has_plan,
+        "failed": summary.failed_check,
+        "compacted": summary.has_compaction,
+    }[state]
 
 
 def _default_session_title(messages: Sequence[Message]) -> str:

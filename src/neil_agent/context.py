@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +19,7 @@ class ContextSelection:
     round_count: int
     omitted_round_count: int
     message_chars: int
+    estimated_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +35,10 @@ class ContextStats:
     selected_messages: int
     selected_message_chars: int
     omitted_rounds: int
+    budget_tokens: int | None
+    fixed_tokens: int
+    stored_message_tokens: int
+    selected_message_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +61,22 @@ def estimate_message_chars(message: Message) -> int:
     return _json_chars(message.to_api_dict())
 
 
+def estimate_message_tokens(message: Message) -> int:
+    """Return a conservative model-independent token estimate for one message."""
+
+    return estimate_text_tokens(_json_text(message.to_api_dict()))
+
+
 def estimate_messages_chars(messages: Sequence[Message]) -> int:
     """Return an additive estimate suitable for per-round budgeting."""
 
     return sum(estimate_message_chars(message) for message in messages)
+
+
+def estimate_messages_tokens(messages: Sequence[Message]) -> int:
+    """Return an additive token estimate suitable for complete-round selection."""
+
+    return sum(estimate_message_tokens(message) for message in messages)
 
 
 def estimate_fixed_chars(
@@ -74,6 +92,35 @@ def estimate_fixed_chars(
     return _json_chars(payload)
 
 
+def estimate_fixed_tokens(
+    system_prompt: str,
+    tools: Sequence[ToolDefinition],
+) -> int:
+    """Estimate tokens used by the fixed prompt and tool definitions."""
+
+    payload = {
+        "system": system_prompt,
+        "tools": [definition.to_api_dict() for definition in tools],
+    }
+    return estimate_text_tokens(_json_text(payload))
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Estimate tokens without a model tokenizer.
+
+    ASCII content is approximated at four characters per token. Non-ASCII
+    characters count as one token each, which is intentionally conservative
+    for common CJK project text. This is a soft-budget fallback, not billing
+    data or an exact DeepSeek tokenizer result.
+    """
+
+    if not text:
+        return 0
+    ascii_count = sum(ord(character) < 128 for character in text)
+    non_ascii_count = len(text) - ascii_count
+    return math.ceil(ascii_count / 4) + non_ascii_count
+
+
 def count_rounds(messages: Sequence[Message]) -> int:
     """Count top-level user requests in a complete message history."""
 
@@ -87,6 +134,7 @@ def select_recent_rounds(
     *,
     max_rounds: int,
     max_chars: int,
+    max_tokens: int | None = None,
 ) -> ContextSelection:
     """Select the newest contiguous complete rounds within both limits.
 
@@ -99,16 +147,25 @@ def select_recent_rounds(
         raise ValueError("max_rounds cannot be negative")
     if max_chars < 0:
         raise ValueError("max_chars cannot be negative")
+    if max_tokens is not None and max_tokens < 0:
+        raise ValueError("max_tokens cannot be negative")
 
     rounds = split_rounds(messages)
     selected_reversed: list[tuple[Message, ...]] = []
     selected_chars = 0
+    selected_tokens = 0
     for conversation_round in reversed(rounds[-max_rounds:] if max_rounds else []):
         round_chars = estimate_messages_chars(conversation_round)
-        if selected_chars + round_chars > max_chars:
+        round_tokens = estimate_messages_tokens(conversation_round)
+        exceeds_token_budget = (
+            max_tokens is not None
+            and selected_tokens + round_tokens > max_tokens
+        )
+        if selected_chars + round_chars > max_chars or exceeds_token_budget:
             break
         selected_reversed.append(conversation_round)
         selected_chars += round_chars
+        selected_tokens += round_tokens
 
     selected_rounds = tuple(reversed(selected_reversed))
     selected_messages = tuple(
@@ -121,6 +178,7 @@ def select_recent_rounds(
         round_count=len(selected_rounds),
         omitted_round_count=len(rounds) - len(selected_rounds),
         message_chars=selected_chars,
+        estimated_tokens=selected_tokens,
     )
 
 
@@ -141,11 +199,13 @@ def split_rounds(messages: Sequence[Message]) -> tuple[tuple[Message, ...], ...]
 
 
 def _json_chars(value: Any) -> int:
-    return len(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+    return len(_json_text(value))
+
+
+def _json_text(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
     )

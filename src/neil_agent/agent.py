@@ -20,12 +20,16 @@ from .context import (
     PreparedCompaction,
     count_rounds,
     estimate_fixed_chars,
+    estimate_fixed_tokens,
     estimate_message_chars,
+    estimate_message_tokens,
     estimate_messages_chars,
+    estimate_messages_tokens,
     select_recent_rounds,
     split_rounds,
 )
-from .errors import AgentError
+from .errors import AgentError, NeilAgentError
+from .instructions import InstructionScopeUpdate
 from .schemas import (
     ActivityEvent,
     ActivityStatus,
@@ -41,6 +45,7 @@ from .tools.registry import ToolRegistry
 
 ToolApprovalHandler = Callable[[ToolCall, str], bool]
 ActivityHandler = Callable[[ActivityEvent], None]
+InstructionScopeHandler = Callable[[ToolCall], InstructionScopeUpdate | None]
 
 TOOL_WORKFLOW_INSTRUCTIONS = """Local tool workflow requirements:
 - After a successful write_file or replace_text call, choose an appropriate
@@ -108,16 +113,20 @@ class Agent:
         project_instructions: str = "",
         max_rounds: int = 20,
         max_context_chars: int = 120_000,
+        max_context_tokens: int | None = None,
         registry: ToolRegistry | None = None,
         max_tool_rounds: int = 5,
         approval_handler: ToolApprovalHandler | None = None,
         task_tracker: TaskTracker | None = None,
         activity_handler: ActivityHandler | None = None,
+        instruction_scope_handler: InstructionScopeHandler | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
         if max_context_chars < 1:
             raise ValueError("max_context_chars must be at least 1")
+        if max_context_tokens is not None and max_context_tokens < 1:
+            raise ValueError("max_context_tokens must be at least 1")
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be at least 1")
 
@@ -128,10 +137,12 @@ class Agent:
         self._system_prompt = self._build_system_prompt()
         self._max_rounds = max_rounds
         self._max_context_chars = max_context_chars
+        self._max_context_tokens = max_context_tokens
         self._max_tool_rounds = max_tool_rounds
         self._approval_handler = approval_handler
         self._task_tracker = task_tracker
         self._activity_handler = activity_handler
+        self._instruction_scope_handler = instruction_scope_handler
         self._messages: list[Message] = []
 
     @property
@@ -162,9 +173,15 @@ class Agent:
         """Describe stored history and the history available to the next request."""
 
         fixed_chars = self._fixed_context_chars()
+        fixed_tokens = self._fixed_context_tokens()
         selection = self._select_history(
             max_rounds=self._max_rounds - 1,
             max_chars=max(self._max_context_chars - fixed_chars, 0),
+            max_tokens=(
+                None
+                if self._max_context_tokens is None
+                else max(self._max_context_tokens - fixed_tokens, 0)
+            ),
         )
         return ContextStats(
             budget_chars=self._max_context_chars,
@@ -176,6 +193,10 @@ class Agent:
             selected_messages=len(selection.messages),
             selected_message_chars=selection.message_chars,
             omitted_rounds=selection.omitted_round_count,
+            budget_tokens=self._max_context_tokens,
+            fixed_tokens=fixed_tokens,
+            stored_message_tokens=estimate_messages_tokens(self._messages),
+            selected_message_tokens=selection.estimated_tokens,
         )
 
     def restore_messages(self, messages: Sequence[Message]) -> None:
@@ -414,9 +435,20 @@ class Agent:
             - estimate_message_chars(user_message),
             0,
         )
+        available_history_tokens = (
+            None
+            if self._max_context_tokens is None
+            else max(
+                self._max_context_tokens
+                - self._fixed_context_tokens()
+                - estimate_message_tokens(user_message),
+                0,
+            )
+        )
         selection = self._select_history(
             max_rounds=self._max_rounds - 1,
             max_chars=available_history_chars,
+            max_tokens=available_history_tokens,
         )
         return [*selection.messages, user_message]
 
@@ -443,6 +475,7 @@ class Agent:
         *,
         max_rounds: int,
         max_chars: int,
+        max_tokens: int | None = None,
     ) -> ContextSelection:
         rounds = split_rounds(self._messages)
         if not rounds or not self._is_compaction_checkpoint(rounds[0]):
@@ -450,14 +483,21 @@ class Agent:
                 self._messages,
                 max_rounds=max_rounds,
                 max_chars=max_chars,
+                max_tokens=max_tokens,
             )
         checkpoint = rounds[0]
         checkpoint_chars = estimate_messages_chars(checkpoint)
-        if max_rounds < 1 or checkpoint_chars > max_chars:
+        checkpoint_tokens = estimate_messages_tokens(checkpoint)
+        if (
+            max_rounds < 1
+            or checkpoint_chars > max_chars
+            or (max_tokens is not None and checkpoint_tokens > max_tokens)
+        ):
             return select_recent_rounds(
                 self._messages,
                 max_rounds=max_rounds,
                 max_chars=max_chars,
+                max_tokens=max_tokens,
             )
         recent_messages = tuple(
             message
@@ -468,12 +508,16 @@ class Agent:
             recent_messages,
             max_rounds=max_rounds - 1,
             max_chars=max_chars - checkpoint_chars,
+            max_tokens=(
+                None if max_tokens is None else max_tokens - checkpoint_tokens
+            ),
         )
         return ContextSelection(
             messages=(*checkpoint, *recent.messages),
             round_count=1 + recent.round_count,
             omitted_round_count=len(rounds) - 1 - recent.round_count,
             message_chars=checkpoint_chars + recent.message_chars,
+            estimated_tokens=checkpoint_tokens + recent.estimated_tokens,
         )
 
     @staticmethod
@@ -494,6 +538,9 @@ class Agent:
     def _fixed_context_chars(self) -> int:
         return estimate_fixed_chars(self._system_prompt, self._tool_definitions())
 
+    def _fixed_context_tokens(self) -> int:
+        return estimate_fixed_tokens(self._system_prompt, self._tool_definitions())
+
     def _compaction_request_fits(
         self,
         system_prompt: str,
@@ -507,7 +554,14 @@ class Agent:
         request_chars = estimate_fixed_chars(
             system_prompt, ()
         ) + estimate_message_chars(request)
-        return request_chars <= self._max_context_chars
+        if request_chars > self._max_context_chars:
+            return False
+        if self._max_context_tokens is None:
+            return True
+        request_tokens = estimate_fixed_tokens(
+            system_prompt, ()
+        ) + estimate_message_tokens(request)
+        return request_tokens <= self._max_context_tokens
 
     def _fit_compaction_transcript(
         self,
@@ -614,6 +668,9 @@ class Agent:
     def _execute_tool_call(self, call: ToolCall) -> ToolResult:
         started_at = monotonic()
         activity = describe_tool_call(call)
+        scope_result = self._refresh_instruction_scope(call)
+        if scope_result is not None:
+            return scope_result
         self._emit_activity("running", activity.title, activity.details)
 
         if self._registry is None:
@@ -628,6 +685,7 @@ class Agent:
                 activity,
                 started_at,
             )
+
         if not self._registry.requires_approval(call.name):
             result = self._registry.execute(call)
             return self._finish_tool_call(
@@ -690,6 +748,44 @@ class Agent:
             result,
             activity,
             started_at,
+        )
+
+    def _refresh_instruction_scope(self, call: ToolCall) -> ToolResult | None:
+        """Defer a file operation once so the model sees newly scoped rules."""
+
+        if self._instruction_scope_handler is None:
+            return None
+        try:
+            update = self._instruction_scope_handler(call)
+        except (NeilAgentError, ValueError) as error:
+            self._emit_activity(
+                "failed",
+                "项目指令作用域加载失败",
+                (f"工具：{safe_tool_name(call.name)}", f"原因：{error}"),
+            )
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"项目指令作用域加载失败，文件操作未执行：{error}",
+                is_error=True,
+            )
+        if update is None:
+            return None
+        self.set_project_instructions(update.prompt_section)
+        self._emit_activity(
+            "succeeded",
+            "已刷新文件作用域项目指令",
+            (
+                f"目标：{update.target}",
+                f"生效来源：{update.source_count} 个",
+                "原文件操作未执行，模型将基于新规则重新决定",
+            ),
+        )
+        return ToolResult(
+            tool_call_id=call.id,
+            content=(
+                "项目指令作用域已更新。为确保先遵循新规则，本次文件操作未执行；"
+                "请重新评估并在仍然合适时再次调用该工具。"
+            ),
         )
 
     def _finish_tool_call(

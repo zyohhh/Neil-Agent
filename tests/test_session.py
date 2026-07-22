@@ -184,3 +184,75 @@ def test_session_titles_can_be_renamed_and_searched_locally(tmp_path: Path) -> N
         store.rename(saved.session_id, "x" * (MAX_SESSION_TITLE_CHARS + 1))
     with pytest.raises(SessionError, match="控制"):
         store.list_sessions("unsafe\nquery")
+
+
+def test_session_list_supports_state_filter_sort_and_pagination(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.new_session()
+    store.save(
+        first,
+        _messages(),
+        (TaskStep("Inspect", "in_progress"),),
+        None,
+    )
+    second = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: "feedface",
+    ).new_session()
+    store.save(second, _messages("other"), (), None)
+
+    planned = store.list_sessions(state="planned")
+    page = store.list_sessions(page=2, page_size=1, sort_by="title", order="asc")
+
+    assert [item.session_id for item in planned.sessions] == [first.session_id]
+    assert planned.sessions[0].has_plan
+    assert page.page == 2
+    assert page.page_size == 1
+    assert page.matched_count == 2
+
+
+def test_export_import_is_strict_explicit_and_rejects_duplicates(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_root.mkdir()
+    target_root.mkdir()
+    source = _store(source_root)
+    handle = source.new_session()
+    source.save(handle, _messages(), (), None)
+
+    prepared_export = source.prepare_export(handle.session_id)
+    exported = source.apply_export(prepared_export)
+    target_exports = target_root / ".neil-agent" / "exports"
+    target_exports.mkdir(parents=True)
+    imported_file = target_exports / exported.name
+    imported_file.write_bytes(exported.read_bytes())
+    target = _store(target_root)
+    prepared_import = target.prepare_import(imported_file.name)
+    imported = target.apply_import(prepared_import)
+
+    assert imported.session_id == handle.session_id
+    assert target.load(handle.session_id).messages == _messages()
+    with pytest.raises(SessionError, match="ID 已存在"):
+        target.prepare_import(imported_file.name)
+
+
+def test_import_rechecks_source_after_preview(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_root.mkdir()
+    target_root.mkdir()
+    source = _store(source_root)
+    handle = source.new_session()
+    source.save(handle, _messages(), (), None)
+    exported = source.apply_export(source.prepare_export(handle.session_id))
+    target_exports = target_root / ".neil-agent" / "exports"
+    target_exports.mkdir(parents=True)
+    imported_file = target_exports / exported.name
+    imported_file.write_bytes(exported.read_bytes())
+    target = _store(target_root)
+    prepared = target.prepare_import(imported_file.name)
+    imported_file.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(SessionError, match="发生变化"):
+        target.apply_import(prepared)

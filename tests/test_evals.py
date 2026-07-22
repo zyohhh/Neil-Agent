@@ -40,3 +40,25 @@ def test_real_eval_requires_separate_api_cost_confirmation(
         eval_module.main()
 
     assert exit_info.value.code == 2
+
+
+def test_offline_eval_supports_single_task_and_stable_duration() -> None:
+    path = Path(__file__).parents[1] / "evals" / "tasks.json"
+    times = iter((10.0, 10.125))
+
+    results = run_offline_evals(
+        path,
+        task_ids=("root-project-instructions",),
+        clock=lambda: next(times),
+    )
+
+    assert len(results) == 1
+    assert results[0].passed
+    assert results[0].duration_ms == 125
+
+
+def test_offline_eval_rejects_unknown_task() -> None:
+    path = Path(__file__).parents[1] / "evals" / "tasks.json"
+
+    with pytest.raises(ValueError, match="未知评测任务"):
+        run_offline_evals(path, task_ids=("missing",))

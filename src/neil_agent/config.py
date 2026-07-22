@@ -63,6 +63,14 @@ class Settings(BaseSettings):
         ge=1_000,
         description="Approximate request character budget for model context.",
     )
+    max_context_tokens: int | None = Field(
+        default=None,
+        ge=1_000,
+        description=(
+            "Optional approximate request token budget; character budgeting "
+            "remains active as a fallback."
+        ),
+    )
     max_tool_rounds: int = Field(
         default=5,
         ge=1,

@@ -1,11 +1,13 @@
 """Tests for conversation history and streaming behavior."""
 
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 
 import pytest
 
 from neil_agent.agent import COMPACTION_CHECKPOINT_USER, Agent
 from neil_agent.errors import AgentError, LLMError
+from neil_agent.instructions import ProjectInstructionManager
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -72,6 +74,54 @@ def test_stream_chat_saves_complete_round() -> None:
         ("user", "hello"),
         ("assistant", "assistant reply"),
     ]
+
+
+def test_new_file_scope_is_loaded_before_tool_execution(tmp_path: Path) -> None:
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (tmp_path / "AGENTS.md").write_text("ROOT-RULE", encoding="utf-8")
+    (nested / "AGENTS.md").write_text("NESTED-RULE", encoding="utf-8")
+    calls: list[str] = []
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_file",
+            description="read",
+            input_schema={"type": "object"},
+        ),
+        lambda path: calls.append(path) or "contents",
+    )
+    tool_call = ToolCall(
+        id="read-1",
+        name="read_file",
+        arguments={"path": "src/example.py"},
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(tool_call,))],
+        [ModelResponse(tool_calls=(ToolCall(
+            id="read-2",
+            name="read_file",
+            arguments={"path": "src/example.py"},
+        ),))],
+        ["done", ModelResponse(content="done")],
+    ]
+    manager = ProjectInstructionManager(tmp_path)
+    agent = Agent(
+        model,
+        registry=registry,
+        project_instructions=manager.current.prompt_section(),
+        instruction_scope_handler=manager.resolve_tool_call,
+    )
+
+    response = "".join(agent.stream_chat("inspect nested file"))
+
+    assert response == "done"
+    assert calls == ["src/example.py"]
+    assert "NESTED-RULE" not in model.system_prompts[0]
+    assert "NESTED-RULE" in model.system_prompts[1]
+    first_result = agent.messages[2].tool_results[0]
+    assert "本次文件操作未执行" in first_result.content
 
 
 def test_failed_stream_does_not_change_history() -> None:

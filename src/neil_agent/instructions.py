@@ -12,12 +12,16 @@ from typing import Literal
 from unicodedata import category
 
 from .errors import InstructionError
+from .schemas import ToolCall
 
 INSTRUCTIONS_FILENAME = "AGENTS.md"
 MAX_INSTRUCTIONS_FILE_BYTES = 32_768
 MAX_INSTRUCTIONS_TOTAL_BYTES = 65_536
 MAX_PROJECT_METADATA_BYTES = 131_072
 InstructionStatus = Literal["active", "missing", "empty", "invalid"]
+PATH_SCOPED_TOOL_NAMES = frozenset(
+    {"list_directory", "read_file", "search_text", "write_file", "replace_text"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +115,71 @@ class PreparedInstructionsInit:
     content: str = field(repr=False)
     preview: str
     size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionScopeUpdate:
+    """A newly activated instruction chain that a model must review first."""
+
+    prompt_section: str = field(repr=False)
+    target: Path
+    source_count: int
+
+
+class ProjectInstructionManager:
+    """Track and safely refresh instructions for filesystem tool targets."""
+
+    def __init__(
+        self,
+        workspace_root: str | Path,
+        target_directory: str | Path | None = None,
+    ) -> None:
+        self.root = _resolved_directory(workspace_root, label="工作区根目录")
+        self.current = load_project_instructions(self.root, target_directory)
+
+    def reload(self) -> ProjectInstructions:
+        """Replace the current snapshot only with a fully valid candidate."""
+
+        candidate = load_project_instructions(self.root, self.current.target)
+        if candidate.status == "invalid":
+            raise InstructionError(candidate.reason)
+        self.current = candidate
+        return candidate
+
+    def resolve_tool_call(self, call: ToolCall) -> InstructionScopeUpdate | None:
+        """Refresh before the first filesystem operation in a different scope."""
+
+        if call.name not in PATH_SCOPED_TOOL_NAMES:
+            return None
+        raw_path = call.arguments.get("path", ".")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise InstructionError("文件工具 path 必须是非空字符串。")
+        requested = Path(raw_path).expanduser()
+        target_path = (
+            requested.resolve()
+            if requested.is_absolute()
+            else (self.root / requested).resolve()
+        )
+        try:
+            target_path.relative_to(self.root)
+        except ValueError as error:
+            raise InstructionError("文件工具目标越过工作区边界。") from error
+
+        target_directory = target_path if target_path.is_dir() else target_path.parent
+        if not target_directory.is_dir():
+            raise InstructionError("文件工具目标的父目录不存在。")
+        candidate = load_project_instructions(self.root, target_directory)
+        if candidate.status == "invalid":
+            raise InstructionError(candidate.reason)
+        if candidate.prompt_section() == self.current.prompt_section():
+            self.current = candidate
+            return None
+        self.current = candidate
+        return InstructionScopeUpdate(
+            prompt_section=candidate.prompt_section(),
+            target=candidate.target,
+            source_count=len(candidate.active_sources),
+        )
 
 
 def load_project_instructions(

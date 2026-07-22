@@ -15,16 +15,24 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 
 项目指令命令：
 
-- `/instructions`：显示当前生效的 `AGENTS.md` 来源，不显示正文。
+- `/instructions`：显示当前文件作用域生效的 `AGENTS.md` 来源，不显示正文。
 - `/reload-instructions`：不重启进程重新加载；失败时保留旧快照。
 - `/init`：本地分析项目并预览根 `AGENTS.md` 初稿，批准后仅在文件不存在时创建。
 
 会话命令：
 
-- `/sessions [关键词]`：按标题、会话 ID 或最近请求搜索。
+- `/sessions [选项] [关键词]`：本地分页、排序、搜索，并按计划/检查失败/压缩状态筛选。
 - `/rename-session <标题>`：重命名当前本地会话。
 - `/resume <id>`：恢复指定会话。
+- `/export [id]`：预览后导出当前或指定会话。
+- `/import <文件名>`：预览后导入 `.neil-agent/exports/` 中的严格版本化文件。
 - `/compact`：总结较早轮次并保留最近完整上下文。
+
+离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
+
+```text
+uv run neil-agent-eval --task root-project-instructions --format json
+```
 
 默认评测完全离线，使用假模型和临时工作区，不读取 API Key。真实 DeepSeek 验收必须同时提供两个显式参数：
 

@@ -7,10 +7,12 @@ import pytest
 from neil_agent.instructions import (
     MAX_INSTRUCTIONS_FILE_BYTES,
     MAX_INSTRUCTIONS_TOTAL_BYTES,
+    ProjectInstructionManager,
     apply_project_instructions_init,
     load_project_instructions,
     prepare_project_instructions_init,
 )
+from neil_agent.schemas import ToolCall
 from neil_agent.errors import InstructionError
 
 
@@ -155,3 +157,48 @@ def test_init_rechecks_existence_after_preview(tmp_path: Path) -> None:
         apply_project_instructions_init(candidate)
 
     assert (tmp_path / "AGENTS.md").read_text(encoding="utf-8") == "user-created"
+
+
+def test_scope_manager_refreshes_only_when_effective_rules_change(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "src" / "feature"
+    sibling = tmp_path / "tests"
+    nested.mkdir(parents=True)
+    sibling.mkdir()
+    (tmp_path / "AGENTS.md").write_text("ROOT", encoding="utf-8")
+    (tmp_path / "src" / "AGENTS.md").write_text("SRC", encoding="utf-8")
+    manager = ProjectInstructionManager(tmp_path)
+
+    unchanged = manager.resolve_tool_call(
+        ToolCall(id="root", name="read_file", arguments={"path": "README.md"})
+    )
+    changed = manager.resolve_tool_call(
+        ToolCall(
+            id="nested",
+            name="read_file",
+            arguments={"path": "src/feature/module.py"},
+        )
+    )
+    same_chain = manager.resolve_tool_call(
+        ToolCall(id="sibling", name="list_directory", arguments={"path": "tests"})
+    )
+
+    assert unchanged is None
+    assert changed is not None
+    assert "SRC" in changed.prompt_section
+    assert same_chain is not None
+    assert "SRC" not in same_chain.prompt_section
+
+
+def test_scope_manager_rejects_missing_parent_before_file_access(tmp_path: Path) -> None:
+    manager = ProjectInstructionManager(tmp_path)
+
+    with pytest.raises(InstructionError, match="父目录不存在"):
+        manager.resolve_tool_call(
+            ToolCall(
+                id="missing",
+                name="write_file",
+                arguments={"path": "missing/file.py"},
+            )
+        )

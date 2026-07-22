@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import perf_counter
 from types import SimpleNamespace
 from typing import cast
 
@@ -38,6 +39,7 @@ class EvalResult:
     task_id: str
     passed: bool
     detail: str
+    duration_ms: int = 0
 
 
 class OfflineModel:
@@ -108,10 +110,16 @@ class ApprovalWorkflowModel(OfflineModel):
         yield ModelResponse(content=self.response)
 
 
-def run_offline_evals(tasks_path: Path = DEFAULT_TASKS_PATH) -> tuple[EvalResult, ...]:
+def run_offline_evals(
+    tasks_path: Path = DEFAULT_TASKS_PATH,
+    *,
+    task_ids: Sequence[str] | None = None,
+    clock: Callable[[], float] = perf_counter,
+) -> tuple[EvalResult, ...]:
     """Run every declared task using fake models and temporary workspaces."""
 
-    task_ids = _load_task_ids(tasks_path)
+    declared_task_ids = _load_task_ids(tasks_path)
+    selected_task_ids = _select_task_ids(declared_task_ids, task_ids)
     evaluators: dict[str, Callable[[], str]] = {
         "root-project-instructions": _eval_root_instructions,
         "unsafe-project-instructions": _eval_unsafe_instructions,
@@ -120,19 +128,39 @@ def run_offline_evals(tasks_path: Path = DEFAULT_TASKS_PATH) -> tuple[EvalResult
         "retry-approval-session-consistency": _eval_workflow_consistency,
     }
     results = []
-    for task_id in task_ids:
+    for task_id in selected_task_ids:
+        started_at = clock()
         evaluator = evaluators.get(task_id)
         if evaluator is None:
-            results.append(EvalResult(task_id, False, "没有对应的离线执行器"))
+            results.append(
+                EvalResult(
+                    task_id,
+                    False,
+                    "没有对应的离线执行器",
+                    _elapsed_ms(started_at, clock()),
+                )
+            )
             continue
         try:
             detail = evaluator()
         except Exception as error:  # noqa: BLE001 - eval boundary reports failures.
             results.append(
-                EvalResult(task_id, False, f"{type(error).__name__}: {error}")
+                EvalResult(
+                    task_id,
+                    False,
+                    f"{type(error).__name__}: {error}",
+                    _elapsed_ms(started_at, clock()),
+                )
             )
         else:
-            results.append(EvalResult(task_id, True, detail))
+            results.append(
+                EvalResult(
+                    task_id,
+                    True,
+                    detail,
+                    _elapsed_ms(started_at, clock()),
+                )
+            )
     return tuple(results)
 
 
@@ -424,19 +452,63 @@ def _load_task_ids(path: Path) -> tuple[str, ...]:
     return tuple(task_ids)
 
 
+def _select_task_ids(
+    declared: Sequence[str],
+    requested: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if not requested:
+        return tuple(declared)
+    if len(requested) != len(set(requested)):
+        raise ValueError("--task 不能重复")
+    unknown = [task_id for task_id in requested if task_id not in declared]
+    if unknown:
+        raise ValueError(f"未知评测任务：{', '.join(unknown)}")
+    return tuple(requested)
+
+
+def _elapsed_ms(started_at: float, finished_at: float) -> int:
+    return max(round((finished_at - started_at) * 1_000), 0)
+
+
 def _show_results(console: Console, title: str, results: Sequence[EvalResult]) -> int:
     console.print(title, style="bold", markup=False, highlight=False)
     for result in results:
         marker = "[ok]" if result.passed else "[!]"
         style = "green" if result.passed else "red"
         console.print(
-            f"{marker} {result.task_id}: {result.detail}",
+            f"{marker} {result.task_id} ({result.duration_ms} ms): {result.detail}",
             style=style,
             markup=False,
             highlight=False,
         )
     passed = sum(result.passed for result in results)
     console.print(f"结果：{passed}/{len(results)} 通过", markup=False, highlight=False)
+    return 0 if passed == len(results) else 1
+
+
+def _show_json_results(title: str, results: Sequence[EvalResult]) -> int:
+    passed = sum(result.passed for result in results)
+    print(
+        json.dumps(
+            {
+                "title": title,
+                "passed": passed,
+                "total": len(results),
+                "success": passed == len(results),
+                "results": [
+                    {
+                        "task_id": result.task_id,
+                        "passed": result.passed,
+                        "detail": result.detail,
+                        "duration_ms": result.duration_ms,
+                    }
+                    for result in results
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return 0 if passed == len(results) else 1
 
 
@@ -447,10 +519,14 @@ def main() -> None:
     parser.add_argument("--tasks", type=Path, default=DEFAULT_TASKS_PATH)
     parser.add_argument("--real-deepseek", action="store_true")
     parser.add_argument("--confirm-api-cost", action="store_true")
+    parser.add_argument("--task", action="append", dest="task_ids")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
     arguments = parser.parse_args()
     console = Console()
 
     if arguments.real_deepseek:
+        if arguments.task_ids:
+            parser.error("--task 仅适用于离线评测")
         if not arguments.confirm_api_cost:
             console.print(
                 "真实 DeepSeek 验收会消耗 API 额度；请同时提供 --confirm-api-cost。",
@@ -463,11 +539,15 @@ def main() -> None:
         except (NeilAgentError, ValueError) as error:
             console.print(f"真实验收失败：{error}", style="red", markup=False)
             raise SystemExit(1) from None
+        if arguments.format == "json":
+            raise SystemExit(_show_json_results("真实 DeepSeek 验收", results))
         raise SystemExit(_show_results(console, "真实 DeepSeek 验收", results))
 
     try:
-        results = run_offline_evals(arguments.tasks)
+        results = run_offline_evals(arguments.tasks, task_ids=arguments.task_ids)
     except ValueError as error:
         console.print(str(error), style="red", markup=False)
         raise SystemExit(2) from None
+    if arguments.format == "json":
+        raise SystemExit(_show_json_results("Neil Agent 离线评测", results))
     raise SystemExit(_show_results(console, "Neil Agent 离线评测", results))

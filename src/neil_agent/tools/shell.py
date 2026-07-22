@@ -14,6 +14,7 @@ from ..schemas import ToolDefinition
 from .registry import ToolRegistry
 
 QUALITY_COMMANDS: dict[str, tuple[str, ...]] = {
+    "eval": ("-m", "neil_agent.evals", "--format", "json"),
     "pytest": ("-m", "pytest", "-q"),
     "ruff": ("-m", "ruff", "check", "."),
     "mypy": ("-m", "mypy", "src"),

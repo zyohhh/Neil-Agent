@@ -3,7 +3,11 @@
 from collections.abc import Iterator, Sequence
 
 from neil_agent.agent import Agent
-from neil_agent.context import estimate_messages_chars, select_recent_rounds
+from neil_agent.context import (
+    estimate_messages_chars,
+    estimate_messages_tokens,
+    select_recent_rounds,
+)
 from neil_agent.schemas import (
     Message,
     ModelResponse,
@@ -124,3 +128,41 @@ def test_empty_context_has_fixed_cost_but_no_history() -> None:
     assert stats.fixed_chars > 0
     assert stats.stored_rounds == 0
     assert stats.selected_messages == 0
+
+
+def test_optional_token_budget_can_be_stricter_than_character_budget() -> None:
+    messages = (
+        Message(role="user", content="你好" * 100),
+        Message(role="assistant", content="完成"),
+    )
+    estimated_tokens = estimate_messages_tokens(messages)
+
+    excluded = select_recent_rounds(
+        messages,
+        max_rounds=1,
+        max_chars=10_000,
+        max_tokens=estimated_tokens - 1,
+    )
+    included = select_recent_rounds(
+        messages,
+        max_rounds=1,
+        max_chars=10_000,
+        max_tokens=estimated_tokens,
+    )
+
+    assert excluded.messages == ()
+    assert included.messages == messages
+    assert included.estimated_tokens == estimated_tokens
+
+
+def test_agent_reports_configured_token_soft_budget() -> None:
+    agent = Agent(
+        ContextFakeModel(),
+        system_prompt="short",
+        max_context_tokens=2_000,
+    )
+
+    stats = agent.context_stats()
+
+    assert stats.budget_tokens == 2_000
+    assert stats.fixed_tokens > 0

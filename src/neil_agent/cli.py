@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+import shlex
+from typing import cast
 from time import monotonic
 
 from pydantic import ValidationError
@@ -18,6 +20,7 @@ from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import NeilAgentError, SessionError
 from .instructions import (
+    ProjectInstructionManager,
     ProjectInstructions,
     apply_project_instructions_init,
     load_project_instructions,
@@ -25,7 +28,14 @@ from .instructions import (
 )
 from .llm import LLMClient
 from .schemas import ActivityEvent, ToolCall
-from .session import SessionHandle, SessionStore, normalize_session_title
+from .session import (
+    SessionHandle,
+    SessionOrder,
+    SessionSort,
+    SessionStateFilter,
+    SessionStore,
+    normalize_session_title,
+)
 from .task import TaskTracker
 from .tools import FileSystemTools, ShellTools, ToolRegistry
 
@@ -43,6 +53,18 @@ SESSIONS_COMMANDS = {"sessions", "/sessions"}
 RESUME_COMMANDS = {"resume", "/resume"}
 DELETE_SESSION_COMMANDS = {"delete-session", "/delete-session"}
 RENAME_SESSION_COMMANDS = {"rename-session", "/rename-session"}
+EXPORT_SESSION_COMMANDS = {"export", "/export"}
+IMPORT_SESSION_COMMANDS = {"import", "/import"}
+
+
+@dataclass(frozen=True, slots=True)
+class SessionListOptions:
+    query: str = ""
+    page: int = 1
+    page_size: int = 10
+    sort_by: SessionSort = "updated"
+    order: SessionOrder = "desc"
+    state: SessionStateFilter = "all"
 
 
 @dataclass(slots=True)
@@ -177,10 +199,11 @@ def run(console: Console) -> None:
         raise SystemExit(1) from None
     filesystem_tools.register(registry)
     instruction_target = _instruction_target(filesystem_tools.root)
-    project_instructions = load_project_instructions(
+    instruction_manager = ProjectInstructionManager(
         filesystem_tools.root,
         instruction_target,
     )
+    project_instructions = instruction_manager.current
     session_store = SessionStore(filesystem_tools.root)
     current_session = session_store.new_session()
     shell_tools = ShellTools(
@@ -200,6 +223,7 @@ def run(console: Console) -> None:
         project_instructions=project_instructions.prompt_section(),
         max_rounds=settings.max_rounds,
         max_context_chars=settings.max_context_chars,
+        max_context_tokens=settings.max_context_tokens,
         registry=registry,
         max_tool_rounds=settings.max_tool_rounds,
         approval_handler=lambda call, preview: _confirm_tool_call(
@@ -209,6 +233,7 @@ def run(console: Console) -> None:
         ),
         task_tracker=task_tracker,
         activity_handler=renderer.show_activity,
+        instruction_scope_handler=instruction_manager.resolve_tool_call,
     )
     _show_welcome(
         console,
@@ -271,18 +296,14 @@ def run(console: Console) -> None:
             if command_argument:
                 console.print("[yellow]用法：/instructions[/yellow]")
             else:
-                _show_instructions(console, project_instructions)
+                _show_instructions(console, instruction_manager.current)
             continue
         if command in RELOAD_INSTRUCTIONS_COMMANDS:
             if command_argument:
                 console.print("[yellow]用法：/reload-instructions[/yellow]")
             else:
-                reloaded = _reload_instructions(
-                    console,
-                    agent,
-                    filesystem_tools.root,
-                    instruction_target,
-                    project_instructions,
+                reloaded = _reload_instruction_manager(
+                    console, agent, instruction_manager
                 )
                 if reloaded is not None:
                     project_instructions = reloaded
@@ -300,6 +321,7 @@ def run(console: Console) -> None:
                 )
                 if initialized is not None:
                     project_instructions = initialized
+                    instruction_manager.current = initialized
             continue
         if command in COMPACT_COMMANDS:
             if command_argument:
@@ -321,6 +343,16 @@ def run(console: Console) -> None:
                 current_session.session_id,
                 command_argument.strip(),
             )
+            continue
+        if command in EXPORT_SESSION_COMMANDS:
+            _export_session(
+                console,
+                session_store,
+                command_argument.strip() or current_session.session_id,
+            )
+            continue
+        if command in IMPORT_SESSION_COMMANDS:
+            _import_session(console, session_store, command_argument.strip())
             continue
         if command in RESUME_COMMANDS:
             restored_session = _resume_session(
@@ -473,8 +505,10 @@ def _show_help(console: Console) -> None:
     console.print("  /reload-instructions 重新加载项目指令")
     console.print("  /init   预览并创建根 AGENTS.md（仅限不存在时）")
     console.print("  /compact 压缩较早的完整对话轮次")
-    console.print("  /sessions [关键词] 显示或搜索本地会话")
+    console.print("  /sessions [选项] [关键词] 分页、排序或筛选本地会话")
     console.print("  /resume <id> 恢复指定会话")
+    console.print("  /export [id] 预览并导出会话（默认当前会话）")
+    console.print("  /import <文件名> 预览并导入 exports 目录中的会话")
     console.print("  /rename-session <标题> 重命名当前会话")
     console.print("  /delete-session <id> 确认后删除指定会话")
     console.print("  /status 显示任务、检查和 Git 状态")
@@ -509,17 +543,25 @@ def _show_sessions(
     console: Console,
     session_store: SessionStore,
     current_session_id: str,
-    query: str = "",
+    arguments: str = "",
 ) -> None:
-    """List newest valid local sessions without calling the model."""
+    """List selected local sessions without calling the model."""
 
     try:
-        index = session_store.list_sessions(query)
+        options = _parse_session_list_options(arguments)
+        index = session_store.list_sessions(
+            options.query,
+            page=options.page,
+            page_size=options.page_size,
+            sort_by=options.sort_by,
+            order=options.order,
+            state=options.state,
+        )
     except SessionError as error:
         console.print(f"[bold red]无法读取本地会话：[/bold red]{error}")
         return
 
-    heading = "本地会话" if not query else f"本地会话搜索：{query}"
+    heading = "本地会话" if not options.query else f"本地会话搜索：{options.query}"
     console.print(heading, style="bold", markup=False, highlight=False)
     console.print(
         f"  存储占用：{_format_bytes(index.total_size_bytes)}；"
@@ -527,8 +569,15 @@ def _show_sessions(
         markup=False,
         highlight=False,
     )
+    console.print(
+        f"  第 {index.page} 页 · 每页 {index.page_size} 个 · "
+        f"排序 {options.sort_by}/{options.order} · 筛选 {options.state}",
+        style="dim",
+        markup=False,
+        highlight=False,
+    )
     if not index.sessions:
-        empty_text = "（没有匹配会话）" if query else "（尚无已保存会话）"
+        empty_text = "（没有匹配会话）" if options.query else "（尚无已保存会话）"
         console.print(f"  {empty_text}")
     for summary in index.sessions:
         marker = "*" if summary.session_id == current_session_id else " "
@@ -546,10 +595,158 @@ def _show_sessions(
             highlight=False,
             soft_wrap=True,
         )
+        states = []
+        if summary.has_plan:
+            states.append("有计划")
+        if summary.failed_check:
+            states.append("检查失败")
+        if summary.has_compaction:
+            states.append("已压缩")
+        if states:
+            console.print(f"    状态：{'、'.join(states)}", style="dim")
     if index.invalid_count:
         console.print(
             f"[yellow]已跳过 {index.invalid_count} 个损坏或不兼容的会话文件。[/yellow]"
         )
+
+
+def _parse_session_list_options(arguments: str) -> SessionListOptions:
+    """Parse a small, deterministic command grammar without model involvement."""
+
+    try:
+        tokens = shlex.split(arguments)
+    except ValueError as error:
+        raise SessionError(f"会话列表参数无效：{error}") from error
+    values: dict[str, str] = {}
+    query_parts: list[str] = []
+    option_names = {
+        "--page": "page",
+        "--page-size": "page_size",
+        "--sort": "sort_by",
+        "--order": "order",
+        "--state": "state",
+    }
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("--"):
+            key = option_names.get(token)
+            if key is None or index + 1 >= len(tokens):
+                raise SessionError(f"无效或缺少值的会话列表选项：{token}")
+            if key in values:
+                raise SessionError(f"会话列表选项不能重复：{token}")
+            values[key] = tokens[index + 1]
+            index += 2
+            continue
+        query_parts.append(token)
+        index += 1
+    try:
+        page = int(values.get("page", "1"))
+        page_size = int(values.get("page_size", "10"))
+    except ValueError as error:
+        raise SessionError("--page 和 --page-size 必须是整数。") from error
+    sort_by = values.get("sort_by", "updated")
+    order = values.get("order", "desc")
+    state = values.get("state", "all")
+    if sort_by not in {"updated", "title"}:
+        raise SessionError("--sort 只支持 updated 或 title。")
+    if order not in {"asc", "desc"}:
+        raise SessionError("--order 只支持 asc 或 desc。")
+    if state not in {"all", "planned", "failed", "compacted"}:
+        raise SessionError("--state 只支持 all、planned、failed 或 compacted。")
+    return SessionListOptions(
+        query=" ".join(query_parts),
+        page=page,
+        page_size=page_size,
+        sort_by=cast(SessionSort, sort_by),
+        order=cast(SessionOrder, order),
+        state=cast(SessionStateFilter, state),
+    )
+
+
+def _export_session(
+    console: Console,
+    session_store: SessionStore,
+    session_id: str,
+) -> None:
+    """Preview and explicitly approve one local session export."""
+
+    if not session_id:
+        console.print("[yellow]用法：/export [session-id][/yellow]")
+        return
+    try:
+        prepared = session_store.prepare_export(session_id)
+    except SessionError as error:
+        console.print(f"[bold red]无法准备会话导出：[/bold red]{error}")
+        return
+    console.print("[bold yellow]导出会话预览[/bold yellow]")
+    console.print(
+        f"  ID：{prepared.summary.session_id}\n"
+        f"  标题：{prepared.summary.title}\n"
+        f"  轮次：{prepared.summary.round_count}\n"
+        f"  大小：{_format_bytes(prepared.size_bytes)}\n"
+        f"  目标：{prepared.target}\n"
+        "  内容：消息、计划和最近检查；不含 API Key、环境配置或项目指令",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    if not _confirm_local_action(console, "创建该导出文件？[y/N] "):
+        console.print("[yellow]已取消导出。[/yellow]")
+        return
+    try:
+        target = session_store.apply_export(prepared)
+    except SessionError as error:
+        console.print(f"[bold red]会话导出失败：[/bold red]{error}")
+        return
+    console.print(f"[green]会话已导出：{target}[/green]", markup=False)
+
+
+def _import_session(
+    console: Console,
+    session_store: SessionStore,
+    filename: str,
+) -> None:
+    """Preview and explicitly approve one strict local session import."""
+
+    if not filename:
+        console.print("[yellow]用法：/import <exports 目录中的文件名>[/yellow]")
+        return
+    try:
+        prepared = session_store.prepare_import(filename)
+    except SessionError as error:
+        console.print(f"[bold red]无法准备会话导入：[/bold red]{error}")
+        return
+    console.print("[bold yellow]导入会话预览[/bold yellow]")
+    console.print(
+        f"  来源：{prepared.source}\n"
+        f"  ID：{prepared.summary.session_id}\n"
+        f"  标题：{prepared.summary.title}\n"
+        f"  轮次：{prepared.summary.round_count}\n"
+        f"  大小：{_format_bytes(prepared.size_bytes)}",
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+    if not _confirm_local_action(console, "导入该会话？[y/N] "):
+        console.print("[yellow]已取消导入。[/yellow]")
+        return
+    try:
+        snapshot = session_store.apply_import(prepared)
+    except SessionError as error:
+        console.print(f"[bold red]会话导入失败：[/bold red]{error}")
+        return
+    console.print(
+        f"[green]会话已导入：{snapshot.session_id}；使用 /resume 恢复。[/green]"
+    )
+
+
+def _confirm_local_action(console: Console, prompt: str) -> bool:
+    try:
+        answer = console.input(f"[bold yellow]{prompt}[/bold yellow]")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() in {"y", "yes"}
 
 
 def _show_context(console: Console, agent: Agent) -> None:
@@ -557,15 +754,23 @@ def _show_context(console: Console, agent: Agent) -> None:
 
     stats = agent.context_stats()
     selected_total = stats.fixed_chars + stats.selected_message_chars
+    selected_tokens = stats.fixed_tokens + stats.selected_message_tokens
+    token_budget = (
+        f"{stats.budget_tokens:,} token（本地估算）"
+        if stats.budget_tokens is not None
+        else "未配置（仅使用字符软预算）"
+    )
     console.print("[bold]上下文状态[/bold]")
     console.print(
         f"  预算：{stats.budget_chars:,} 字符\n"
+        f"  Token 预算：{token_budget}\n"
         f"  固定开销：{stats.fixed_chars:,} 字符（系统提示词和工具定义）\n"
         f"  已保存历史：{stats.stored_rounds} 轮 / {stats.stored_messages} 条消息 / "
         f"约 {stats.stored_message_chars:,} 字符\n"
         f"  下次请求可带历史：{stats.selected_rounds} 轮 / "
         f"{stats.selected_messages} 条消息 / 约 {stats.selected_message_chars:,} 字符\n"
-        f"  下次请求基础占用：约 {selected_total:,} 字符",
+        f"  下次请求基础占用：约 {selected_total:,} 字符 / "
+        f"{selected_tokens:,} token",
         markup=False,
         highlight=False,
         soft_wrap=True,
@@ -575,7 +780,8 @@ def _show_context(console: Console, agent: Agent) -> None:
             f"[yellow]  已从下次请求省略 {stats.omitted_rounds} 轮旧历史。[/yellow]"
         )
     console.print(
-        "[dim]字符数按 API JSON 近似计算；下一条用户输入也会占用预算。"
+        "[dim]字符数按 API JSON 计算；token 使用模型无关的保守估算，不等同计费。"
+        "下一条用户输入也会占用预算。"
         "当前请求及其工具链不会被截断。[/dim]"
     )
 
@@ -642,6 +848,33 @@ def _reload_instructions(
             console.print("[yellow]模型上下文仍不包含项目指令。[/yellow]")
         return None
 
+    agent.set_project_instructions(candidate.prompt_section())
+    if candidate.active:
+        console.print(
+            f"[green]已重新加载 {len(candidate.active_sources)} 个项目指令文件。[/green]"
+        )
+    else:
+        console.print("[green]重新加载完成；当前没有生效的项目指令。[/green]")
+    return candidate
+
+
+def _reload_instruction_manager(
+    console: Console,
+    agent: Agent,
+    manager: ProjectInstructionManager,
+) -> ProjectInstructions | None:
+    """Reload the manager's active scope while retaining its old snapshot."""
+
+    current = manager.current
+    try:
+        candidate = manager.reload()
+    except NeilAgentError as error:
+        console.print(f"[bold red]项目指令重新加载失败：[/bold red]{error}")
+        if current.active:
+            console.print("[yellow]继续使用旧的有效指令快照。[/yellow]")
+        else:
+            console.print("[yellow]模型上下文仍不包含项目指令。[/yellow]")
+        return None
     agent.set_project_instructions(candidate.prompt_section())
     if candidate.active:
         console.print(
