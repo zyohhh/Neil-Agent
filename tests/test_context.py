@@ -6,6 +6,7 @@ from neil_agent.agent import Agent
 from neil_agent.context import (
     estimate_messages_chars,
     estimate_messages_tokens,
+    estimate_text_tokens,
     select_recent_rounds,
 )
 from neil_agent.schemas import (
@@ -166,3 +167,9 @@ def test_agent_reports_configured_token_soft_budget() -> None:
 
     assert stats.budget_tokens == 2_000
     assert stats.fixed_tokens > 0
+
+
+def test_text_estimate_uses_documented_deepseek_character_ratios() -> None:
+    assert estimate_text_tokens("a" * 10) == 3
+    assert estimate_text_tokens("中" * 10) == 6
+    assert estimate_text_tokens("a中") == 1

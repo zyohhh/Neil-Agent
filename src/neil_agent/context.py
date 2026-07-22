@@ -106,19 +106,37 @@ def estimate_fixed_tokens(
 
 
 def estimate_text_tokens(text: str) -> int:
-    """Estimate tokens without a model tokenizer.
+    """Estimate DeepSeek tokens without downloading a tokenizer bundle.
 
-    ASCII content is approximated at four characters per token. Non-ASCII
-    characters count as one token each, which is intentionally conservative
-    for common CJK project text. This is a soft-budget fallback, not billing
-    data or an exact DeepSeek tokenizer result.
+    DeepSeek documents approximate ratios of 0.3 token per English character
+    and 0.6 token per Chinese character. Other non-ASCII characters count as
+    one token. This remains a soft-budget estimate; response ``usage`` is the
+    authority for actual processing and billing.
     """
 
     if not text:
         return 0
-    ascii_count = sum(ord(character) < 128 for character in text)
-    non_ascii_count = len(text) - ascii_count
-    return math.ceil(ascii_count / 4) + non_ascii_count
+    ascii_count = 0
+    chinese_count = 0
+    other_count = 0
+    for character in text:
+        codepoint = ord(character)
+        if codepoint < 128:
+            ascii_count += 1
+        elif _is_chinese_character(codepoint):
+            chinese_count += 1
+        else:
+            other_count += 1
+    return math.ceil(ascii_count * 0.3 + chinese_count * 0.6 + other_count)
+
+
+def _is_chinese_character(codepoint: int) -> bool:
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x323AF
+    )
 
 
 def count_rounds(messages: Sequence[Message]) -> int:

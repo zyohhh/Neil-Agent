@@ -32,6 +32,23 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 
 Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。
 
+## 一次性非交互运行
+
+`-p/--print` 执行一个 prompt 后退出，适合脚本和 CI。该入口只向模型暴露文件读取、搜索以及只读 Git 工具，不提供写文件、质量检查、暂存或提交。
+
+```text
+uv run neil-agent -p "概括当前项目结构"
+uv run neil-agent -p "检查工作区状态" --output-format json
+uv run neil-agent -p "检查工作区状态" --output-format stream-json
+```
+
+- `text`：标准输出只有最终文本流；错误写入标准错误。
+- `json`：标准输出只有一行最终 JSON，包含协议版本、结果、活动与退出状态。
+- `stream-json`：标准输出为 JSONL，依次发送 `session_start`、活动、文本增量和最终结果或错误。
+- 成功、运行错误、参数/配置错误和用户中断分别使用退出码 `0`、`1`、`2`、`130`。
+- 一次性运行默认不保存；显式添加 `--save-session` 才写入工作区会话目录。
+- 所有结构化格式都不会输出思考内容。完整协议见 [`docs/non-interactive.md`](docs/non-interactive.md)。
+
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 
 ```text

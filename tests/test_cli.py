@@ -183,6 +183,62 @@ def _render(renderable: object, *, width: int) -> str:
     return output.getvalue()
 
 
+def test_main_routes_one_shot_arguments_without_starting_interactive_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    calls: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+
+    def fake_run_noninteractive(
+        received_settings: Settings,
+        prompt: str,
+        *,
+        output_format: str,
+        stdout: object,
+        stderr: object,
+        save_session: bool,
+    ) -> int:
+        assert received_settings is settings
+        calls.append((prompt, output_format, save_session))
+        return 0
+
+    monkeypatch.setattr(cli, "run_noninteractive", fake_run_noninteractive)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(
+            [
+                "--print",
+                "inspect this project",
+                "--output-format",
+                "stream-json",
+                "--save-session",
+            ]
+        )
+
+    assert exit_info.value.code == 0
+    assert calls == [("inspect this project", "stream-json", True)]
+
+
+def test_config_error_message_does_not_echo_invalid_raw_value() -> None:
+    secret_value = "not-a-valid-url-secret"
+    with pytest.raises(cli.ValidationError) as error_info:
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            deepseek_base_url=secret_value,
+        )
+
+    message = cli._config_error_message(error_info.value)
+    assert "deepseek_base_url" in message
+    assert secret_value not in message
+
+
 def test_run_lists_and_restores_an_explicit_local_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

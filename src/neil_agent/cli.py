@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 import shlex
+import sys
 from typing import cast
 from time import monotonic
 
@@ -27,6 +29,11 @@ from .instructions import (
     prepare_project_instructions_init,
 )
 from .llm import LLMClient
+from .noninteractive import (
+    OutputFormat,
+    run_noninteractive,
+    write_startup_error,
+)
 from .schemas import ActivityEvent, ToolCall
 from .session import (
     SessionHandle,
@@ -178,10 +185,48 @@ class TerminalRenderer:
         self._status = None
 
 
-def main() -> None:
-    """Create the real terminal console and run the application."""
+def main(argv: list[str] | None = None) -> None:
+    """Run interactively by default or execute one read-only prompt with ``-p``."""
 
-    run(Console())
+    parser = argparse.ArgumentParser(prog="neil-agent")
+    parser.add_argument("-p", "--print", dest="prompt")
+    parser.add_argument(
+        "--output-format",
+        choices=("text", "json", "stream-json"),
+        default="text",
+    )
+    parser.add_argument(
+        "--save-session",
+        action="store_true",
+        help="Persist a successful one-shot run in the workspace session store.",
+    )
+    arguments = parser.parse_args(argv)
+    if arguments.prompt is None:
+        if arguments.save_session or arguments.output_format != "text":
+            parser.error("--output-format and --save-session require -p/--print")
+        run(Console())
+        return
+
+    output_format = cast(OutputFormat, arguments.output_format)
+    try:
+        settings = get_settings()
+    except ValidationError as error:
+        write_startup_error(
+            output_format,
+            sys.stdout,
+            sys.stderr,
+            _config_error_message(error),
+        )
+        raise SystemExit(2) from None
+    exit_code = run_noninteractive(
+        settings,
+        arguments.prompt,
+        output_format=output_format,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        save_session=arguments.save_session,
+    )
+    raise SystemExit(exit_code)
 
 
 def run(console: Console) -> None:
@@ -1340,12 +1385,27 @@ def _confirm_tool_call(console: Console, call: ToolCall, preview: str) -> bool:
 
 
 def _show_config_error(console: Console, error: ValidationError) -> None:
+    message = _config_error_message(error)
+    if message.startswith("未找到 DEEPSEEK_API_KEY"):
+        console.print("[bold red]配置错误：[/bold red]未找到 DEEPSEEK_API_KEY。")
+        console.print("请复制 .env.example 为 .env，并填写你的 DeepSeek API Key。")
+        return
+    console.print(f"[bold red]配置错误：[/bold red]{message}")
+
+
+def _config_error_message(error: ValidationError) -> str:
     missing_api_key = any(
         item["type"] == "missing" and item["loc"] == ("deepseek_api_key",)
         for item in error.errors()
     )
     if missing_api_key:
-        console.print("[bold red]配置错误：[/bold red]未找到 DEEPSEEK_API_KEY。")
-        console.print("请复制 .env.example 为 .env，并填写你的 DeepSeek API Key。")
-        return
-    console.print(f"[bold red]配置错误：[/bold red]{error}")
+        return "未找到 DEEPSEEK_API_KEY。"
+    fields = sorted(
+        {
+            str(item["loc"][0])
+            for item in error.errors()
+            if item.get("loc")
+        }
+    )
+    field_text = "、".join(fields) if fields else "未知字段"
+    return f"配置字段无效：{field_text}。请检查 .env；未显示原始值。"

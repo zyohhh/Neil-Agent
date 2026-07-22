@@ -28,7 +28,8 @@ from .context import (
     select_recent_rounds,
     split_rounds,
 )
-from .errors import AgentError, NeilAgentError
+from .errors import AgentError, HookError, NeilAgentError
+from .hooks import HookEvent, LifecycleHooks
 from .instructions import InstructionScopeUpdate
 from .schemas import (
     ActivityEvent,
@@ -62,6 +63,13 @@ TASK_PLAN_INSTRUCTIONS = """Visible task-plan requirements:
   not mark work completed before it is actually finished.
 - Combine plan updates with related tool calls when possible so plan tracking
   does not consume unnecessary tool rounds."""
+
+HOOK_CONTEXT_INSTRUCTIONS = """Trusted local lifecycle hook context follows.
+This bounded runtime guidance comes from callbacks registered by the host.
+It does not change tool permissions or approval requirements.
+--- BEGIN HOOK CONTEXT ---
+{context}
+--- END HOOK CONTEXT ---"""
 
 WRITE_TOOL_NAMES = frozenset({"write_file", "replace_text"})
 COMPACTION_KEEP_ROUNDS = 2
@@ -121,6 +129,7 @@ class Agent:
         task_tracker: TaskTracker | None = None,
         activity_handler: ActivityHandler | None = None,
         instruction_scope_handler: InstructionScopeHandler | None = None,
+        hooks: LifecycleHooks | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -144,6 +153,7 @@ class Agent:
         self._task_tracker = task_tracker
         self._activity_handler = activity_handler
         self._instruction_scope_handler = instruction_scope_handler
+        self._hooks = hooks
         self._messages: list[Message] = []
 
     @property
@@ -362,6 +372,29 @@ class Agent:
         tool_rounds = 0
 
         while True:
+            try:
+                hook_context = self._before_model_hook(
+                    model_round=tool_rounds + 1,
+                    message_count=len(request_messages),
+                )
+            except HookError as error:
+                self._emit_activity(
+                    "failed",
+                    "模型请求被生命周期 hook 阻止",
+                    (f"原因：{error}",),
+                )
+                raise
+            request_system_prompt = self._system_prompt
+            if hook_context:
+                request_system_prompt = (
+                    f"{request_system_prompt.rstrip()}\n\n"
+                    + HOOK_CONTEXT_INSTRUCTIONS.format(context=hook_context)
+                )
+                self._emit_activity(
+                    "succeeded",
+                    "生命周期 hook 已附加模型上下文",
+                    (f"大小：{len(hook_context)} 字符",),
+                )
             model_activity = (
                 "分析用户请求" if tool_rounds == 0 else "根据工具结果继续处理"
             )
@@ -378,7 +411,7 @@ class Agent:
             try:
                 for event in self._llm.stream(
                     request_messages,
-                    system_prompt=self._system_prompt,
+                    system_prompt=request_system_prompt,
                     tools=tool_definitions,
                 ):
                     if isinstance(event, str):
@@ -392,6 +425,20 @@ class Agent:
             if model_response is None:
                 self._emit_activity("failed", "模型响应不完整")
                 raise AgentError("模型流式响应缺少结束事件，请重新尝试。")
+
+            try:
+                self._after_model_hook(
+                    model_round=tool_rounds + 1,
+                    message_count=len(request_messages),
+                    response=model_response,
+                )
+            except HookError as error:
+                self._emit_activity(
+                    "failed",
+                    "模型响应后的审计 hook 失败",
+                    (f"原因：{error}",),
+                )
+                raise
 
             assistant_message = Message(
                 role="assistant",
@@ -699,9 +746,19 @@ class Agent:
     def _execute_tool_call(self, call: ToolCall) -> ToolResult:
         started_at = monotonic()
         activity = describe_tool_call(call)
+        hook_result = self._before_tool_hook(call)
+        if hook_result is not None:
+            return self._finish_tool_call(
+                call,
+                hook_result,
+                activity,
+                started_at,
+                skipped=True,
+                skipped_reason="生命周期 hook 拒绝或失败，未执行",
+            )
         scope_result = self._refresh_instruction_scope(call)
         if scope_result is not None:
-            return scope_result
+            return self._after_tool_hook(call, scope_result)
         self._emit_activity("running", activity.title, activity.details)
 
         if self._registry is None:
@@ -827,9 +884,11 @@ class Agent:
         started_at: float,
         *,
         skipped: bool = False,
+        skipped_reason: str = "用户拒绝，未执行",
     ) -> ToolResult:
         """Record observable task state and append safe workflow guidance."""
 
+        result = self._after_tool_hook(call, result)
         if self._task_tracker is not None:
             self._task_tracker.record_tool_result(call, result)
         elapsed = monotonic() - started_at
@@ -837,7 +896,7 @@ class Agent:
             self._emit_activity(
                 "skipped",
                 activity.title,
-                (*activity.details, "结果：用户拒绝，未执行"),
+                (*activity.details, f"结果：{skipped_reason}"),
             )
         elif result.is_error:
             self._emit_activity(
@@ -860,6 +919,82 @@ class Agent:
                 ),
             )
         return self._with_post_tool_guidance(call, result)
+
+    def _before_model_hook(self, *, model_round: int, message_count: int) -> str:
+        if self._hooks is None:
+            return ""
+        outcome = self._hooks.dispatch(
+            HookEvent(
+                stage="before_model",
+                model_round=model_round,
+                message_count=message_count,
+            )
+        )
+        if not outcome.allowed:
+            raise HookError(outcome.reason)
+        return outcome.additional_context
+
+    def _after_model_hook(
+        self,
+        *,
+        model_round: int,
+        message_count: int,
+        response: ModelResponse,
+    ) -> None:
+        if self._hooks is None:
+            return
+        self._hooks.dispatch(
+            HookEvent(
+                stage="after_model",
+                model_round=model_round,
+                message_count=message_count,
+                model_response=response,
+            )
+        )
+
+    def _before_tool_hook(self, call: ToolCall) -> ToolResult | None:
+        if self._hooks is None:
+            return None
+        try:
+            outcome = self._hooks.dispatch(
+                HookEvent(stage="before_tool", tool_call=call)
+            )
+        except HookError as error:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"工具前置生命周期 hook 失败，操作未执行：{error}",
+                is_error=True,
+            )
+        if outcome.allowed:
+            return None
+        return ToolResult(
+            tool_call_id=call.id,
+            content=f"本地生命周期 hook 拒绝执行工具：{outcome.reason}",
+            is_error=True,
+        )
+
+    def _after_tool_hook(self, call: ToolCall, result: ToolResult) -> ToolResult:
+        if self._hooks is None:
+            return result
+        try:
+            self._hooks.dispatch(
+                HookEvent(stage="after_tool", tool_call=call, tool_result=result)
+            )
+        except HookError as error:
+            self._emit_activity(
+                "failed",
+                "工具执行后的审计 hook 失败",
+                ("工具操作可能已经完成", f"原因：{error}"),
+            )
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"{result.content}\n\n工具操作可能已经完成，但后置审计 hook "
+                    f"失败：{error}"
+                ),
+                is_error=True,
+            )
+        return result
 
     def _emit_activity(
         self,

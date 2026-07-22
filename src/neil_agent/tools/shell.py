@@ -89,8 +89,7 @@ class ShellTools:
             requires_approval=True,
             preview_handler=self.preview_quality_check,
         )
-        registry.register(GIT_STATUS, self.git_status)
-        registry.register(GIT_DIFF, self.git_diff)
+        self.register_read_only(registry)
         registry.register(
             GIT_STAGE,
             self.git_stage,
@@ -103,6 +102,12 @@ class ShellTools:
             requires_approval=True,
             preview_handler=self.preview_git_commit,
         )
+
+    def register_read_only(self, registry: ToolRegistry) -> None:
+        """Register only non-mutating Git inspection commands."""
+
+        registry.register(GIT_STATUS, self.git_status)
+        registry.register(GIT_DIFF, self.git_diff)
 
     def preview_quality_check(self, check: str) -> str:
         """Describe the exact fixed command that would be executed."""
@@ -586,16 +591,16 @@ class ShellTools:
 RUN_QUALITY_CHECK = ToolDefinition(
     name="run_quality_check",
     description=(
-        "Run one fixed project quality check. Allowed checks are pytest, ruff, "
-        "and mypy. The command runs in the workspace with a timeout, no shell, "
-        "and requires explicit user approval."
+        "Run one fixed project quality check. Allowed checks are eval, pytest, "
+        "ruff, and mypy. The command runs in the workspace with a timeout, no "
+        "shell, and requires explicit user approval."
     ),
     input_schema={
         "type": "object",
         "properties": {
             "check": {
                 "type": "string",
-                "enum": ["pytest", "ruff", "mypy"],
+                "enum": ["eval", "pytest", "ruff", "mypy"],
                 "description": "The fixed quality check to run.",
             }
         },

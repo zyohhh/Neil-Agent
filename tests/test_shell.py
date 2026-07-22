@@ -82,6 +82,18 @@ def test_quality_check_rejects_commands_outside_allowlist(tmp_path: Path) -> Non
     assert "pytest, ruff, mypy" in result.content
 
 
+def test_quality_check_definition_exposes_offline_eval(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    ShellTools(tmp_path).register(registry)
+
+    definition = next(
+        item for item in registry.definitions if item.name == "run_quality_check"
+    )
+
+    check_schema = definition.input_schema["properties"]["check"]
+    assert check_schema["enum"] == ["eval", "pytest", "ruff", "mypy"]
+
+
 def test_git_inspection_commands_do_not_require_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -45,9 +45,7 @@ class FileSystemTools:
     def register(self, registry: ToolRegistry) -> None:
         """Register read tools and approval-required write tools."""
 
-        registry.register(LIST_DIRECTORY, self.list_directory)
-        registry.register(READ_FILE, self.read_file)
-        registry.register(SEARCH_TEXT, self.search_text)
+        self.register_read_only(registry)
         registry.register(
             WRITE_FILE,
             self.write_file,
@@ -60,6 +58,13 @@ class FileSystemTools:
             requires_approval=True,
             preview_handler=self.preview_replace_text,
         )
+
+    def register_read_only(self, registry: ToolRegistry) -> None:
+        """Register only bounded inspection tools for unattended runs."""
+
+        registry.register(LIST_DIRECTORY, self.list_directory)
+        registry.register(READ_FILE, self.read_file)
+        registry.register(SEARCH_TEXT, self.search_text)
 
     def list_directory(self, path: str = ".") -> str:
         """List direct children of a workspace directory."""

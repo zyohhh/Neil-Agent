@@ -23,3 +23,7 @@ class SessionError(NeilAgentError):
 
 class InstructionError(NeilAgentError):
     """A project-instruction load, initialization, or reload error."""
+
+
+class HookError(NeilAgentError):
+    """A lifecycle hook registration, decision, or callback error."""
