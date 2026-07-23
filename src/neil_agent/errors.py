@@ -27,3 +27,7 @@ class InstructionError(NeilAgentError):
 
 class HookError(NeilAgentError):
     """A lifecycle hook registration, decision, or callback error."""
+
+
+class AuditError(NeilAgentError):
+    """A bounded local audit-log initialization or write error."""

@@ -48,9 +48,7 @@ def test_before_model_hook_adds_bounded_request_only_context() -> None:
 
     assert response == "done"
     assert "LOCAL-POLICY" in model.system_prompts[0]
-    assert "LOCAL-POLICY" not in " ".join(
-        message.content for message in agent.messages
-    )
+    assert "LOCAL-POLICY" not in " ".join(message.content for message in agent.messages)
 
 
 def test_after_model_audit_receives_typed_response() -> None:

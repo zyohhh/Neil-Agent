@@ -76,6 +76,15 @@ class LifecycleHooks:
             raise HookError("生命周期 hook 必须是可调用的 Python 对象。")
         callbacks.append(callback)
 
+    def copy(self) -> LifecycleHooks:
+        """Copy registrations so one run can attach private built-in hooks."""
+
+        copied = LifecycleHooks()
+        copied._callbacks = {
+            stage: list(callbacks) for stage, callbacks in self._callbacks.items()
+        }
+        return copied
+
     def dispatch(self, event: HookEvent) -> HookOutcome:
         """Run callbacks in order and fail closed on invalid control output."""
 

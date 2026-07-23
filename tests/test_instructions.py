@@ -192,7 +192,9 @@ def test_scope_manager_refreshes_only_when_effective_rules_change(
     assert "SRC" not in same_chain.prompt_section
 
 
-def test_scope_manager_rejects_missing_parent_before_file_access(tmp_path: Path) -> None:
+def test_scope_manager_rejects_missing_parent_before_file_access(
+    tmp_path: Path,
+) -> None:
     manager = ProjectInstructionManager(tmp_path)
 
     with pytest.raises(InstructionError, match="父目录不存在"):

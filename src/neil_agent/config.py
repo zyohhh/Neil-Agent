@@ -113,6 +113,16 @@ class Settings(BaseSettings):
         ge=1_000,
         description="Maximum command output returned to the model.",
     )
+    audit_log_enabled: bool = Field(
+        default=False,
+        description="Write metadata-only lifecycle events to a local JSONL log.",
+    )
+    audit_log_max_bytes: int = Field(
+        default=1_000_000,
+        ge=10_000,
+        le=10_000_000,
+        description="Maximum audit JSONL size before one-file rotation.",
+    )
 
     @field_validator("system_prompt")
     @classmethod

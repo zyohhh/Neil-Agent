@@ -15,7 +15,13 @@ from anthropic import (
     AuthenticationError,
     RateLimitError,
 )
-from anthropic.types import ContentBlock, MessageParam, ThinkingConfigParam, ToolParam
+from anthropic.types import (
+    ContentBlock,
+    Message as AnthropicMessage,
+    MessageParam,
+    ThinkingConfigParam,
+    ToolParam,
+)
 
 from .config import Settings, get_settings
 from .errors import LLMError
@@ -24,6 +30,7 @@ from .schemas import (
     Message,
     ModelResponse,
     ThinkingContent,
+    TokenUsage,
     ToolCall,
     ToolDefinition,
 )
@@ -51,6 +58,13 @@ class LLMClient:
         )
         self._retry_handler = retry_handler
         self._sleeper = sleeper
+        self._last_usage: TokenUsage | None = None
+
+    @property
+    def last_usage(self) -> TokenUsage | None:
+        """Return usage from the most recently completed SDK request."""
+
+        return self._last_usage
 
     def complete(
         self,
@@ -61,6 +75,7 @@ class LLMClient:
         """Return one complete model response without streaming."""
 
         self._ensure_messages(messages)
+        self._last_usage = None
         retries_done = 0
         while True:
             try:
@@ -78,6 +93,9 @@ class LLMClient:
                 retries_done += 1
                 self._wait_for_retry(error, retries_done)
 
+        sdk_usage = getattr(response, "usage", None)
+        if sdk_usage is not None:
+            self._last_usage = self._to_token_usage(sdk_usage)
         return self._extract_text(response.content)
 
     def stream(
@@ -90,6 +108,7 @@ class LLMClient:
         """Yield text fragments followed by one accumulated response event."""
 
         self._ensure_messages(messages)
+        self._last_usage = None
 
         retries_done = 0
         emitted_text = False
@@ -115,7 +134,9 @@ class LLMClient:
                 retries_done += 1
                 self._wait_for_retry(error, retries_done)
 
-        yield self._to_model_response(final_message.content)
+        model_response = self._to_model_response(final_message)
+        self._last_usage = model_response.usage
+        yield model_response
 
     @staticmethod
     def _ensure_messages(messages: Sequence[Message]) -> None:
@@ -227,8 +248,8 @@ class LLMClient:
         return text
 
     @staticmethod
-    def _to_model_response(content: Iterable[ContentBlock]) -> ModelResponse:
-        blocks = list(content)
+    def _to_model_response(message: AnthropicMessage) -> ModelResponse:
+        blocks = list(message.content)
         text = "".join(block.text for block in blocks if block.type == "text")
         tool_calls = tuple(
             ToolCall(id=block.id, name=block.name, arguments=dict(block.input))
@@ -248,10 +269,29 @@ class LLMClient:
                 for block in blocks
                 if block.type == "thinking"
             )
+        sdk_usage = getattr(message, "usage", None)
         return ModelResponse(
             content=text,
             thinking=thinking,
             tool_calls=tool_calls,
+            usage=(
+                LLMClient._to_token_usage(sdk_usage) if sdk_usage is not None else None
+            ),
+        )
+
+    @staticmethod
+    def _to_token_usage(usage: object) -> TokenUsage:
+        """Copy only stable numeric fields from the SDK usage object."""
+
+        def token_count(name: str) -> int:
+            value = getattr(usage, name, 0)
+            return value if isinstance(value, int) and value >= 0 else 0
+
+        return TokenUsage(
+            input_tokens=token_count("input_tokens"),
+            output_tokens=token_count("output_tokens"),
+            cache_creation_input_tokens=token_count("cache_creation_input_tokens"),
+            cache_read_input_tokens=token_count("cache_read_input_tokens"),
         )
 
     @staticmethod

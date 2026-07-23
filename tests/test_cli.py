@@ -19,6 +19,7 @@ from neil_agent.schemas import (
     ActivityEvent,
     Message,
     ModelResponse,
+    TokenUsage,
     ToolCall,
     ToolDefinition,
 )
@@ -239,6 +240,49 @@ def test_config_error_message_does_not_echo_invalid_raw_value() -> None:
     assert secret_value not in message
 
 
+def test_context_distinguishes_estimate_from_server_usage() -> None:
+    agent = Agent(FakeLLMClient.__new__(FakeLLMClient))
+    agent.restore_messages(
+        (
+            Message(role="user", content="hello"),
+            Message(role="assistant", content="done"),
+        ),
+        TokenUsage(input_tokens=100, output_tokens=20),
+    )
+    console = MagicMock(spec=Console)
+
+    cli._show_context(cast(Console, console), agent)
+
+    output = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "最近服务端实测" in output
+    assert "输入 100" in output
+    assert "输出 20" in output
+    assert "合计 120 token" in output
+    assert "不能预测下一次费用" in output
+
+
+def test_rewind_file_requires_confirmation_and_restores_latest_edit(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "example.txt"
+    target.write_text("before", encoding="utf-8")
+    tools = cli.FileSystemTools(tmp_path)
+    tools.write_file("example.txt", "after")
+    console = MagicMock(spec=Console)
+    console.input.return_value = "yes"
+
+    cli._rewind_latest_file(cast(Console, console), tools)
+
+    assert target.read_text(encoding="utf-8") == "before"
+    printed = "\n".join(
+        str(call.args[0]) for call in console.print.call_args_list if call.args
+    )
+    assert "恢复最近文件编辑" in printed
+    assert "已恢复文件原内容" in printed
+
+
 def test_run_lists_and_restores_an_explicit_local_session(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -353,7 +397,9 @@ def test_run_explicitly_compacts_and_persists_complete_history(
         "third",
     ]
     assert index.valid_count == 2
-    backup = next(item for item in index.sessions if item.session_id != snapshot.session_id)
+    backup = next(
+        item for item in index.sessions if item.session_id != snapshot.session_id
+    )
     backup_snapshot = SessionStore(tmp_path).load(backup.session_id)
     assert len(backup_snapshot.messages) == 6
     assert not backup_snapshot.messages[0].content.startswith(

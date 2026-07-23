@@ -176,8 +176,7 @@ def select_recent_rounds(
         round_chars = estimate_messages_chars(conversation_round)
         round_tokens = estimate_messages_tokens(conversation_round)
         exceeds_token_budget = (
-            max_tokens is not None
-            and selected_tokens + round_tokens > max_tokens
+            max_tokens is not None and selected_tokens + round_tokens > max_tokens
         )
         if selected_chars + round_chars > max_chars or exceeds_token_budget:
             break

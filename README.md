@@ -28,6 +28,8 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/export [id]`：预览后导出当前或指定会话。
 - `/import <文件名>`：预览后导入 `.neil-agent/exports/` 中的严格版本化文件。
 - `/compact [关注点]`：总结较早轮次、保留最近完整上下文，并保存压缩前会话副本。
+- `/context`：区分下一次请求的本地软预算估算与最近一次服务端实测 `usage`。
+- `/rewind-file`：预览并恢复本进程最近一次 Agent 文件工具编辑；外部变化会拒绝恢复。
 - `/permissions`：显示真正由代码执行的工具审批和工作区边界。
 
 Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。
@@ -43,11 +45,15 @@ uv run neil-agent -p "检查工作区状态" --output-format stream-json
 ```
 
 - `text`：标准输出只有最终文本流；错误写入标准错误。
-- `json`：标准输出只有一行最终 JSON，包含协议版本、结果、活动与退出状态。
+- `json`：标准输出只有一行最终 JSON，包含协议版本、结果、活动、服务端 `usage` 与退出状态。
 - `stream-json`：标准输出为 JSONL，依次发送 `session_start`、活动、文本增量和最终结果或错误。
+- 结构化错误包含稳定的 `error_code`；协议版本 1 的字段契约由测试夹具固定。
 - 成功、运行错误、参数/配置错误和用户中断分别使用退出码 `0`、`1`、`2`、`130`。
 - 一次性运行默认不保存；显式添加 `--save-session` 才写入工作区会话目录。
 - 所有结构化格式都不会输出思考内容。完整协议见 [`docs/non-interactive.md`](docs/non-interactive.md)。
+
+如需本地生命周期审计，可设置 `AUDIT_LOG_ENABLED=true`。日志写入
+`.neil-agent/audit/events.jsonl`，只记录有界元数据，不记录 prompt、thinking、工具参数/正文或 API Key；`AUDIT_LOG_MAX_BYTES` 控制单文件轮转上限。
 
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 

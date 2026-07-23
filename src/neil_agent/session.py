@@ -26,7 +26,7 @@ from pydantic import (
 )
 
 from .errors import SessionError
-from .schemas import Message, validate_message_history
+from .schemas import Message, TokenUsage, validate_message_history
 from .task import (
     MAX_QUALITY_OUTPUT_CHARS,
     MAX_TASK_STEP_CHARS,
@@ -39,7 +39,8 @@ from .task import (
 )
 
 LEGACY_SESSION_FORMAT_VERSION: Literal[1] = 1
-SESSION_FORMAT_VERSION: Literal[2] = 2
+PREVIOUS_SESSION_FORMAT_VERSION: Literal[2] = 2
+SESSION_FORMAT_VERSION: Literal[3] = 3
 SESSION_STATE_DIRECTORY = ".neil-agent"
 SESSION_DIRECTORY = "sessions"
 SESSION_EXPORT_DIRECTORY = "exports"
@@ -52,9 +53,7 @@ MAX_SESSION_PAGE_SIZE = 50
 UNTITLED_SESSION = "新会话"
 SESSION_ID_PATTERN_TEXT = r"^\d{8}T\d{12}Z-[0-9a-f]{8}$"
 SESSION_ID_PATTERN = re.compile(SESSION_ID_PATTERN_TEXT)
-EXPORT_FILENAME_PATTERN = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.json$"
-)
+EXPORT_FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.json$")
 SessionSort = Literal["updated", "title"]
 SessionOrder = Literal["asc", "desc"]
 SessionStateFilter = Literal["all", "planned", "failed", "compacted"]
@@ -157,14 +156,40 @@ class SessionSnapshotV1(SessionState):
             messages=self.messages,
             plan=self.plan,
             latest_quality_check=self.latest_quality_check,
+            last_usage=None,
+        )
+
+
+class SessionSnapshotV2(SessionState):
+    """Previous titled snapshot retained for strict migration."""
+
+    version: Literal[2] = PREVIOUS_SESSION_FORMAT_VERSION
+    title: str = Field(min_length=1, max_length=MAX_SESSION_TITLE_CHARS)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_be_safe(cls, value: str) -> str:
+        return normalize_session_title(value)
+
+    def migrate(self) -> SessionSnapshot:
+        return SessionSnapshot(
+            session_id=self.session_id,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            title=self.title,
+            messages=self.messages,
+            plan=self.plan,
+            latest_quality_check=self.latest_quality_check,
+            last_usage=None,
         )
 
 
 class SessionSnapshot(SessionState):
     """Current version of one complete, resumable local session."""
 
-    version: Literal[2] = SESSION_FORMAT_VERSION
+    version: Literal[3] = SESSION_FORMAT_VERSION
     title: str = Field(min_length=1, max_length=MAX_SESSION_TITLE_CHARS)
+    last_usage: TokenUsage | None = None
 
     @field_validator("title")
     @classmethod
@@ -179,12 +204,20 @@ class SessionExportEnvelope(BaseModel):
 
     export_version: Literal[1] = SESSION_EXPORT_FORMAT_VERSION
     exported_at: AwareDatetime
-    session: SessionSnapshot
+    session: SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1
 
 
-SESSION_SNAPSHOT_ADAPTER: TypeAdapter[SessionSnapshot | SessionSnapshotV1] = (
-    TypeAdapter(SessionSnapshot | SessionSnapshotV1)
-)
+SESSION_SNAPSHOT_ADAPTER: TypeAdapter[
+    SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1
+] = TypeAdapter(SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1)
+
+
+def _migrate_snapshot(
+    snapshot: SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1,
+) -> SessionSnapshot:
+    if isinstance(snapshot, SessionSnapshot):
+        return snapshot
+    return snapshot.migrate()
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +324,7 @@ class SessionStore:
         steps: Sequence[TaskStep],
         latest_quality_check: QualityCheckRecord | None,
         *,
+        last_usage: TokenUsage | None = None,
         create_only: bool = False,
     ) -> SessionSnapshot:
         """Atomically replace one versioned snapshot."""
@@ -316,6 +350,7 @@ class SessionStore:
                     if latest_quality_check is not None
                     else None
                 ),
+                last_usage=last_usage,
             )
         except ValueError as error:
             raise SessionError(f"无法保存无效会话：{error}") from error
@@ -339,6 +374,7 @@ class SessionStore:
             messages=snapshot.messages,
             plan=snapshot.plan,
             latest_quality_check=snapshot.latest_quality_check,
+            last_usage=snapshot.last_usage,
         )
         self._write_snapshot(renamed)
         return renamed
@@ -364,6 +400,7 @@ class SessionStore:
             source.messages,
             source.restored_steps(),
             source.restored_quality_check(),
+            last_usage=source.last_usage,
             create_only=True,
         )
 
@@ -463,9 +500,8 @@ class SessionStore:
                 continue
             summary = self._summary(snapshot, size_bytes=size_bytes)
             if (
-                (not normalized_query or _summary_matches(summary, normalized_query))
-                and _summary_has_state(summary, state)
-            ):
+                not normalized_query or _summary_matches(summary, normalized_query)
+            ) and _summary_has_state(summary, state):
                 summaries.append(summary)
         key = (
             (lambda item: item.updated_at)
@@ -527,7 +563,9 @@ class SessionStore:
 
         normalized = filename.strip()
         if not EXPORT_FILENAME_PATTERN.fullmatch(normalized):
-            raise SessionError("导入文件名无效；只能使用 exports 目录内的 .json 文件名。")
+            raise SessionError(
+                "导入文件名无效；只能使用 exports 目录内的 .json 文件名。"
+            )
         export_root = self._resolved_export_root(create=False)
         if export_root is None:
             raise SessionError("尚无本地会话导出目录。")
@@ -550,14 +588,15 @@ class SessionStore:
             raise
         except (OSError, ValueError) as error:
             raise SessionError(f"会话导入文件无效：{normalized}") from error
-        if self.has_saved(envelope.session.session_id):
-            raise SessionError(f"会话 ID 已存在：{envelope.session.session_id}")
+        snapshot = _migrate_snapshot(envelope.session)
+        if self.has_saved(snapshot.session_id):
+            raise SessionError(f"会话 ID 已存在：{snapshot.session_id}")
         return PreparedSessionImport(
-            summary=self._summary(envelope.session, size_bytes=len(payload)),
+            summary=self._summary(snapshot, size_bytes=len(payload)),
             source=source,
             size_bytes=len(payload),
             payload_hash=sha256(payload).hexdigest(),
-            snapshot=envelope.session,
+            snapshot=snapshot,
         )
 
     def apply_import(self, prepared: PreparedSessionImport) -> SessionSnapshot:
@@ -586,9 +625,9 @@ class SessionStore:
         root = self._resolved_root(create=True)
         assert root is not None
         target = root / f"{prepared.snapshot.session_id}.json"
-        snapshot_payload = (
-            prepared.snapshot.model_dump_json(indent=2) + "\n"
-        ).encode("utf-8")
+        snapshot_payload = (prepared.snapshot.model_dump_json(indent=2) + "\n").encode(
+            "utf-8"
+        )
         self._write_exclusive(target, snapshot_payload, "会话导入")
         return prepared.snapshot
 
@@ -604,9 +643,7 @@ class SessionStore:
                 raise SessionError("会话快照过大，拒绝读取。")
             payload = resolved.read_bytes()
             parsed = SESSION_SNAPSHOT_ADAPTER.validate_json(payload)
-            snapshot = (
-                parsed.migrate() if isinstance(parsed, SessionSnapshotV1) else parsed
-            )
+            snapshot = _migrate_snapshot(parsed)
         except SessionError:
             raise
         except (OSError, ValueError) as error:

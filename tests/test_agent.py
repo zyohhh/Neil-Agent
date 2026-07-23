@@ -15,6 +15,7 @@ from neil_agent.schemas import (
     ToolCall,
     ToolDefinition,
     ToolResult,
+    TokenUsage,
 )
 from neil_agent.task import TaskTracker
 from neil_agent.tools.registry import ToolRegistry
@@ -76,6 +77,50 @@ def test_stream_chat_saves_complete_round() -> None:
     ]
 
 
+def test_stream_chat_accumulates_server_usage_across_tool_rounds() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_value",
+            description="Read a value.",
+            input_schema={"type": "object", "additionalProperties": False},
+        ),
+        lambda: "value",
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [
+            ModelResponse(
+                tool_calls=(ToolCall(id="call-1", name="read_value"),),
+                usage=TokenUsage(input_tokens=10, output_tokens=2),
+            )
+        ],
+        [
+            "done",
+            ModelResponse(
+                content="done",
+                usage=TokenUsage(
+                    input_tokens=20,
+                    output_tokens=3,
+                    cache_read_input_tokens=4,
+                ),
+            ),
+        ],
+    ]
+    agent = Agent(model, registry=registry)
+
+    assert "".join(agent.stream_chat("inspect")) == "done"
+    assert agent.last_usage == TokenUsage(
+        input_tokens=30,
+        output_tokens=5,
+        cache_read_input_tokens=4,
+    )
+    assert agent.last_usage.total_tokens == 39
+
+    agent.clear()
+    assert agent.last_usage is None
+
+
 def test_new_file_scope_is_loaded_before_tool_execution(tmp_path: Path) -> None:
     nested = tmp_path / "src"
     nested.mkdir()
@@ -99,11 +144,17 @@ def test_new_file_scope_is_loaded_before_tool_execution(tmp_path: Path) -> None:
     model = FakeChatModel()
     model.stream_responses = [
         [ModelResponse(tool_calls=(tool_call,))],
-        [ModelResponse(tool_calls=(ToolCall(
-            id="read-2",
-            name="read_file",
-            arguments={"path": "src/example.py"},
-        ),))],
+        [
+            ModelResponse(
+                tool_calls=(
+                    ToolCall(
+                        id="read-2",
+                        name="read_file",
+                        arguments={"path": "src/example.py"},
+                    ),
+                )
+            )
+        ],
         ["done", ModelResponse(content="done")],
     ]
     manager = ProjectInstructionManager(tmp_path)

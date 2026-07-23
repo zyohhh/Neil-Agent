@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Generator, Iterator, Sequence
 from time import monotonic
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .activity import (
     ToolActivity,
@@ -39,6 +39,7 @@ from .schemas import (
     ToolCall,
     ToolDefinition,
     ToolResult,
+    TokenUsage,
     validate_message_history,
 )
 from .task import TaskTracker
@@ -111,6 +112,14 @@ class ChatModel(Protocol):
     ) -> Iterator[str | ModelResponse]: ...
 
 
+@runtime_checkable
+class UsageReportingChatModel(Protocol):
+    """Optional model capability for non-streaming request usage."""
+
+    @property
+    def last_usage(self) -> TokenUsage | None: ...
+
+
 class Agent:
     """Manage successful user/assistant rounds and call the chat model."""
 
@@ -155,6 +164,7 @@ class Agent:
         self._instruction_scope_handler = instruction_scope_handler
         self._hooks = hooks
         self._messages: list[Message] = []
+        self._last_usage: TokenUsage | None = None
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -162,10 +172,17 @@ class Agent:
 
         return tuple(self._messages)
 
+    @property
+    def last_usage(self) -> TokenUsage | None:
+        """Return server-reported usage for the latest successful Agent turn."""
+
+        return self._last_usage
+
     def clear(self) -> None:
         """Start a new conversation."""
 
         self._messages.clear()
+        self._last_usage = None
         if self._task_tracker is not None:
             self._task_tracker.clear()
 
@@ -210,11 +227,16 @@ class Agent:
             selected_message_tokens=selection.estimated_tokens,
         )
 
-    def restore_messages(self, messages: Sequence[Message]) -> None:
+    def restore_messages(
+        self,
+        messages: Sequence[Message],
+        last_usage: TokenUsage | None = None,
+    ) -> None:
         """Replace history with validated, complete persisted rounds."""
 
         validate_message_history(messages)
         self._messages = self._trim_history(messages)
+        self._last_usage = last_usage
 
     def prepare_compaction(
         self,
@@ -228,9 +250,7 @@ class Agent:
             raise ValueError("keep_recent_rounds must be at least 1")
         normalized_focus = focus.strip()
         if len(normalized_focus) > MAX_COMPACTION_FOCUS_CHARS:
-            raise AgentError(
-                f"压缩关注点最多 {MAX_COMPACTION_FOCUS_CHARS} 个字符。"
-            )
+            raise AgentError(f"压缩关注点最多 {MAX_COMPACTION_FOCUS_CHARS} 个字符。")
         if any(
             ord(character) < 32 and character not in {"\t"}
             for character in normalized_focus
@@ -360,6 +380,11 @@ class Agent:
         )
         assistant_message = self._make_assistant_message(response)
         self._commit_messages((user_message, assistant_message))
+        self._last_usage = (
+            self._llm.last_usage
+            if isinstance(self._llm, UsageReportingChatModel)
+            else None
+        )
         return response
 
     def stream_chat(self, user_input: str) -> Generator[str, None, None]:
@@ -370,6 +395,7 @@ class Agent:
         pending_messages = [user_message]
         tool_definitions = self._tool_definitions()
         tool_rounds = 0
+        turn_usage: TokenUsage | None = None
 
         while True:
             try:
@@ -448,9 +474,16 @@ class Agent:
             )
             request_messages.append(assistant_message)
             pending_messages.append(assistant_message)
+            if model_response.usage is not None:
+                turn_usage = (
+                    model_response.usage
+                    if turn_usage is None
+                    else turn_usage.combine(model_response.usage)
+                )
 
             if not model_response.tool_calls:
                 self._commit_messages(pending_messages)
+                self._last_usage = turn_usage
                 return
 
             self._emit_activity(
@@ -573,9 +606,7 @@ class Agent:
             recent_messages,
             max_rounds=max_rounds - 1,
             max_chars=max_chars - checkpoint_chars,
-            max_tokens=(
-                None if max_tokens is None else max_tokens - checkpoint_tokens
-            ),
+            max_tokens=(None if max_tokens is None else max_tokens - checkpoint_tokens),
         )
         return ContextSelection(
             messages=(*checkpoint, *recent.messages),
@@ -690,11 +721,7 @@ class Agent:
         focus: str = "",
     ) -> str:
         previous = existing_summary or "（尚无摘要，这是第一批历史。）"
-        focus_section = (
-            f"\n\nUser-requested summary focus:\n{focus}"
-            if focus
-            else ""
-        )
+        focus_section = f"\n\nUser-requested summary focus:\n{focus}" if focus else ""
         return (
             "Update the durable conversation summary using the next batch of "
             "older history.\n\n"

@@ -19,7 +19,13 @@ from neil_agent import llm as llm_module
 from neil_agent.config import Settings
 from neil_agent.errors import LLMError
 from neil_agent.llm import LLMClient
-from neil_agent.schemas import ActivityEvent, Message, ModelResponse, ToolDefinition
+from neil_agent.schemas import (
+    ActivityEvent,
+    Message,
+    ModelResponse,
+    TokenUsage,
+    ToolDefinition,
+)
 
 
 def make_settings(*, thinking_enabled: bool = False) -> Settings:
@@ -34,7 +40,8 @@ def make_settings(*, thinking_enabled: bool = False) -> Settings:
 def test_complete_extracts_text_content() -> None:
     client = MagicMock(spec=Anthropic)
     client.messages.create.return_value = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="hello")]
+        content=[SimpleNamespace(type="text", text="hello")],
+        usage=SimpleNamespace(input_tokens=7, output_tokens=2),
     )
     llm = LLMClient(make_settings(), client=cast(Anthropic, client))
 
@@ -44,6 +51,7 @@ def test_complete_extracts_text_content() -> None:
     )
 
     assert response == "hello"
+    assert llm.last_usage == TokenUsage(input_tokens=7, output_tokens=2)
     request = client.messages.create.call_args.kwargs
     assert request["model"] == "deepseek-v4-flash"
     assert request["thinking"] == {"type": "disabled"}
@@ -85,7 +93,13 @@ def test_stream_yields_text_fragments() -> None:
     stream = MagicMock()
     stream.text_stream = iter(["你", "好"])
     stream.get_final_message.return_value = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="你好")]
+        content=[SimpleNamespace(type="text", text="你好")],
+        usage=SimpleNamespace(
+            input_tokens=12,
+            output_tokens=3,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=4,
+        ),
     )
     manager = MagicMock()
     manager.__enter__.return_value = stream
@@ -100,7 +114,14 @@ def test_stream_yields_text_fragments() -> None:
     )
 
     assert events[:2] == ["你", "好"]
-    assert events[2] == ModelResponse(content="你好")
+    assert events[2] == ModelResponse(
+        content="你好",
+        usage=TokenUsage(
+            input_tokens=12,
+            output_tokens=3,
+            cache_read_input_tokens=4,
+        ),
+    )
 
 
 def test_stream_returns_tool_call_and_replayable_thinking() -> None:

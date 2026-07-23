@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from difflib import unified_diff
 from hashlib import sha256
 from pathlib import Path
 
+from ..checkpoint import (
+    FileCheckpointHistory,
+    PreparedFileRestore,
+    content_hash,
+)
 from ..errors import ToolError
 from ..schemas import ToolDefinition
 from .registry import ToolRegistry
@@ -36,11 +42,17 @@ BLOCKED_FILE_NAMES = frozenset({".git-credentials", ".netrc", ".npmrc", ".pypirc
 class FileSystemTools:
     """Expose bounded file access while protecting workspace boundaries."""
 
-    def __init__(self, workspace_root: str | Path) -> None:
+    def __init__(
+        self,
+        workspace_root: str | Path,
+        *,
+        checkpoints: FileCheckpointHistory | None = None,
+    ) -> None:
         root = Path(workspace_root).expanduser().resolve()
         if not root.is_dir():
             raise ValueError(f"workspace root is not a directory: {root}")
         self.root = root
+        self.checkpoints = checkpoints or FileCheckpointHistory()
 
     def register(self, registry: ToolRegistry) -> None:
         """Register read tools and approval-required write tools."""
@@ -153,7 +165,15 @@ class FileSystemTools:
 
         action = "更新" if current_content is not None else "创建"
         self._atomic_write(file_path, content)
-        return f"已{action}文件：{self._relative_display(file_path)}"
+        checkpoint = self.checkpoints.record(
+            self._relative_display(file_path),
+            current_content,
+            content,
+        )
+        return (
+            f"已{action}文件：{self._relative_display(file_path)}；"
+            f"恢复检查点：{checkpoint.checkpoint_id}"
+        )
 
     def preview_replace_text(
         self,
@@ -193,11 +213,103 @@ class FileSystemTools:
             expected_replacements,
         )
         self._validate_new_content(updated_content)
+        if current_content == updated_content:
+            return f"文件内容没有变化：{self._relative_display(file_path)}"
         self._atomic_write(file_path, updated_content)
+        checkpoint = self.checkpoints.record(
+            self._relative_display(file_path),
+            current_content,
+            updated_content,
+        )
         return (
             f"已在 {self._relative_display(file_path)} 中替换 "
-            f"{expected_replacements} 处文本。"
+            f"{expected_replacements} 处文本；恢复检查点："
+            f"{checkpoint.checkpoint_id}"
         )
+
+    def prepare_latest_restore(self) -> PreparedFileRestore:
+        """Preview reversal of the latest Agent-owned edit."""
+
+        checkpoint = self.checkpoints.latest
+        if checkpoint is None:
+            raise ToolError("当前进程没有可恢复的文件编辑检查点。")
+        file_path = self._resolve_checkpoint_file(checkpoint.path)
+        current_content = self._read_required_text(file_path, checkpoint.path)
+        current_hash = content_hash(current_content)
+        if current_hash != checkpoint.resulting_hash:
+            raise ToolError("文件在 Agent 编辑后发生外部变化，拒绝恢复。")
+        if checkpoint.original_content is None:
+            preview = self._format_delete_diff(file_path, current_content)
+            deletes_created_file = True
+        else:
+            preview = self._format_diff(
+                file_path,
+                current_content,
+                checkpoint.original_content,
+            )
+            deletes_created_file = False
+        return PreparedFileRestore(
+            checkpoint_id=checkpoint.checkpoint_id,
+            path=checkpoint.path,
+            current_hash=current_hash,
+            preview=preview,
+            deletes_created_file=deletes_created_file,
+        )
+
+    def apply_latest_restore(self, prepared: PreparedFileRestore) -> str:
+        """Restore after rechecking both the latest checkpoint and file hash."""
+
+        checkpoint = self.checkpoints.latest
+        if (
+            checkpoint is None
+            or checkpoint.checkpoint_id != prepared.checkpoint_id
+            or checkpoint.path != prepared.path
+        ):
+            raise ToolError("文件检查点已变化，请重新预览。")
+        file_path = self._resolve_checkpoint_file(prepared.path)
+        current_content = self._read_required_text(file_path, prepared.path)
+        current_hash = content_hash(current_content)
+        if current_hash != prepared.current_hash:
+            raise ToolError("批准后文件内容发生变化，拒绝恢复。")
+        if checkpoint.original_content is None:
+            try:
+                file_path.unlink()
+            except OSError as error:
+                raise ToolError("删除 Agent 新建文件失败，检查点已保留。") from error
+            action = "删除 Agent 新建文件"
+        else:
+            self._atomic_write(file_path, checkpoint.original_content)
+            action = "恢复文件原内容"
+        self.checkpoints.consume(prepared.checkpoint_id, current_hash)
+        return f"已{action}：{prepared.path}"
+
+    def _resolve_checkpoint_file(self, path: str) -> Path:
+        """Resolve a recorded path without following a replacement link."""
+
+        requested = Path(path)
+        if requested.is_absolute():
+            raise ToolError("文件检查点路径无效，拒绝恢复。")
+        lexical = self.root / requested
+        try:
+            file_stat = lexical.lstat()
+            resolved = lexical.resolve(strict=True)
+        except FileNotFoundError as error:
+            raise ToolError(f"文件不存在：{path}") from error
+        except OSError as error:
+            raise ToolError("无法检查文件恢复目标。") from error
+        if (
+            lexical.is_symlink()
+            or not stat.S_ISREG(file_stat.st_mode)
+            or resolved != lexical
+        ):
+            raise ToolError("文件路径在 Agent 编辑后发生外部变化，拒绝恢复。")
+        try:
+            lexical.relative_to(self.root)
+        except ValueError as error:
+            raise ToolError("拒绝恢复工作区之外的路径。") from error
+        if not self._is_allowed(lexical):
+            raise ToolError("该路径包含受保护的目录或敏感文件。")
+        return lexical
 
     def _resolve(self, path: str) -> Path:
         requested = Path(path).expanduser()
@@ -310,6 +422,27 @@ class FileSystemTools:
         before = "" if current_content is None else current_content
         change_id = sha256(
             before.encode("utf-8") + b"\0" + new_content.encode("utf-8")
+        ).hexdigest()[:16]
+        if len(diff) > MAX_DIFF_PREVIEW_CHARS:
+            diff = (
+                diff[:MAX_DIFF_PREVIEW_CHARS]
+                + f"\n... diff 预览已截断（上限 {MAX_DIFF_PREVIEW_CHARS} 字符）。"
+            )
+        return f"{diff}\nChange-ID: {change_id}"
+
+    def _format_delete_diff(self, file_path: Path, current_content: str) -> str:
+        relative = self._relative_display(file_path)
+        diff = "".join(
+            unified_diff(
+                current_content.splitlines(keepends=True),
+                [],
+                fromfile=f"a/{relative}",
+                tofile="/dev/null",
+                lineterm="\n",
+            )
+        )
+        change_id = sha256(
+            current_content.encode("utf-8") + b"\0<deleted>"
         ).hexdigest()[:16]
         if len(diff) > MAX_DIFF_PREVIEW_CHARS:
             diff = (

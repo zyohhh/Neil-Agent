@@ -1,4 +1,4 @@
-# Claude Code 官方文档对照审核（2026-07-22）
+# Claude Code 官方文档对照审核（更新于 2026-07-23）
 
 本审核把 Claude Code 当作成熟产品参考，不把 Neil Agent 改造成 Claude Code 的复制品。结论基于 Anthropic 官方的[项目指令](https://code.claude.com/docs/en/memory)、[权限](https://code.claude.com/docs/en/permissions)、[沙箱](https://code.claude.com/docs/en/sandboxing)、[会话](https://code.claude.com/docs/en/sessions)、[检查点](https://code.claude.com/docs/en/checkpointing)、[非交互模式](https://code.claude.com/docs/en/headless)和 [hooks](https://code.claude.com/docs/en/hooks) 文档。
 
@@ -16,7 +16,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 | 权限 | 只读文件/Git 直接执行；写入、检查、暂存和提交逐次预览批准 | 与官方分层权限方向一致，且权限由代码而非提示词执行 |
 | 命令 | 不提供任意 shell，只提供固定检查与受限 Git | 对当前学习阶段比实现复杂 Bash 规则更安全 |
 | 会话 | 严格本地快照、恢复、搜索、分页、导入导出和分支 | 已覆盖名称、恢复和分支的主要生命周期 |
-| 上下文 | 完整轮次裁剪、字符/token 双软预算、显式压缩 | 结构安全；token 仍是估算而非模型 tokenizer |
+| 上下文 | 完整轮次裁剪、字符/token 双软预算、服务端 usage、显式压缩 | 请求前仍是软估算；最近成功回合保留服务端实测 |
 | 可观察性 | 模型、工具、审批、计划和重试都有实时活动 | 已达到可理解的执行轨迹，不暴露思维链 |
 | 自动化 | 离线评测，以及一次性 `text`、`json`、`stream-json` | 已有稳定只读入口、协议版本和显式退出码 |
 | Hooks | 类型化进程内 `before/after model/tool` 回调 | 支持审计、拒绝和有界上下文；有意不执行任意 shell |
@@ -32,19 +32,23 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 7. 新增类型化生命周期 hooks：前置阶段可拒绝，`before_model` 可提供有界请求上下文，后置阶段只审计；回调异常默认关闭相关操作。
 8. 依据 DeepSeek 官方字符比例调整 token 软估算，并明确实际请求与费用仍以服务端 `usage` 为准。
 9. 完成 Windows AppContainer/Windows Sandbox 与 Linux bubblewrap 的初步隔离评估；通用命令继续保持关闭。
+10. 接收并累加 DeepSeek `usage`，在 `/context`、会话版本 3 和一次性结构化结果中保留最近成功回合的服务端实测。
+11. 用版本化夹具固定 `json` / `stream-json` 字段与错误代码，并继续维持非交互入口只读。
+12. 增加可选的元数据 JSONL 审计 sink；它预检真实路径、限制单条与总大小并做单备份轮转，不记录正文或凭据。
+13. 增加 `/rewind-file` 最小文件检查点，只恢复本进程最新一次 Agent 工具编辑，预览并批准后仍重新检查路径与内容。
 
-本轮实现后的自动化结果为 155 项通过、1 项 Windows 符号链接条件跳过；离线场景评测也已通过，未调用真实 DeepSeek API。
+本轮实现后的自动化结果见开发记录；离线检查不调用真实 DeepSeek API。
 
 ## 明确保留的差异
 
 - Claude Code 把项目 `CLAUDE.md` 作为上下文而非安全配置。Neil Agent 仍把包裹后的项目段拼入系统字符串，这是当前 DeepSeek/LLM 接口的简化；新增的低信任声明和代码权限边界降低了优先级混淆风险，但后续仍可把项目上下文改为独立消息块。
 - Claude Code 的 `/export` 面向人类可读文本。Neil Agent 的 `/export` 仍是为安全导入设计的严格 JSON 信封；新增的 `-p --output-format json|stream-json` 才是脚本协议，两者语义必须持续区分。
-- Claude Code 的检查点能够恢复直接编辑产生的文件状态。Neil Agent 目前只保留对话分支与压缩前副本；Git 仍是代码回退的唯一可靠机制。
+- Claude Code 的检查点可以按对话恢复多文件状态。Neil Agent 只有本进程、单步后进先出的文件内容恢复，不持久化权限/目录元数据，也不覆盖外部程序修改；Git 仍是跨进程和多文件回退的可靠机制。
 - Claude Code 同时使用权限规则和 OS 级沙箱。Neil Agent 在原生 Windows 上只有工具白名单、路径验证、安全环境和逐次审批，不能声称等价于 OS 沙箱。
 
 ## 后续优先级
 
-1. 读取并保存 DeepSeek 响应 `usage`，让 `/context` 和会话元数据区分“本地估算”与“最近一次服务端实测”，但绝不把历史实测外推成精确的下一次费用。
-2. 为结构化协议增加契约测试夹具和兼容性策略；需要恢复会话或写操作前，先定义对应的非交互审批输入协议。
-3. 在独立阶段设计文件编辑检查点，并明确它不能替代 Git，也不能可靠恢复外部程序、符号链接或并发进程的修改。
+1. 使用真实 DeepSeek API 手工核对 `usage` 字段、一次性三种输出、默认只读工具和显式保存；自动化继续不消耗额度。
+2. 在增加非交互写操作前，先设计显式审批输入、重放保护与协议升级策略，绝不复用隐式自动批准。
+3. 若扩展文件检查点，优先定义多文件任务边界、容量失败行为和持久化威胁模型；在此之前维持单步内存恢复并以 Git 作为可靠回退。
 4. 若继续推进通用命令，按 [`sandbox-assessment.md`](sandbox-assessment.md) 实现至少一个 fail-closed 平台后端并完成逃逸测试；在此之前保持固定 allowlist。

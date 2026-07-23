@@ -1,0 +1,76 @@
+{
+  "protocol_version": 1,
+  "json_result": [
+    "type",
+    "protocol_version",
+    "success",
+    "session_id",
+    "result",
+    "saved",
+    "usage",
+    "activities"
+  ],
+  "json_activity": [
+    "status",
+    "message",
+    "details"
+  ],
+  "usage": [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "total_tokens"
+  ],
+  "events": {
+    "session_start": [
+      "type",
+      "protocol_version",
+      "session_id",
+      "model",
+      "workspace",
+      "tools",
+      "read_only"
+    ],
+    "activity": [
+      "type",
+      "status",
+      "message",
+      "details"
+    ],
+    "text_delta": [
+      "type",
+      "text"
+    ],
+    "result": [
+      "type",
+      "protocol_version",
+      "success",
+      "session_id",
+      "result",
+      "saved",
+      "usage"
+    ],
+    "error": [
+      "type",
+      "protocol_version",
+      "success",
+      "error",
+      "error_code",
+      "exit_code"
+    ]
+  },
+  "error_codes": [
+    "agent_error",
+    "audit_error",
+    "configuration_error",
+    "hook_error",
+    "invalid_input",
+    "instruction_error",
+    "internal_error",
+    "interrupted",
+    "model_error",
+    "session_error",
+    "tool_error"
+  ]
+}

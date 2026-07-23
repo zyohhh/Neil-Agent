@@ -8,16 +8,52 @@ from typing import Literal, TextIO
 from unicodedata import category
 
 from .agent import Agent, ChatModel
+from .audit import JsonlAuditSink
 from .config import Settings
-from .errors import NeilAgentError
+from .errors import (
+    AgentError,
+    AuditError,
+    HookError,
+    InstructionError,
+    LLMError,
+    NeilAgentError,
+    SessionError,
+    ToolError,
+)
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
 from .llm import LLMClient
-from .schemas import ActivityEvent
+from .schemas import ActivityEvent, TokenUsage
 from .session import SessionStore
 from .tools import FileSystemTools, ShellTools, ToolRegistry
 
 OutputFormat = Literal["text", "json", "stream-json"]
+ErrorCode = Literal[
+    "agent_error",
+    "audit_error",
+    "configuration_error",
+    "hook_error",
+    "invalid_input",
+    "instruction_error",
+    "internal_error",
+    "interrupted",
+    "model_error",
+    "session_error",
+    "tool_error",
+]
+SUPPORTED_ERROR_CODES: tuple[ErrorCode, ...] = (
+    "agent_error",
+    "audit_error",
+    "configuration_error",
+    "hook_error",
+    "invalid_input",
+    "instruction_error",
+    "internal_error",
+    "interrupted",
+    "model_error",
+    "session_error",
+    "tool_error",
+)
 PROTOCOL_VERSION = 1
 MAX_PROTOCOL_ERROR_CHARS = 1_000
 
@@ -84,6 +120,7 @@ class ProtocolWriter:
         session_id: str,
         result: str,
         saved: bool,
+        usage: TokenUsage | None,
     ) -> None:
         if self.output_format == "text":
             if not self._wrote_delta:
@@ -100,12 +137,19 @@ class ProtocolWriter:
             "session_id": session_id,
             "result": result,
             "saved": saved,
+            "usage": _usage_payload(usage),
         }
         if self.output_format == "json":
             payload["activities"] = self._activities
         self._write_json(payload)
 
-    def error(self, *, message: str, exit_code: int) -> None:
+    def error(
+        self,
+        *,
+        message: str,
+        exit_code: int,
+        error_code: ErrorCode,
+    ) -> None:
         safe_message = _safe_protocol_text(message)
         if self.output_format == "text":
             self.stderr.write(f"Neil Agent 运行失败：{safe_message}\n")
@@ -117,6 +161,7 @@ class ProtocolWriter:
                 "protocol_version": PROTOCOL_VERSION,
                 "success": False,
                 "error": safe_message,
+                "error_code": error_code,
                 "exit_code": exit_code,
             }
         )
@@ -143,7 +188,11 @@ def run_noninteractive(
 
     writer = ProtocolWriter(output_format, stdout, stderr)
     if not prompt.strip():
-        writer.error(message="prompt 不能为空。", exit_code=2)
+        writer.error(
+            message="prompt 不能为空。",
+            exit_code=2,
+            error_code="invalid_input",
+        )
         return 2
     try:
         filesystem = FileSystemTools(settings.workspace_root)
@@ -162,6 +211,12 @@ def run_noninteractive(
         session_store = SessionStore(filesystem.root)
         session = session_store.new_session()
         model = llm or LLMClient(settings, retry_handler=writer.activity)
+        active_hooks = hooks.copy() if hooks is not None else LifecycleHooks()
+        if settings.audit_log_enabled:
+            JsonlAuditSink(
+                filesystem.root,
+                max_bytes=settings.audit_log_max_bytes,
+            ).register(active_hooks)
         agent = Agent(
             model,
             system_prompt=settings.system_prompt,
@@ -173,7 +228,7 @@ def run_noninteractive(
             max_tool_rounds=settings.max_tool_rounds,
             activity_handler=writer.activity,
             instruction_scope_handler=instruction_manager.resolve_tool_call,
-            hooks=hooks,
+            hooks=active_hooks,
         )
         writer.start(
             session_id=session.session_id,
@@ -186,21 +241,49 @@ def run_noninteractive(
         result = agent.messages[-1].content
         saved = False
         if save_session:
-            session_store.save(session, agent.messages, (), None, create_only=True)
+            session_store.save(
+                session,
+                agent.messages,
+                (),
+                None,
+                last_usage=agent.last_usage,
+                create_only=True,
+            )
             saved = True
-        writer.success(session_id=session.session_id, result=result, saved=saved)
+        writer.success(
+            session_id=session.session_id,
+            result=result,
+            saved=saved,
+            usage=agent.last_usage,
+        )
         return 0
     except KeyboardInterrupt:
-        writer.error(message="用户中断。", exit_code=130)
+        writer.error(
+            message="用户中断。",
+            exit_code=130,
+            error_code="interrupted",
+        )
         return 130
     except ValueError as error:
-        writer.error(message=str(error), exit_code=2)
+        writer.error(
+            message=str(error),
+            exit_code=2,
+            error_code="configuration_error",
+        )
         return 2
     except NeilAgentError as error:
-        writer.error(message=str(error), exit_code=1)
+        writer.error(
+            message=str(error),
+            exit_code=1,
+            error_code=_error_code(error),
+        )
         return 1
     except Exception:  # noqa: BLE001 - protocol boundary hides internals.
-        writer.error(message="内部错误，请查看本地测试或日志。", exit_code=1)
+        writer.error(
+            message="内部错误，请查看本地测试或日志。",
+            exit_code=1,
+            error_code="internal_error",
+        )
         return 1
 
 
@@ -212,7 +295,11 @@ def write_startup_error(
 ) -> None:
     """Emit a configuration error before a session can be constructed."""
 
-    ProtocolWriter(output_format, stdout, stderr).error(message=message, exit_code=2)
+    ProtocolWriter(output_format, stdout, stderr).error(
+        message=message,
+        exit_code=2,
+        error_code="configuration_error",
+    )
 
 
 def _instruction_target(workspace_root: Path) -> Path:
@@ -226,8 +313,51 @@ def _instruction_target(workspace_root: Path) -> Path:
 
 def _safe_protocol_text(value: str) -> str:
     normalized = " ".join(value.split())[:MAX_PROTOCOL_ERROR_CHARS]
-    return "".join(
-        character
-        for character in normalized
-        if not category(character).startswith("C")
-    ) or "未知错误"
+    return (
+        "".join(
+            character
+            for character in normalized
+            if not category(character).startswith("C")
+        )
+        or "未知错误"
+    )
+
+
+def _usage_payload(usage: TokenUsage | None) -> dict[str, int] | None:
+    if usage is None:
+        return None
+    return {
+        **usage.model_dump(),
+        "total_tokens": usage.total_tokens,
+    }
+
+
+def _error_code(error: NeilAgentError) -> ErrorCode:
+    if _has_cause(error, AuditError):
+        return "audit_error"
+    if isinstance(error, LLMError):
+        return "model_error"
+    if isinstance(error, AgentError):
+        return "agent_error"
+    if isinstance(error, ToolError):
+        return "tool_error"
+    if isinstance(error, SessionError):
+        return "session_error"
+    if isinstance(error, InstructionError):
+        return "instruction_error"
+    if isinstance(error, HookError):
+        return "hook_error"
+    return "internal_error"
+
+
+def _has_cause(error: BaseException, error_type: type[BaseException]) -> bool:
+    """Return whether an exception or its explicit cause has the given type."""
+
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, error_type):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False

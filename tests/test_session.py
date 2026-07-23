@@ -7,7 +7,7 @@ import pytest
 
 from neil_agent import session as session_module
 from neil_agent.errors import SessionError
-from neil_agent.schemas import Message
+from neil_agent.schemas import Message, TokenUsage
 from neil_agent.session import MAX_SESSION_TITLE_CHARS, SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 
@@ -48,17 +48,26 @@ def test_session_round_trip_is_versioned_and_excludes_environment_secrets(
         output="68 passed",
     )
 
-    saved = store.save(handle, _messages(), steps, quality)
+    usage = TokenUsage(input_tokens=120, output_tokens=30)
+    saved = store.save(
+        handle,
+        _messages(),
+        steps,
+        quality,
+        last_usage=usage,
+    )
     loaded = store.load(handle.session_id)
     index = store.list_sessions()
     payload = (store.root / f"{handle.session_id}.json").read_text(encoding="utf-8")
 
-    assert saved.version == 2
+    assert saved.version == 3
     assert saved.title == "inspect the project"
     assert loaded == saved
     assert loaded.restored_steps() == steps
     assert loaded.restored_quality_check() == quality
-    assert '"version": 2' in payload
+    assert loaded.last_usage == usage
+    assert '"version": 3' in payload
+    assert '"input_tokens": 120' in payload
     assert '"title": "inspect the project"' in payload
     assert "must-not-be-persisted" not in payload
     assert list(store.root.glob("*.tmp")) == []
@@ -101,7 +110,7 @@ def test_listing_skips_corrupt_files_and_load_rejects_invalid_ids(
     current_payload = (store.root / f"{handle.session_id}.json").read_text(
         encoding="utf-8"
     )
-    future_payload = current_payload.replace('"version": 2', '"version": 3').replace(
+    future_payload = current_payload.replace('"version": 3', '"version": 4').replace(
         handle.session_id,
         future_id,
     )
@@ -152,6 +161,7 @@ def test_loads_legacy_v1_snapshot_and_migrates_on_next_save(tmp_path: Path) -> N
     legacy_payload = current.model_dump(mode="json")
     legacy_payload["version"] = 1
     legacy_payload.pop("title")
+    legacy_payload.pop("last_usage")
     import json
 
     path.write_text(json.dumps(legacy_payload), encoding="utf-8")
@@ -159,10 +169,45 @@ def test_loads_legacy_v1_snapshot_and_migrates_on_next_save(tmp_path: Path) -> N
     migrated = store.load(handle.session_id)
     rewritten = store.save(store.handle_for(migrated), migrated.messages, (), None)
 
-    assert migrated.version == 2
+    assert migrated.version == 3
     assert migrated.title == "inspect the project"
-    assert rewritten.version == 2
-    assert '"version": 2' in path.read_text(encoding="utf-8")
+    assert migrated.last_usage is None
+    assert rewritten.version == 3
+    assert '"version": 3' in path.read_text(encoding="utf-8")
+
+
+def test_loads_v2_snapshot_without_usage_and_migrates_on_save(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    handle = store.new_session()
+    current = store.save(
+        handle,
+        _messages(),
+        (),
+        None,
+        last_usage=TokenUsage(input_tokens=5, output_tokens=2),
+    )
+    path = store.root / f"{handle.session_id}.json"
+    payload = current.model_dump(mode="json")
+    payload["version"] = 2
+    payload.pop("last_usage")
+    import json
+
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = store.load(handle.session_id)
+    rewritten = store.save(
+        store.handle_for(migrated),
+        migrated.messages,
+        (),
+        None,
+        last_usage=migrated.last_usage,
+    )
+
+    assert migrated.version == 3
+    assert migrated.last_usage is None
+    assert rewritten.version == 3
 
 
 def test_session_titles_can_be_renamed_and_searched_locally(tmp_path: Path) -> None:
@@ -212,14 +257,17 @@ def test_session_list_supports_state_filter_sort_and_pagination(tmp_path: Path) 
     assert page.matched_count == 2
 
 
-def test_export_import_is_strict_explicit_and_rejects_duplicates(tmp_path: Path) -> None:
+def test_export_import_is_strict_explicit_and_rejects_duplicates(
+    tmp_path: Path,
+) -> None:
     source_root = tmp_path / "source"
     target_root = tmp_path / "target"
     source_root.mkdir()
     target_root.mkdir()
     source = _store(source_root)
     handle = source.new_session()
-    source.save(handle, _messages(), (), None)
+    usage = TokenUsage(input_tokens=17, output_tokens=4)
+    source.save(handle, _messages(), (), None, last_usage=usage)
 
     prepared_export = source.prepare_export(handle.session_id)
     exported = source.apply_export(prepared_export)
@@ -233,6 +281,7 @@ def test_export_import_is_strict_explicit_and_rejects_duplicates(tmp_path: Path)
 
     assert imported.session_id == handle.session_id
     assert target.load(handle.session_id).messages == _messages()
+    assert imported.last_usage == usage
     with pytest.raises(SessionError, match="ID 已存在"):
         target.prepare_import(imported_file.name)
 
@@ -266,12 +315,20 @@ def test_branch_copies_state_to_new_id_and_preserves_source(tmp_path: Path) -> N
         id_factory=lambda: next(identifiers),
     )
     source_handle = store.new_session()
-    source = store.save(source_handle, _messages(), (), None)
+    usage = TokenUsage(input_tokens=9, output_tokens=3)
+    source = store.save(
+        source_handle,
+        _messages(),
+        (),
+        None,
+        last_usage=usage,
+    )
 
     branch = store.branch(source.session_id, "Try another approach")
 
     assert branch.session_id != source.session_id
     assert branch.title == "Try another approach"
     assert branch.messages == source.messages
+    assert branch.last_usage == usage
     assert store.load(source.session_id) == source
     assert store.list_sessions().valid_count == 2
