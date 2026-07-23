@@ -19,6 +19,7 @@ from rich.text import Text
 
 from .agent import Agent
 from .audit import JsonlAuditSink
+from .cockpit import CockpitSnapshot, build_cockpit_panel
 from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import AuditError, NeilAgentError, SessionError, ToolError
@@ -52,6 +53,7 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
 HELP_COMMANDS = {"help", "/help"}
 STATUS_COMMANDS = {"status", "/status"}
+COCKPIT_COMMANDS = {"cockpit", "/cockpit"}
 CONTEXT_COMMANDS = {"context", "/context"}
 DOCTOR_COMMANDS = {"doctor", "/doctor"}
 INSTRUCTIONS_COMMANDS = {"instructions", "/instructions"}
@@ -336,6 +338,22 @@ def run(console: Console) -> None:
         if command in STATUS_COMMANDS and not command_argument:
             _show_status(console, task_tracker, shell_tools, current_session)
             continue
+        if command in COCKPIT_COMMANDS:
+            if command_argument:
+                console.print("[yellow]用法：/cockpit[/yellow]")
+            else:
+                _show_cockpit(
+                    console,
+                    settings,
+                    agent,
+                    task_tracker,
+                    registry,
+                    filesystem_tools,
+                    instruction_manager.current,
+                    current_session,
+                    shell_tools,
+                )
+            continue
         if command in PERMISSIONS_COMMANDS:
             if command_argument:
                 console.print("[yellow]用法：/permissions[/yellow]")
@@ -589,6 +607,7 @@ def _show_help(console: Console) -> None:
     console.print("  /clear  清空对话历史")
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
+    console.print("  /cockpit 显示只读任务、上下文和安全可视化")
     console.print("  /context 显示上下文预算和当前占用")
     console.print("  /doctor 检查本地配置和运行环境")
     console.print("  /permissions 显示工具审批与工作区安全边界")
@@ -630,6 +649,62 @@ def _show_status(
         highlight=False,
         soft_wrap=True,
     )
+
+
+def _show_cockpit(
+    console: Console,
+    settings: Settings,
+    agent: Agent,
+    task_tracker: TaskTracker,
+    registry: ToolRegistry,
+    filesystem_tools: FileSystemTools,
+    instructions: ProjectInstructions,
+    current_session: SessionHandle,
+    shell_tools: ShellTools,
+) -> None:
+    """Render a read-only mission-control snapshot without calling the model."""
+
+    git_available = True
+    git_branch = "unknown"
+    git_changes = 0
+    try:
+        lines = [
+            line.strip()
+            for line in shell_tools.git_status_snapshot().splitlines()
+            if line.strip()
+        ]
+        if lines:
+            git_branch = lines[0]
+            git_changes = max(len(lines) - 1, 0)
+    except NeilAgentError:
+        git_available = False
+
+    approval_tool_count = sum(
+        registry.requires_approval(definition.name)
+        for definition in registry.definitions
+    )
+    snapshot = CockpitSnapshot(
+        model=settings.deepseek_model,
+        thinking_enabled=settings.thinking_enabled,
+        workspace=filesystem_tools.root,
+        session_id=current_session.session_id,
+        session_title=current_session.title,
+        context=agent.context_stats(),
+        last_usage=agent.last_usage,
+        plan=task_tracker.steps,
+        latest_quality_check=task_tracker.latest_quality_check,
+        tool_count=len(registry.definitions),
+        approval_tool_count=approval_tool_count,
+        instruction_status=instructions.status,
+        instruction_sources=len(instructions.active_sources),
+        instruction_bytes=instructions.size_bytes,
+        checkpoint_count=filesystem_tools.checkpoints.count,
+        audit_enabled=settings.audit_log_enabled,
+        git_branch=git_branch,
+        git_changes=git_changes,
+        git_available=git_available,
+    )
+    console.print(build_cockpit_panel(snapshot))
 
 
 def _show_permissions(

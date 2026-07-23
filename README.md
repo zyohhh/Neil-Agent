@@ -29,10 +29,13 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/import <文件名>`：预览后导入 `.neil-agent/exports/` 中的严格版本化文件。
 - `/compact [关注点]`：总结较早轮次、保留最近完整上下文，并保存压缩前会话副本。
 - `/context`：区分下一次请求的本地软预算估算与最近一次服务端实测 `usage`。
+- `/cockpit`：显示任务、上下文、安全边界和工作区信号的只读基础可视化，不调用模型。
 - `/rewind-file`：预览并恢复本进程最近一次 Agent 文件工具编辑；外部变化会拒绝恢复。
 - `/permissions`：显示真正由代码执行的工具审批和工作区边界。
 
 Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。
+高级 DAG、上下文断层图、安全盾、时间机器和仓库热力图的增量路线见
+[`docs/visualization-development.md`](docs/visualization-development.md)。
 
 ## 一次性非交互运行
 

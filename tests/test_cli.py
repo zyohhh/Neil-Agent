@@ -72,6 +72,7 @@ def test_run_uses_injected_console(
     )
     console = MagicMock(spec=Console)
     console.input.side_effect = [
+        "/cockpit",
         "/context",
         "/doctor",
         "/instructions",
@@ -86,17 +87,25 @@ def test_run_uses_injected_console(
     printed_text = "\n".join(
         str(call.args[0]) for call in console.print.call_args_list if call.args
     )
-    welcome_panels = [
+    panels = [
         call.args[0]
         for call in console.print.call_args_list
         if call.args and isinstance(call.args[0], Panel)
     ]
-    assert len(welcome_panels) == 1
-    welcome_text = _render(welcome_panels[0], width=100)
+    panel_texts = [_render(panel, width=100) for panel in panels]
+    welcome_texts = [text for text in panel_texts if "NEIL AGENT" in text]
+    cockpit_texts = [text for text in panel_texts if "MISSION CONTROL" in text]
+    assert len(welcome_texts) == 1
+    assert len(cockpit_texts) == 1
+    welcome_text = welcome_texts[0]
+    cockpit_text = cockpit_texts[0]
     assert "NEIL AGENT" in welcome_text
     assert "deepseek-v4-flash" in welcome_text
     assert "12 个可用 · 5 个操作需要批准" in welcome_text
     assert "已加载 1 个来源" in welcome_text
+    assert "CONTEXT TOMOGRAPHY" in cockpit_text
+    assert "SECURITY SHIELD" in cockpit_text
+    assert instruction_content not in cockpit_text
     assert "可用命令" in printed_text
     assert "当前任务计划" in printed_text
     assert "上下文状态" in printed_text
@@ -111,6 +120,7 @@ def test_run_uses_injected_console(
     assert "最近质量检查" in printed_text
     assert "## main...origin/main" in printed_text
     assert "/status" in printed_text
+    assert "/cockpit" in printed_text
     assert "/sessions" in printed_text
     assert "/resume <id>" in printed_text
     assert "/delete-session <id>" in printed_text
