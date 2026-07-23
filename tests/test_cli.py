@@ -203,7 +203,7 @@ def test_main_routes_one_shot_arguments_without_starting_interactive_cli(
         deepseek_api_key="test-key",
         workspace_root=tmp_path,
     )
-    calls: list[tuple[str, str, bool]] = []
+    calls: list[tuple[str, str, bool, int, str, str | None]] = []
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
 
     def fake_run_noninteractive(
@@ -214,9 +214,21 @@ def test_main_routes_one_shot_arguments_without_starting_interactive_cli(
         stdout: object,
         stderr: object,
         save_session: bool,
+        protocol_version: int,
+        permission_mode: str,
+        approval_id: str | None,
     ) -> int:
         assert received_settings is settings
-        calls.append((prompt, output_format, save_session))
+        calls.append(
+            (
+                prompt,
+                output_format,
+                save_session,
+                protocol_version,
+                permission_mode,
+                approval_id,
+            )
+        )
         return 0
 
     monkeypatch.setattr(cli, "run_noninteractive", fake_run_noninteractive)
@@ -229,11 +241,59 @@ def test_main_routes_one_shot_arguments_without_starting_interactive_cli(
                 "--output-format",
                 "stream-json",
                 "--save-session",
+                "--protocol-version",
+                "2",
+                "--permission-mode",
+                "approve",
+                "--approval-id",
+                (
+                    "0123456789abcdef0123456789abcdef."
+                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                ),
             ]
         )
 
     assert exit_info.value.code == 0
-    assert calls == [("inspect this project", "stream-json", True)]
+    assert calls == [
+        (
+            "inspect this project",
+            "stream-json",
+            True,
+            2,
+            "approve",
+            (
+                "0123456789abcdef0123456789abcdef."
+                "0123456789abcdef0123456789abcdef"
+                "0123456789abcdef0123456789abcdef"
+            ),
+        )
+    ]
+
+
+def test_main_rejects_unsafe_protocol_combination_before_loading_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called() -> None:
+        raise AssertionError("configuration should not load")
+
+    monkeypatch.setattr(cli, "get_settings", fail_if_called)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(
+            [
+                "--print",
+                "update",
+                "--output-format",
+                "json",
+                "--protocol-version",
+                "1",
+                "--permission-mode",
+                "request",
+            ]
+        )
+
+    assert exit_info.value.code == 2
 
 
 def test_config_error_message_does_not_echo_invalid_raw_value() -> None:

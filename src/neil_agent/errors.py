@@ -31,3 +31,7 @@ class HookError(NeilAgentError):
 
 class AuditError(NeilAgentError):
     """A bounded local audit-log initialization or write error."""
+
+
+class ApprovalError(NeilAgentError):
+    """A non-interactive approval request is invalid, stale, or already used."""

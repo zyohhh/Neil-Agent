@@ -10,9 +10,16 @@ from neil_agent.errors import LLMError
 from neil_agent.noninteractive import (
     PROTOCOL_VERSION,
     SUPPORTED_ERROR_CODES,
+    SUPPORTED_ERROR_CODES_V2,
     run_noninteractive,
 )
-from neil_agent.schemas import Message, ModelResponse, TokenUsage, ToolDefinition
+from neil_agent.schemas import (
+    Message,
+    ModelResponse,
+    TokenUsage,
+    ToolCall,
+    ToolDefinition,
+)
 
 
 class OneShotFakeModel:
@@ -57,6 +64,43 @@ class ExpectedFailureModel(OneShotFakeModel):
         raise LLMError("model unavailable")
 
 
+class WriteFileModel(OneShotFakeModel):
+    def __init__(self, *, content: str = "created by approval") -> None:
+        super().__init__()
+        self.content = content
+        self.model_round = 0
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        system_prompt: str,
+        tools: Sequence[ToolDefinition] = (),
+    ) -> Iterator[str | ModelResponse]:
+        self.tools = [definition.name for definition in tools]
+        self.model_round += 1
+        if self.model_round == 1:
+            yield ModelResponse(
+                tool_calls=(
+                    ToolCall(
+                        id="write-call",
+                        name="write_file",
+                        arguments={
+                            "path": "approved.txt",
+                            "content": self.content,
+                        },
+                    ),
+                ),
+                usage=TokenUsage(input_tokens=10, output_tokens=2),
+            )
+            return
+        yield "write handled"
+        yield ModelResponse(
+            content="write handled",
+            usage=TokenUsage(input_tokens=5, output_tokens=2),
+        )
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,
@@ -68,6 +112,13 @@ def _settings(tmp_path: Path) -> Settings:
 def _protocol_contract() -> dict[str, object]:
     fixture_path = (
         Path(__file__).parent / "fixtures" / "noninteractive_protocol_v1.json"
+    )
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _protocol_v2_contract() -> dict[str, object]:
+    fixture_path = (
+        Path(__file__).parent / "fixtures" / "noninteractive_protocol_v2.json"
     )
     return json.loads(fixture_path.read_text(encoding="utf-8"))
 
@@ -322,3 +373,171 @@ def test_unsafe_audit_path_has_stable_audit_error_code(tmp_path: Path) -> None:
     payload = json.loads(stdout.getvalue())
     assert exit_code == 1
     assert payload["error_code"] == "audit_error"
+
+
+def test_protocol_v2_requests_then_consumes_one_exact_write_approval(
+    tmp_path: Path,
+) -> None:
+    prompt = "create the approved file"
+    request_stdout = StringIO()
+
+    request_exit = run_noninteractive(
+        _settings(tmp_path),
+        prompt,
+        output_format="json",
+        stdout=request_stdout,
+        stderr=StringIO(),
+        save_session=True,
+        protocol_version=2,
+        permission_mode="request",
+        llm=WriteFileModel(),
+    )
+
+    request_payload = json.loads(request_stdout.getvalue())
+    contract = _protocol_v2_contract()
+    approval = request_payload["approval_requests"][0]
+    assert request_exit == 3
+    assert request_payload["type"] == "approval_required"
+    assert request_payload["protocol_version"] == 2
+    assert request_payload["permission_mode"] == "request"
+    assert approval["tool_name"] == "write_file"
+    assert "approved.txt" in approval["preview"]
+    assert set(request_payload) == set(contract["json_approval_required"])
+    assert set(approval) == set(contract["approval_request"])
+    assert not (tmp_path / "approved.txt").exists()
+    assert not (tmp_path / ".neil-agent" / "sessions").exists()
+
+    approval_stdout = StringIO()
+    approval_exit = run_noninteractive(
+        _settings(tmp_path),
+        prompt,
+        output_format="json",
+        stdout=approval_stdout,
+        stderr=StringIO(),
+        protocol_version=2,
+        permission_mode="approve",
+        approval_id=approval["approval_id"],
+        llm=WriteFileModel(),
+    )
+
+    approval_payload = json.loads(approval_stdout.getvalue())
+    assert approval_exit == 0
+    assert approval_payload["type"] == "result"
+    assert approval_payload["approved_request_id"] == approval["approval_id"]
+    assert set(approval_payload) == set(contract["json_result"])
+    assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == (
+        "created by approval"
+    )
+
+    replay_stdout = StringIO()
+    replay_exit = run_noninteractive(
+        _settings(tmp_path),
+        prompt,
+        output_format="json",
+        stdout=replay_stdout,
+        stderr=StringIO(),
+        protocol_version=2,
+        permission_mode="approve",
+        approval_id=approval["approval_id"],
+        llm=WriteFileModel(),
+    )
+    replay_payload = json.loads(replay_stdout.getvalue())
+    assert replay_exit == 1
+    assert replay_payload["error_code"] == "approval_error"
+    assert "重放" in replay_payload["error"]
+
+
+def test_protocol_v2_rejects_stale_preview_and_issues_a_new_request(
+    tmp_path: Path,
+) -> None:
+    prompt = "create the approved file"
+    request_stdout = StringIO()
+    run_noninteractive(
+        _settings(tmp_path),
+        prompt,
+        output_format="json",
+        stdout=request_stdout,
+        stderr=StringIO(),
+        protocol_version=2,
+        permission_mode="request",
+        llm=WriteFileModel(),
+    )
+    request_payload = json.loads(request_stdout.getvalue())
+    approval_id = request_payload["approval_requests"][0]["approval_id"]
+    target = tmp_path / "approved.txt"
+    target.write_text("external change", encoding="utf-8")
+    approval_stdout = StringIO()
+
+    exit_code = run_noninteractive(
+        _settings(tmp_path),
+        prompt,
+        output_format="json",
+        stdout=approval_stdout,
+        stderr=StringIO(),
+        protocol_version=2,
+        permission_mode="approve",
+        approval_id=approval_id,
+        llm=WriteFileModel(),
+    )
+
+    payload = json.loads(approval_stdout.getvalue())
+    assert exit_code == 3
+    assert payload["type"] == "approval_required"
+    assert payload["approved_request_id"] is None
+    assert payload["approval_requests"][0]["approval_id"] != approval_id
+    assert target.read_text(encoding="utf-8") == "external change"
+
+
+def test_protocol_v2_write_modes_require_structured_output_and_explicit_id(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        ("text", 2, "request", None),
+        ("json", 1, "request", None),
+        ("json", 2, "approve", None),
+    )
+    for output_format, version, permission_mode, approval_id in cases:
+        stdout = StringIO()
+        exit_code = run_noninteractive(
+            _settings(tmp_path),
+            "update",
+            output_format=output_format,
+            stdout=stdout,
+            stderr=StringIO(),
+            protocol_version=version,
+            permission_mode=permission_mode,
+            approval_id=approval_id,
+            llm=WriteFileModel(),
+        )
+        assert exit_code == 2
+        assert not (tmp_path / "approved.txt").exists()
+
+
+def test_protocol_v2_stream_emits_preview_before_terminal_event(
+    tmp_path: Path,
+) -> None:
+    stdout = StringIO()
+
+    exit_code = run_noninteractive(
+        _settings(tmp_path),
+        "create the approved file",
+        output_format="stream-json",
+        stdout=stdout,
+        stderr=StringIO(),
+        protocol_version=2,
+        permission_mode="request",
+        llm=WriteFileModel(),
+    )
+
+    events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    contract = _protocol_v2_contract()
+    event_types = [event["type"] for event in events]
+    assert exit_code == 3
+    assert events[0]["permission_mode"] == "request"
+    assert events[0]["read_only"] is False
+    assert "approval_request" in event_types
+    assert event_types[-1] == "approval_required"
+    assert event_types.index("approval_request") < len(event_types) - 1
+    assert contract["error_codes"] == list(SUPPORTED_ERROR_CODES_V2)
+    for event in events:
+        assert set(event) == set(contract["events"][event["type"]])

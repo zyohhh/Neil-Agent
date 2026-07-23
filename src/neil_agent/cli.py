@@ -34,7 +34,10 @@ from .instructions import (
 from .llm import LLMClient
 from .noninteractive import (
     OutputFormat,
+    PermissionMode,
+    ProtocolVersion,
     run_noninteractive,
+    validate_noninteractive_options,
     write_startup_error,
 )
 from .schemas import ActivityEvent, ToolCall
@@ -191,7 +194,7 @@ class TerminalRenderer:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run interactively by default or execute one read-only prompt with ``-p``."""
+    """Run interactively or execute one versioned prompt with ``-p``."""
 
     parser = argparse.ArgumentParser(prog="neil-agent")
     parser.add_argument("-p", "--print", dest="prompt")
@@ -205,14 +208,47 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Persist a successful one-shot run in the workspace session store.",
     )
+    parser.add_argument(
+        "--protocol-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Select the explicit non-interactive protocol version.",
+    )
+    parser.add_argument(
+        "--permission-mode",
+        choices=("read-only", "request", "approve"),
+        default="read-only",
+        help="Keep tools read-only, request exact previews, or consume one approval.",
+    )
+    parser.add_argument(
+        "--approval-id",
+        help="One pending approval ID to consume in protocol v2 approve mode.",
+    )
     arguments = parser.parse_args(argv)
     if arguments.prompt is None:
-        if arguments.save_session or arguments.output_format != "text":
-            parser.error("--output-format and --save-session require -p/--print")
+        if (
+            arguments.save_session
+            or arguments.output_format != "text"
+            or arguments.protocol_version != 1
+            or arguments.permission_mode != "read-only"
+            or arguments.approval_id is not None
+        ):
+            parser.error("non-interactive protocol options require -p/--print")
         run(Console())
         return
 
     output_format = cast(OutputFormat, arguments.output_format)
+    protocol_version = cast(ProtocolVersion, arguments.protocol_version)
+    permission_mode = cast(PermissionMode, arguments.permission_mode)
+    option_error = validate_noninteractive_options(
+        output_format=output_format,
+        protocol_version=protocol_version,
+        permission_mode=permission_mode,
+        approval_id=arguments.approval_id,
+    )
+    if option_error is not None:
+        parser.error(option_error)
     try:
         settings = get_settings()
     except ValidationError as error:
@@ -221,6 +257,8 @@ def main(argv: list[str] | None = None) -> None:
             sys.stdout,
             sys.stderr,
             _config_error_message(error),
+            protocol_version=protocol_version,
+            permission_mode=permission_mode,
         )
         raise SystemExit(2) from None
     exit_code = run_noninteractive(
@@ -230,6 +268,9 @@ def main(argv: list[str] | None = None) -> None:
         stdout=sys.stdout,
         stderr=sys.stderr,
         save_session=arguments.save_session,
+        protocol_version=protocol_version,
+        permission_mode=permission_mode,
+        approval_id=arguments.approval_id,
     )
     raise SystemExit(exit_code)
 
