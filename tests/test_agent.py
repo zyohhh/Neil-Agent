@@ -2,11 +2,13 @@
 
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from threading import Event
 
 import pytest
 
 from neil_agent.agent import COMPACTION_CHECKPOINT_USER, Agent
 from neil_agent.errors import AgentError, LLMError
+from neil_agent.events import EventBus, RuntimeEvent
 from neil_agent.instructions import ProjectInstructionManager
 from neil_agent.schemas import (
     ActivityEvent,
@@ -793,3 +795,137 @@ def test_agent_returns_denied_write_to_model_without_execution() -> None:
     )
     assert "TOP-SECRET-CONTENT" not in activity_text
     assert "内容规模：1 行，18 字符" in activity_text
+
+
+def test_agent_emits_correlated_metadata_only_runtime_events() -> None:
+    call = ToolCall(
+        id="quality-1",
+        name="run_quality_check",
+        arguments={"check": "TOP-SECRET-CHECK"},
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [
+            ModelResponse(
+                tool_calls=(call,),
+                usage=TokenUsage(input_tokens=10, output_tokens=2),
+            )
+        ],
+        [
+            "done",
+            ModelResponse(
+                content="done",
+                usage=TokenUsage(input_tokens=20, output_tokens=3),
+            ),
+        ],
+    ]
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="run_quality_check",
+            description="Run one quality check.",
+            input_schema={"type": "object"},
+        ),
+        lambda check: f"checked {check}",
+        requires_approval=True,
+        preview_handler=lambda check: f"TOP-SECRET-PREVIEW:{check}",
+    )
+    events: list[RuntimeEvent] = []
+    bus = EventBus()
+    bus.subscribe(events.append)
+    agent = Agent(
+        model,
+        registry=registry,
+        approval_handler=lambda tool_call, preview: True,
+        event_bus=bus,
+    )
+
+    assert "".join(agent.stream_chat("TOP-SECRET-PROMPT")) == "done"
+    assert bus.flush()
+
+    stages = [event.stage for event in events]
+    assert stages.count("agent_turn") == 2
+    assert stages.count("model_request") == 4
+    assert stages.count("tool_call") == 2
+    assert stages.count("approval") == 2
+    assert stages.count("quality_check") == 2
+    for stage in {
+        "agent_turn",
+        "tool_call",
+        "approval",
+        "quality_check",
+    }:
+        stage_events = [event for event in events if event.stage == stage]
+        assert len({event.correlation_id for event in stage_events}) == 1
+
+    turn_start = next(
+        event
+        for event in events
+        if event.stage == "agent_turn" and event.status == "started"
+    )
+    model_starts = [
+        event
+        for event in events
+        if event.stage == "model_request" and event.status == "started"
+    ]
+    tool_start = next(
+        event
+        for event in events
+        if event.stage == "tool_call" and event.status == "started"
+    )
+    approval_wait = next(event for event in events if event.stage == "approval")
+    quality_start = next(
+        event
+        for event in events
+        if event.stage == "quality_check" and event.status == "started"
+    )
+    assert all(event.parent_event_id == turn_start.event_id for event in model_starts)
+    assert tool_start.parent_event_id == model_starts[0].event_id
+    assert approval_wait.parent_event_id == tool_start.event_id
+    assert quality_start.parent_event_id == tool_start.event_id
+
+    serialized = " ".join(str(event.model_dump()) for event in events)
+    assert "TOP-SECRET-PROMPT" not in serialized
+    assert "TOP-SECRET-CHECK" not in serialized
+    assert "TOP-SECRET-PREVIEW" not in serialized
+    assert bus.close()
+
+
+def test_agent_result_is_identical_with_an_unobserved_event_bus() -> None:
+    baseline = Agent(FakeChatModel())
+    bus = EventBus(queue_size=1)
+    observed = Agent(FakeChatModel(), event_bus=bus)
+
+    baseline_result = "".join(baseline.stream_chat("hello"))
+    observed_result = "".join(observed.stream_chat("hello"))
+
+    assert observed_result == baseline_result
+    assert observed.messages == baseline.messages
+    assert bus.stats.published_events == 4
+    assert bus.stats.accepted_deliveries == 0
+    assert bus.close()
+
+
+def test_agent_result_survives_failing_and_overflowing_event_observers() -> None:
+    failures = EventBus(queue_size=8)
+
+    def fail(_event: RuntimeEvent) -> None:
+        raise RuntimeError("observer failed")
+
+    failures.subscribe(fail)
+    failing_agent = Agent(FakeChatModel(), event_bus=failures)
+    assert "".join(failing_agent.stream_chat("hello")) == "assistant reply"
+    assert failures.flush()
+    assert failures.stats.observer_failures == 4
+    assert failures.close()
+
+    release = Event()
+    overflow = EventBus(queue_size=1)
+    overflow.subscribe(lambda _event: release.wait(2))
+    overflow_agent = Agent(FakeChatModel(), event_bus=overflow)
+
+    assert "".join(overflow_agent.stream_chat("hello")) == "assistant reply"
+    assert overflow.stats.dropped_deliveries > 0
+    release.set()
+    assert overflow.flush()
+    assert overflow.close()

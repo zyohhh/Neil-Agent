@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from time import monotonic
 from typing import Protocol, runtime_checkable
 
@@ -29,6 +29,14 @@ from .context import (
     split_rounds,
 )
 from .errors import AgentError, HookError, NeilAgentError
+from .events import (
+    EventBus,
+    RuntimeEventEmitter,
+    RuntimeEventFactory,
+    RuntimeSpan,
+    RuntimeStage,
+    RuntimeStatus,
+)
 from .hooks import HookEvent, LifecycleHooks
 from .instructions import InstructionScopeUpdate
 from .schemas import (
@@ -139,6 +147,8 @@ class Agent:
         activity_handler: ActivityHandler | None = None,
         instruction_scope_handler: InstructionScopeHandler | None = None,
         hooks: LifecycleHooks | None = None,
+        event_bus: EventBus | None = None,
+        event_factory: RuntimeEventFactory | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -163,6 +173,11 @@ class Agent:
         self._activity_handler = activity_handler
         self._instruction_scope_handler = instruction_scope_handler
         self._hooks = hooks
+        self._runtime_events = (
+            RuntimeEventEmitter(event_bus, factory=event_factory)
+            if event_bus is not None
+            else None
+        )
         self._messages: list[Message] = []
         self._last_usage: TokenUsage | None = None
 
@@ -374,16 +389,76 @@ class Agent:
 
         user_message = self._make_user_message(user_input)
         request_messages = self._request_messages(user_message)
-        response = self._llm.complete(
-            request_messages,
-            system_prompt=self._system_prompt,
+        turn_started_at = monotonic()
+        turn_span = self._start_runtime_span(
+            "agent_turn",
+            metadata=self._turn_start_metadata(user_message, request_messages),
         )
-        assistant_message = self._make_assistant_message(response)
-        self._commit_messages((user_message, assistant_message))
-        self._last_usage = (
-            self._llm.last_usage
-            if isinstance(self._llm, UsageReportingChatModel)
-            else None
+        model_started_at = monotonic()
+        model_span = self._start_runtime_span(
+            "model_request",
+            parent_event_id=self._span_event_id(turn_span),
+            metadata={
+                "model_round": 1,
+                "message_count": len(request_messages),
+                "tool_count": 0,
+            },
+        )
+        model_finished = False
+        try:
+            response = self._llm.complete(
+                request_messages,
+                system_prompt=self._system_prompt,
+            )
+            usage = (
+                self._llm.last_usage
+                if isinstance(self._llm, UsageReportingChatModel)
+                else None
+            )
+            self._finish_runtime_span(
+                model_span,
+                "succeeded",
+                metadata={
+                    "text_chars": len(response),
+                    "tool_calls": 0,
+                    "elapsed_ms": self._elapsed_ms(model_started_at),
+                    **self._usage_metadata(usage),
+                },
+            )
+            model_finished = True
+            assistant_message = self._make_assistant_message(response)
+            self._commit_messages((user_message, assistant_message))
+            self._last_usage = usage
+        except BaseException as error:
+            if not model_finished:
+                self._finish_runtime_span(
+                    model_span,
+                    "failed",
+                    metadata={
+                        "elapsed_ms": self._elapsed_ms(model_started_at),
+                        "error_type": type(error).__name__,
+                    },
+                )
+            self._finish_runtime_span(
+                turn_span,
+                "failed",
+                metadata={
+                    "model_requests": 1,
+                    "tool_calls": 0,
+                    "elapsed_ms": self._elapsed_ms(turn_started_at),
+                    "error_type": type(error).__name__,
+                },
+            )
+            raise
+        self._finish_runtime_span(
+            turn_span,
+            "succeeded",
+            metadata={
+                "model_requests": 1,
+                "tool_calls": 0,
+                "response_chars": len(response),
+                "elapsed_ms": self._elapsed_ms(turn_started_at),
+            },
         )
         return response
 
@@ -392,6 +467,53 @@ class Agent:
 
         user_message = self._make_user_message(user_input)
         request_messages = self._request_messages(user_message)
+        turn_started_at = monotonic()
+        turn_span = self._start_runtime_span(
+            "agent_turn",
+            metadata=self._turn_start_metadata(user_message, request_messages),
+        )
+        counters = {"model_requests": 0, "tool_calls": 0}
+        try:
+            yield from self._stream_chat_loop(
+                user_message,
+                request_messages,
+                turn_span=turn_span,
+                turn_started_at=turn_started_at,
+                counters=counters,
+            )
+        except GeneratorExit:
+            self._finish_runtime_span(
+                turn_span,
+                "skipped",
+                metadata={
+                    **counters,
+                    "elapsed_ms": self._elapsed_ms(turn_started_at),
+                },
+            )
+            raise
+        except BaseException as error:
+            self._finish_runtime_span(
+                turn_span,
+                "failed",
+                metadata={
+                    **counters,
+                    "elapsed_ms": self._elapsed_ms(turn_started_at),
+                    "error_type": type(error).__name__,
+                },
+            )
+            raise
+
+    def _stream_chat_loop(
+        self,
+        user_message: Message,
+        request_messages: list[Message],
+        *,
+        turn_span: RuntimeSpan | None,
+        turn_started_at: float,
+        counters: dict[str, int],
+    ) -> Generator[str, None, None]:
+        """Run one streamed turn after its observation span has started."""
+
         pending_messages = [user_message]
         tool_definitions = self._tool_definitions()
         tool_rounds = 0
@@ -424,6 +546,17 @@ class Agent:
             model_activity = (
                 "分析用户请求" if tool_rounds == 0 else "根据工具结果继续处理"
             )
+            model_started_at = monotonic()
+            model_span = self._start_runtime_span(
+                "model_request",
+                parent_event_id=self._span_event_id(turn_span),
+                metadata={
+                    "model_round": tool_rounds + 1,
+                    "message_count": len(request_messages),
+                    "tool_count": len(tool_definitions),
+                },
+            )
+            counters["model_requests"] += 1
             self._emit_activity(
                 "running",
                 model_activity,
@@ -444,14 +577,41 @@ class Agent:
                         yield event
                     else:
                         model_response = event
-            except Exception:
+            except Exception as error:
+                self._finish_runtime_span(
+                    model_span,
+                    "failed",
+                    metadata={
+                        "elapsed_ms": self._elapsed_ms(model_started_at),
+                        "error_type": type(error).__name__,
+                    },
+                )
                 self._emit_activity("failed", "模型请求失败")
                 raise
 
             if model_response is None:
+                self._finish_runtime_span(
+                    model_span,
+                    "failed",
+                    metadata={
+                        "elapsed_ms": self._elapsed_ms(model_started_at),
+                        "error_type": "IncompleteModelResponse",
+                    },
+                )
                 self._emit_activity("failed", "模型响应不完整")
                 raise AgentError("模型流式响应缺少结束事件，请重新尝试。")
 
+            self._finish_runtime_span(
+                model_span,
+                "succeeded",
+                metadata={
+                    "text_chars": len(model_response.content),
+                    "thinking_blocks": len(model_response.thinking),
+                    "tool_calls": len(model_response.tool_calls),
+                    "elapsed_ms": self._elapsed_ms(model_started_at),
+                    **self._usage_metadata(model_response.usage),
+                },
+            )
             try:
                 self._after_model_hook(
                     model_round=tool_rounds + 1,
@@ -484,8 +644,18 @@ class Agent:
             if not model_response.tool_calls:
                 self._commit_messages(pending_messages)
                 self._last_usage = turn_usage
+                self._finish_runtime_span(
+                    turn_span,
+                    "succeeded",
+                    metadata={
+                        **counters,
+                        "response_chars": len(model_response.content),
+                        "elapsed_ms": self._elapsed_ms(turn_started_at),
+                    },
+                )
                 return
 
+            counters["tool_calls"] += len(model_response.tool_calls)
             self._emit_activity(
                 "succeeded",
                 f"模型请求 {len(model_response.tool_calls)} 个工具",
@@ -507,7 +677,11 @@ class Agent:
             tool_result_message = Message(
                 role="user",
                 tool_results=tuple(
-                    self._execute_tool_call(call) for call in model_response.tool_calls
+                    self._execute_tool_call(
+                        call,
+                        parent_event_id=self._span_event_id(model_span),
+                    )
+                    for call in model_response.tool_calls
                 ),
             )
             request_messages.append(tool_result_message)
@@ -770,8 +944,33 @@ class Agent:
             return system_prompt
         return f"{system_prompt.rstrip()}\n\n" + "\n\n".join(instructions)
 
-    def _execute_tool_call(self, call: ToolCall) -> ToolResult:
+    def _execute_tool_call(
+        self,
+        call: ToolCall,
+        *,
+        parent_event_id: str | None = None,
+    ) -> ToolResult:
         started_at = monotonic()
+        requires_approval = (
+            self._registry is not None and self._registry.requires_approval(call.name)
+        )
+        tool_span = self._start_runtime_span(
+            "tool_call",
+            parent_event_id=parent_event_id,
+            metadata={
+                "tool_name": safe_tool_name(call.name),
+                "argument_count": len(call.arguments),
+                "requires_approval": requires_approval,
+            },
+        )
+        quality_span = (
+            self._start_runtime_span(
+                "quality_check",
+                parent_event_id=self._span_event_id(tool_span),
+            )
+            if call.name == "run_quality_check"
+            else None
+        )
         activity = describe_tool_call(call)
         hook_result = self._before_tool_hook(call)
         if hook_result is not None:
@@ -780,12 +979,23 @@ class Agent:
                 hook_result,
                 activity,
                 started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
                 skipped=True,
                 skipped_reason="生命周期 hook 拒绝或失败，未执行",
             )
         scope_result = self._refresh_instruction_scope(call)
         if scope_result is not None:
-            return self._after_tool_hook(call, scope_result)
+            result = self._after_tool_hook(call, scope_result)
+            self._finish_runtime_tool_spans(
+                call,
+                result,
+                started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
+                status="skipped",
+            )
+            return result
         self._emit_activity("running", activity.title, activity.details)
 
         if self._registry is None:
@@ -799,15 +1009,19 @@ class Agent:
                 result,
                 activity,
                 started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
             )
 
-        if not self._registry.requires_approval(call.name):
+        if not requires_approval:
             result = self._registry.execute(call)
             return self._finish_tool_call(
                 call,
                 result,
                 activity,
                 started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
             )
 
         preview = self._registry.preview(call)
@@ -817,8 +1031,28 @@ class Agent:
                 preview,
                 activity,
                 started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
             )
+        approval_started_at = monotonic()
+        approval_span = self._start_runtime_span(
+            "approval",
+            parent_event_id=self._span_event_id(tool_span),
+            metadata={
+                "tool_name": safe_tool_name(call.name),
+                "preview_chars": len(preview.content),
+            },
+            status="waiting",
+        )
         if self._approval_handler is None:
+            self._finish_runtime_span(
+                approval_span,
+                "failed",
+                metadata={
+                    "elapsed_ms": self._elapsed_ms(approval_started_at),
+                    "error_type": "ApprovalUnavailable",
+                },
+            )
             result = ToolResult(
                 tool_call_id=call.id,
                 content=f"工具需要用户确认，但当前无法请求确认：{call.name}",
@@ -829,13 +1063,41 @@ class Agent:
                 result,
                 activity,
                 started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
             )
         self._emit_activity(
             "waiting",
             f"等待批准：{activity.title}",
             (*activity.details, "已生成操作预览，确认后才会执行"),
         )
-        if not self._approval_handler(call, preview.content):
+        try:
+            approved = self._approval_handler(call, preview.content)
+        except BaseException as error:
+            self._finish_runtime_span(
+                approval_span,
+                "failed",
+                metadata={
+                    "elapsed_ms": self._elapsed_ms(approval_started_at),
+                    "error_type": type(error).__name__,
+                },
+            )
+            self._finish_runtime_tool_spans(
+                call,
+                None,
+                started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
+                status="failed",
+                error_type=type(error).__name__,
+            )
+            raise
+        if not approved:
+            self._finish_runtime_span(
+                approval_span,
+                "skipped",
+                metadata={"elapsed_ms": self._elapsed_ms(approval_started_at)},
+            )
             result = ToolResult(
                 tool_call_id=call.id,
                 content=f"用户拒绝执行工具：{call.name}",
@@ -846,8 +1108,15 @@ class Agent:
                 result,
                 activity,
                 started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
                 skipped=True,
             )
+        self._finish_runtime_span(
+            approval_span,
+            "succeeded",
+            metadata={"elapsed_ms": self._elapsed_ms(approval_started_at)},
+        )
         self._emit_activity(
             "running",
             f"执行：{activity.title}",
@@ -863,6 +1132,8 @@ class Agent:
             result,
             activity,
             started_at,
+            tool_span=tool_span,
+            quality_span=quality_span,
         )
 
     def _refresh_instruction_scope(self, call: ToolCall) -> ToolResult | None:
@@ -910,6 +1181,8 @@ class Agent:
         activity: ToolActivity,
         started_at: float,
         *,
+        tool_span: RuntimeSpan | None = None,
+        quality_span: RuntimeSpan | None = None,
         skipped: bool = False,
         skipped_reason: str = "用户拒绝，未执行",
     ) -> ToolResult:
@@ -919,6 +1192,17 @@ class Agent:
         if self._task_tracker is not None:
             self._task_tracker.record_tool_result(call, result)
         elapsed = monotonic() - started_at
+        runtime_status: RuntimeStatus = (
+            "skipped" if skipped else "failed" if result.is_error else "succeeded"
+        )
+        self._finish_runtime_tool_spans(
+            call,
+            result,
+            started_at,
+            tool_span=tool_span,
+            quality_span=quality_span,
+            status=runtime_status,
+        )
         if skipped:
             self._emit_activity(
                 "skipped",
@@ -946,6 +1230,121 @@ class Agent:
                 ),
             )
         return self._with_post_tool_guidance(call, result)
+
+    def _start_runtime_span(
+        self,
+        stage: RuntimeStage,
+        *,
+        parent_event_id: str | None = None,
+        metadata: Mapping[str, object] | None = None,
+        status: RuntimeStatus = "started",
+    ) -> RuntimeSpan | None:
+        """Start optional observation without changing Agent control flow."""
+
+        if self._runtime_events is None:
+            return None
+        try:
+            return self._runtime_events.start(
+                stage,
+                parent_event_id=parent_event_id,
+                metadata=metadata,
+                status=status,
+            )
+        except Exception:
+            return None
+
+    def _finish_runtime_span(
+        self,
+        span: RuntimeSpan | None,
+        status: RuntimeStatus,
+        *,
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        """Finish optional observation and isolate event-layer failures."""
+
+        if self._runtime_events is None or span is None:
+            return
+        try:
+            self._runtime_events.finish(span, status, metadata=metadata)
+        except Exception:
+            return
+
+    def _finish_runtime_tool_spans(
+        self,
+        call: ToolCall,
+        result: ToolResult | None,
+        started_at: float,
+        *,
+        tool_span: RuntimeSpan | None,
+        quality_span: RuntimeSpan | None,
+        status: RuntimeStatus,
+        error_type: str | None = None,
+    ) -> None:
+        """Complete tool and quality-check observations from one safe summary."""
+
+        metadata: dict[str, object] = {
+            "elapsed_ms": self._elapsed_ms(started_at),
+        }
+        if result is not None:
+            metadata.update(
+                {
+                    "is_error": result.is_error,
+                    "result_chars": len(result.content),
+                }
+            )
+        if error_type is not None:
+            metadata["error_type"] = error_type
+        self._finish_runtime_span(tool_span, status, metadata=metadata)
+
+        if call.name != "run_quality_check" or quality_span is None:
+            return
+        quality_metadata = {
+            name: value
+            for name, value in metadata.items()
+            if name in {"is_error", "result_chars", "elapsed_ms", "error_type"}
+        }
+        self._finish_runtime_span(
+            quality_span,
+            status,
+            metadata=quality_metadata,
+        )
+
+    def _turn_start_metadata(
+        self,
+        user_message: Message,
+        request_messages: Sequence[Message],
+    ) -> dict[str, object]:
+        selected_history = request_messages[:-1]
+        selected_rounds = count_rounds(selected_history)
+        return {
+            "input_chars": len(user_message.content),
+            "history_messages": len(self._messages),
+            "history_rounds": count_rounds(self._messages),
+            "selected_messages": len(selected_history),
+            "omitted_rounds": max(
+                count_rounds(self._messages) - selected_rounds,
+                0,
+            ),
+        }
+
+    @staticmethod
+    def _span_event_id(span: RuntimeSpan | None) -> str | None:
+        return None if span is None else span.start_event_id
+
+    @staticmethod
+    def _usage_metadata(usage: TokenUsage | None) -> dict[str, object]:
+        if usage is None:
+            return {}
+        return {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.cache_read_input_tokens,
+        }
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return max(round((monotonic() - started_at) * 1_000), 0)
 
     def _before_model_hook(self, *, model_round: int, message_count: int) -> str:
         if self._hooks is None:
