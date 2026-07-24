@@ -35,3 +35,7 @@ class AuditError(NeilAgentError):
 
 class ApprovalError(NeilAgentError):
     """A non-interactive approval request is invalid, stale, or already used."""
+
+
+class EventStoreError(NeilAgentError):
+    """A runtime event store path, record, lock, or rotation is invalid."""

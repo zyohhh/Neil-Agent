@@ -21,6 +21,13 @@ Phase 0A 事件基础也已完成：
 - `EventBus` 为每个观察者分配独立有界队列；发布不等待观察者，回调异常和队列溢出只进入统计。
 - 事件总线仍是可选的进程内旁路；现有 CLI 和 `/cockpit` 默认不创建它，也不改变任何输出协议。
 
+Phase 0B 事件存储与确定性投影也已完成：
+
+- 显式注册的版本 1 JSONL `EventStore` 将事件写入 `.neil-agent/runtime-events/`，使用跨进程内核锁、单备份大小轮转、真实普通文件检查和磁盘刷新。
+- `ExecutionGraphProjector` 与 `TimelineProjector` 只从事件重建不可变视图，不在 Agent 内维护第二份图状态。
+- 投影先按事件 ID 规范化，再按 `(timestamp, event_id)` 排序；重复、冲突、缺失开始/父事件、逆序结束和父级环都有稳定的异常记录与裁决结果。
+- 纯文本回放和固定 JSONL/文本夹具不依赖 Rich 或 Textual；10,000 个合成事件的顺序稳定性、时间和峰值内存具有回归边界。
+
 ## 架构原则
 
 1. **先数据、后界面**：事件模型、存储和投影必须能在纯文本测试中独立验证，Textual 只消费稳定投影。
@@ -55,7 +62,7 @@ Agent / ToolRegistry / Context
 | --- | --- | --- | --- |
 | 基础驾驶舱 | 已完成 | Rich 只读运行时快照 | `/cockpit` |
 | Phase 0A | 已完成 | `RuntimeEvent`、稳定 ID、脱敏和有界 `EventBus` | 内存事件流与单元测试 |
-| Phase 0B | 待开发 | 可选 JSONL 事件存储、确定性 DAG/时间线投影 | 文本回放命令或测试夹具 |
+| Phase 0B | 已完成 | 可选 JSONL 事件存储、确定性 DAG/时间线投影 | 文本回放与固定测试夹具 |
 | Phase 1 | 待开发 | Textual 全屏骨架、实时 DAG、token/耗时统计 | `/cockpit --live` 或独立入口 |
 | Phase 2A | 待开发 | Context Tomography 高级版 | 上下文来源、轮次和裁剪可视化 |
 | Phase 2B | 待开发 | Security Shield 高级版 | 权限色带、审批流和边界状态 |
@@ -77,11 +84,11 @@ Agent / ToolRegistry / Context
 
 ### Phase 0B：存储与投影
 
-- [ ] 增加显式开启的版本化 JSONL `EventStore`，使用大小上限和安全轮转。
-- [ ] 从事件生成 `ExecutionGraph`，而不是在 Agent 内维护第二份图状态。
-- [ ] 定义节点状态机和缺失/重复/乱序事件的确定性处理规则。
-- [ ] 提供不依赖 Textual 的纯文本回放或固定夹具。
-- [ ] 用 10,000 个合成事件验证内存、耗时和稳定性。
+- [x] 增加显式开启的版本化 JSONL `EventStore`，使用大小上限和安全轮转。
+- [x] 从事件生成 `ExecutionGraph`，而不是在 Agent 内维护第二份图状态。
+- [x] 定义节点状态机和缺失/重复/乱序事件的确定性处理规则。
+- [x] 提供不依赖 Textual 的纯文本回放或固定夹具。
+- [x] 用 10,000 个合成事件验证内存、耗时和稳定性。
 
 ### Phase 1：实时 DAG
 

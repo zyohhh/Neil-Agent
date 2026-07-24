@@ -1,0 +1,12 @@
+NEIL RUNTIME REPLAY v1
+events 4 input / 4 unique | nodes 2 | edges 1 | anomalies 0
+
+TIMELINE
+0001 2026-07-24T12:00:00.000Z agent_turn    started   turn-aaaaaaaa parent=- | history_messages=0 history_rounds=0 input_chars=7 omitted_rounds=0 selected_messages=0
+0002 2026-07-24T12:00:00.100Z model_request started   model-bbbbbbbb parent=evt-11111111 | message_count=1 model_round=1 tool_count=0
+0003 2026-07-24T12:00:00.200Z model_request succeeded model-bbbbbbbb parent=evt-22222222 | elapsed_ms=100 input_tokens=12 output_tokens=3 text_chars=4 tool_calls=0
+0004 2026-07-24T12:00:00.300Z agent_turn    succeeded turn-aaaaaaaa parent=evt-11111111 | elapsed_ms=300 model_requests=1 response_chars=4 tool_calls=0
+
+EXECUTION GRAPH
+- agent_turn turn-aaaaaaaa [succeeded] events=2
+  - model_request model-bbbbbbbb [succeeded] events=2

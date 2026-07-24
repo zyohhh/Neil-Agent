@@ -20,6 +20,10 @@ agent.py
   对话历史、工具循环、活动事件、生命周期 hooks、审批协调、修改后验证工作流
     ↘ events.py
       版本化运行时事件、严格元数据白名单、稳定关联 ID 和有界观察者队列
+        ├→ event_store.py
+        │    显式启用的版本化 JSONL 存储、跨进程锁和单备份轮转
+        └→ projections.py
+             确定性执行图、时间线和有界纯文本回放
     ↘ hooks.py
       类型化进程内回调、拒绝、审计和有界请求上下文
         ↘ audit.py
@@ -86,6 +90,10 @@ evals.py
 事件发布只向每个观察者的独立有界队列执行 `put_nowait`。观察者在守护线程中运行；回调异常被计数后隔离，队列已满时只丢对应观察数据。显式 `flush()` / `close()` 具有超时边界，Agent 主链路从不等待观察者。
 
 运行时事件元数据按阶段使用固定字段白名单，只允许工具名、计数、耗时、状态和 token 用量等有界标量。未知字段、控制/格式字符、过长字符串和非法计数都会被拒绝；prompt、thinking、工具参数值、工具结果正文、审批预览和项目指令正文没有对应字段，不能进入事件。
+
+`JsonlEventStore` 的构造不创建文件；只有宿主显式调用 `register(event_bus)` 才会预检 `.neil-agent/runtime-events/` 并订阅事件。每条记录仍由 `RuntimeEvent` 版本 1 模型严格校验，单条和单文件大小都有上限；当前文件、`.1` 备份和锁锚点必须是真实普通文件。大小检查、单备份轮转与追加处于同一个跨进程内核锁临界区，追加后刷新磁盘；加载按备份到当前文件的追加顺序返回保留窗口，截断、超限、未知版本或无效 JSONL 都转换为 `EventStoreError`。
+
+`ExecutionGraphProjector` 与 `TimelineProjector` 是不修改输入的纯投影。它们先按事件 ID 去重，并以规范 JSON 的字典序稳定裁决同 ID 冲突，再按 UTC 时间和事件 ID 排序，因此输入到达顺序不影响结果。缺失开始事件仍生成孤立节点并标记异常；多个开始、重复状态、缺失或无效父事件、结束早于开始都会保留固定异常。冲突终态使用 `failed > skipped > succeeded` 的固定优先级；父级环反复移除环中字典序最大的关联 ID 的父边，直到得到 DAG。纯文本回放只消费这些不可变投影，并限制展示条目，不依赖 Rich、Textual 或 Agent 执行。
 
 当注册表同时提供文件写入和质量检查工具时，Agent 会在用户系统提示词后追加不可配置的本地工具工作流。文件修改结果会提醒模型选择合适的质量检查；命令结果固定返回 `Command`、`Working directory`、`Exit code` 和 `Output`，最终回答据此汇总验证结果。
 
@@ -288,7 +296,9 @@ NeilAgentError
 ├── SessionError 本地会话存储、格式和恢复错误
 ├── InstructionError 项目指令初始化与重载错误
 ├── HookError    生命周期 hook 注册、决策或回调错误
-└── AuditError   本地审计初始化或写入错误
+├── AuditError   本地审计初始化或写入错误
+├── ApprovalError 一次性审批记录无效、过期或已消费
+└── EventStoreError 运行时事件存储、格式或轮转错误
 ```
 
 工具执行错误通常会转换为 `ToolResult(is_error=True)` 返回模型；无法在工具内部处理的 Agent 或 LLM 错误由 CLI 捕获并展示。
