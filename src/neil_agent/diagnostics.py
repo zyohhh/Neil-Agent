@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .audit import JsonlAuditSink
 from .config import Settings
-from .errors import NeilAgentError, SessionError
+from .errors import AuditError, NeilAgentError, SessionError
 from .session import SessionStore
 from .tools.shell import ShellTools
 
@@ -53,6 +54,7 @@ def run_diagnostics(
             _check_configuration(settings),
             _check_workspace(workspace_root),
             _check_sessions(session_store),
+            _check_audit(settings, workspace_root),
             _check_git(shell_tools),
         )
     )
@@ -138,6 +140,67 @@ def _check_git(shell_tools: ShellTools) -> DiagnosticCheck:
         status="ok",
         summary="Git 仓库可访问",
         details=(f"工作区状态：{'有未提交变更' if dirty else '干净'}",),
+    )
+
+
+def _check_audit(settings: Settings, workspace_root: Path) -> DiagnosticCheck:
+    if not settings.audit_log_enabled:
+        return DiagnosticCheck(
+            name="生命周期审计",
+            status="ok",
+            summary="未启用（可选）",
+            details=("AUDIT_LOG_ENABLED=false",),
+        )
+    try:
+        status = JsonlAuditSink(
+            workspace_root,
+            max_bytes=settings.audit_log_max_bytes,
+        ).inspect()
+    except AuditError:
+        return DiagnosticCheck(
+            name="生命周期审计",
+            status="error",
+            summary="审计日志不可用",
+            details=("请检查 .neil-agent/audit 的路径、锁文件和普通文件边界。",),
+        )
+
+    oversized = (
+        status.current_size_bytes > status.max_bytes
+        or status.backup_size_bytes > status.max_bytes
+    )
+    invalid_records = status.invalid_records or 0
+    if not status.lock_available:
+        diagnostic_status: DiagnosticStatus = "warning"
+        summary = "审计日志当前由另一进程占用"
+    elif invalid_records:
+        diagnostic_status = "warning"
+        summary = f"发现 {invalid_records} 条无效审计记录"
+    elif oversized:
+        diagnostic_status = "warning"
+        summary = "审计日志超过配置的轮转上限"
+    else:
+        diagnostic_status = "ok"
+        summary = "元数据审计可用"
+
+    if status.current_records is None:
+        record_detail = "记录结构：锁占用期间未读取"
+    else:
+        record_detail = (
+            f"记录：当前 {status.current_records} 条，"
+            f"备份 {status.backup_records or 0} 条"
+        )
+    return DiagnosticCheck(
+        name="生命周期审计",
+        status=diagnostic_status,
+        summary=summary,
+        details=(
+            f"日志：{status.path}",
+            f"当前大小：{_format_bytes(status.current_size_bytes)}",
+            f"备份大小：{_format_bytes(status.backup_size_bytes)}",
+            f"轮转上限：{_format_bytes(status.max_bytes)}",
+            record_detail,
+            f"跨进程锁：{'可用' if status.lock_available else '占用中'}",
+        ),
     )
 
 

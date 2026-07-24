@@ -66,7 +66,7 @@ uv run neil-agent -p "更新版本号" --protocol-version 2 --permission-mode ap
 ```
 
 如需本地生命周期审计，可设置 `AUDIT_LOG_ENABLED=true`。日志写入
-`.neil-agent/audit/events.jsonl`，只记录有界元数据，不记录 prompt、thinking、工具参数/正文或 API Key；`AUDIT_LOG_MAX_BYTES` 控制单文件轮转上限。
+`.neil-agent/audit/events.jsonl`，只记录有界元数据，不记录 prompt、thinking、工具参数/正文或 API Key；`AUDIT_LOG_MAX_BYTES` 控制单文件轮转上限。审计写入使用操作系统文件锁串行化检查、轮转和追加，锁等待超时会明确失败，进程崩溃后锁由内核释放。`/doctor` 只读报告审计文件大小、记录数、格式与锁状态，不显示日志正文。
 
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 
