@@ -133,6 +133,61 @@ def test_run_uses_injected_console(
     assert "Neil Agent 已退出" in printed_text
 
 
+def test_run_routes_explicit_live_cockpit_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    live_calls: list[Path] = []
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(
+        cli,
+        "_try_show_live_cockpit",
+        lambda _console, _settings, _agent, _llm, _tracker, workspace: (
+            live_calls.append(workspace) or 0
+        ),
+    )
+    console = MagicMock(spec=Console)
+    console.input.side_effect = ["/cockpit --live", "/exit"]
+
+    cli.run(cast(Console, console))
+
+    assert live_calls == [tmp_path.resolve()]
+
+
+def test_live_cockpit_degrades_to_snapshot_without_a_terminal(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+    )
+    output = StringIO()
+    console = Console(file=output, force_terminal=False)
+    agent = MagicMock(spec=Agent)
+    llm = MagicMock(spec=cli.LLMClient)
+    tracker = MagicMock(spec=TaskTracker)
+
+    result = cli._try_show_live_cockpit(
+        console,
+        settings,
+        agent,
+        llm,
+        tracker,
+        tmp_path,
+    )
+
+    assert result is None
+    assert "不是交互终端" in output.getvalue()
+    agent.set_event_bus.assert_not_called()
+
+
 def test_welcome_panel_remains_readable_in_a_narrow_terminal(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text("PRIVATE-RULE", encoding="utf-8")
     panel = cli._build_welcome_panel(

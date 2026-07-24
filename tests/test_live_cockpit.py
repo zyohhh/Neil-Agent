@@ -1,0 +1,293 @@
+"""Tests for the Textual live execution-tree cockpit."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
+from threading import Thread
+
+import pytest
+from textual.widgets import Input, Log, Tree
+
+from neil_agent.events import (
+    EventBus,
+    RuntimeEvent,
+    RuntimeEventEmitter,
+    RuntimeMetadataItem,
+    RuntimeStage,
+    RuntimeStatus,
+)
+from neil_agent.live_cockpit import (
+    LiveCockpitApp,
+    RuntimeEventBridge,
+    ToolApprovalScreen,
+    format_node_detail,
+    run_live_cockpit,
+    visible_node_ids,
+)
+from neil_agent.projections import ExecutionGraphProjector
+from neil_agent.schemas import ToolCall
+
+NOW = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
+
+
+def _event(
+    number: int,
+    *,
+    correlation_id: str,
+    stage: RuntimeStage,
+    status: RuntimeStatus,
+    offset_ms: int,
+    parent_event_id: str | None = None,
+) -> RuntimeEvent:
+    return RuntimeEvent(
+        event_id=f"evt-{number:032x}",
+        correlation_id=correlation_id,
+        parent_event_id=parent_event_id,
+        timestamp=NOW + timedelta(milliseconds=offset_ms),
+        stage=stage,
+        status=status,
+    )
+
+
+def _execution_events() -> tuple[RuntimeEvent, ...]:
+    turn_id = "turn-" + "a" * 32
+    model_id = "model-" + "b" * 32
+    tool_id = "tool-" + "c" * 32
+    turn = _event(
+        1,
+        correlation_id=turn_id,
+        stage="agent_turn",
+        status="started",
+        offset_ms=0,
+    )
+    model = _event(
+        2,
+        correlation_id=model_id,
+        stage="model_request",
+        status="started",
+        offset_ms=1,
+        parent_event_id=turn.event_id,
+    )
+    tool = _event(
+        3,
+        correlation_id=tool_id,
+        stage="tool_call",
+        status="started",
+        offset_ms=2,
+        parent_event_id=model.event_id,
+    ).model_copy(
+        update={
+            "metadata": (
+                RuntimeMetadataItem(
+                    name="tool_name",
+                    value="[bold red]read_file[/bold red]",
+                ),
+            )
+        }
+    )
+    failed = _event(
+        4,
+        correlation_id=tool_id,
+        stage="tool_call",
+        status="failed",
+        offset_ms=3,
+        parent_event_id=tool.event_id,
+    )
+    return turn, model, tool, failed
+
+
+class FakeLiveAgent:
+    def __init__(self, bus: EventBus) -> None:
+        self._emitter = RuntimeEventEmitter(bus)
+        self.prompts: list[str] = []
+
+    def stream_chat(self, user_input: str) -> Iterator[str]:
+        self.prompts.append(user_input)
+        span = self._emitter.start(
+            "agent_turn",
+            metadata={
+                "input_chars": len(user_input),
+                "history_messages": 0,
+                "history_rounds": 0,
+                "selected_messages": 0,
+                "omitted_rounds": 0,
+            },
+        )
+        yield "hello "
+        self._emitter.finish(
+            span,
+            "succeeded",
+            metadata={
+                "model_requests": 1,
+                "tool_calls": 0,
+                "response_chars": 11,
+                "elapsed_ms": 8,
+            },
+        )
+        yield "world"
+
+
+class FakeApprovalOwner:
+    def __init__(self) -> None:
+        self.handler: object = "classic-handler"
+
+    def replace_approval_handler(self, handler: object) -> object:
+        previous = self.handler
+        self.handler = handler
+        return previous
+
+
+def test_event_bridge_coalesces_notifications_and_bounds_memory() -> None:
+    notifications: list[str] = []
+    bridge = RuntimeEventBridge(
+        lambda: notifications.append("ready"),
+        max_events=2,
+    )
+    events = _execution_events()
+
+    for event in events[:3]:
+        bridge.observe(event)
+
+    assert notifications == ["ready"]
+    assert bridge.dropped_events == 1
+    assert bridge.drain() == events[1:3]
+
+    bridge.observe(events[3])
+    assert notifications == ["ready", "ready"]
+    bridge.close()
+    bridge.observe(events[0])
+    assert bridge.drain() == ()
+
+
+def test_tree_filters_keep_ancestors_and_details_treat_markup_as_text() -> None:
+    graph = ExecutionGraphProjector().project(_execution_events())
+    turn_id, model_id, tool_id = (
+        "turn-" + "a" * 32,
+        "model-" + "b" * 32,
+        "tool-" + "c" * 32,
+    )
+
+    assert visible_node_ids(graph, "tools") == {turn_id, model_id, tool_id}
+    assert visible_node_ids(graph, "failed") == {turn_id, model_id, tool_id}
+    assert visible_node_ids(graph, "active") == {turn_id, model_id}
+
+    tool_node = graph.node(tool_id)
+    assert tool_node is not None
+    detail = format_node_detail(tool_node)
+    assert "[bold red]read_file[/bold red]" in detail.plain
+    assert detail.spans
+
+
+@pytest.mark.asyncio
+async def test_live_app_streams_agent_events_and_output() -> None:
+    bus = EventBus(queue_size=32)
+    agent = FakeLiveAgent(bus)
+    app = LiveCockpitApp(
+        agent,
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "inspect project"
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        assert agent.prompts == ["inspect project"]
+        assert app.completed_turns == 1
+        assert app.metrics.total_nodes == 1
+        assert app.metrics.succeeded_nodes == 1
+        assert app.graph.nodes[0].stage == "agent_turn"
+        transcript = app.query_one("#transcript", Log)
+        assert "hello world" in "\n".join(transcript.lines)
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_filters_and_adapts_to_narrow_terminal() -> None:
+    bus = EventBus()
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        initial_events=_execution_events(),
+    )
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        assert app.has_class("narrow")
+        app.action_filter_tools()
+        await pilot.pause()
+        tree = app.query_one("#execution-tree", Tree)
+        assert app.node_filter == "tools"
+        assert len(tree.root.children) == 1
+        assert "FILTER TOOLS" in app.query_one("#tree-title").render().plain
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_approval_modal_returns_explicit_decision() -> None:
+    bus = EventBus()
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+    )
+    decisions: list[bool] = []
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        thread = Thread(
+            target=lambda: decisions.append(
+                app.request_tool_approval(
+                    ToolCall(id="call-1", name="write_file", arguments={}),
+                    "Write preview",
+                )
+            )
+        )
+        thread.start()
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ToolApprovalScreen)
+        await pilot.press("y")
+        await pilot.pause()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert decisions == [True]
+
+    assert bus.close()
+
+
+def test_live_runner_restores_the_classic_approval_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bus = EventBus()
+    owner = FakeApprovalOwner()
+    active_handlers: list[object] = []
+
+    def fake_run(app: LiveCockpitApp, *, mouse: bool) -> None:
+        assert mouse is True
+        active_handlers.append(owner.handler)
+        app.completed_turns = 2
+
+    monkeypatch.setattr(LiveCockpitApp, "run", fake_run)
+
+    completed = run_live_cockpit(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        approval_handler_owner=owner,
+    )
+
+    assert completed == 2
+    assert len(active_handlers) == 1
+    assert callable(active_handlers[0])
+    assert owner.handler == "classic-handler"
+    assert bus.close()

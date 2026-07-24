@@ -28,6 +28,13 @@ Phase 0B 事件存储与确定性投影也已完成：
 - 投影先按事件 ID 规范化，再按 `(timestamp, event_id)` 排序；重复、冲突、缺失开始/父事件、逆序结束和父级环都有稳定的异常记录与裁决结果。
 - 纯文本回放和固定 JSONL/文本夹具不依赖 Rich 或 Textual；10,000 个合成事件的顺序稳定性、时间和峰值内存具有回归边界。
 
+Phase 1 树状实时 DAG 也已完成：
+
+- 采用 [`textual>=8.2.8,<9.0.0`](https://pypi.org/project/textual/)；该版本要求 Python 3.9 以上，覆盖项目的 Python 3.13 基线，并用 lockfile 固定解析结果。
+- `/cockpit --live` 在全屏界面内运行 Agent 请求，按照 [Textual workers 线程边界](https://textual.textualize.io/guide/workers/) 使用有界批量桥把 EventBus 观察者线程安全地接入 Textual 主线程。
+- 执行树、节点状态和 token/耗时指标全部由 Phase 0B 投影生成；提供节点筛选、安全详情抽屉、流式回答和显式工具审批。
+- 宽/窄终端使用不同信息密度；非交互终端、Textual 不可用或启动失败时继续降级到原 `/cockpit` 快照。
+
 ## 架构原则
 
 1. **先数据、后界面**：事件模型、存储和投影必须能在纯文本测试中独立验证，Textual 只消费稳定投影。
@@ -63,7 +70,7 @@ Agent / ToolRegistry / Context
 | 基础驾驶舱 | 已完成 | Rich 只读运行时快照 | `/cockpit` |
 | Phase 0A | 已完成 | `RuntimeEvent`、稳定 ID、脱敏和有界 `EventBus` | 内存事件流与单元测试 |
 | Phase 0B | 已完成 | 可选 JSONL 事件存储、确定性 DAG/时间线投影 | 文本回放与固定测试夹具 |
-| Phase 1 | 待开发 | Textual 全屏骨架、实时 DAG、token/耗时统计 | `/cockpit --live` 或独立入口 |
+| Phase 1 | 已完成 | Textual 全屏骨架、实时树状 DAG、token/耗时统计 | `/cockpit --live` |
 | Phase 2A | 待开发 | Context Tomography 高级版 | 上下文来源、轮次和裁剪可视化 |
 | Phase 2B | 待开发 | Security Shield 高级版 | 权限色带、审批流和边界状态 |
 | Phase 3A | 待开发 | Time Machine 只读回放 | 快照时间轴和历史状态浏览 |
@@ -92,11 +99,11 @@ Agent / ToolRegistry / Context
 
 ### Phase 1：实时 DAG
 
-- [ ] 引入 Textual 前先确定 Python 3.13 兼容版本并记录依赖决策。
-- [ ] 实现全屏应用的启动、退出、终端 resize 和异常降级。
-- [ ] 展示 Agent 回合 → 模型请求 → 工具调用 → 检查的实时 DAG。
-- [ ] 增加节点筛选、详情抽屉和耗时/token 汇总；详情仍只显示安全元数据。
-- [ ] 保留现有 `/cockpit`，在非交互终端和 Textual 不可用时继续作为降级入口。
+- [x] 引入 Textual 前先确定 Python 3.13 兼容版本并记录依赖决策。
+- [x] 实现全屏应用的启动、退出、终端 resize 和异常降级。
+- [x] 展示 Agent 回合 → 模型请求 → 工具调用 → 检查的实时 DAG。
+- [x] 增加节点筛选、详情抽屉和耗时/token 汇总；详情仍只显示安全元数据。
+- [x] 保留现有 `/cockpit`，在非交互终端和 Textual 不可用时继续作为降级入口。
 
 ### Phase 2A：Context Tomography
 

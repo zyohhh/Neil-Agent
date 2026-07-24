@@ -15,6 +15,7 @@ from neil_agent.events import (
 )
 from neil_agent.projections import (
     ExecutionGraphProjector,
+    MetricsProjector,
     TimelineProjector,
     render_runtime_replay,
 )
@@ -237,6 +238,67 @@ def test_replay_limits_large_views_without_losing_totals() -> None:
     assert "events 5 input / 5 unique | nodes 5" in output
     assert "... 3 timeline entries omitted ..." in output
     assert "... 3 graph nodes omitted ..." in output
+
+
+def test_metrics_summarize_graph_status_usage_and_elapsed_time() -> None:
+    turn_id = "turn-" + "a" * 32
+    model_id = "model-" + "b" * 32
+    turn_start = _event(
+        30,
+        correlation_id=turn_id,
+        stage="agent_turn",
+        status="started",
+        offset_ms=0,
+    )
+    turn_finish = _event(
+        31,
+        correlation_id=turn_id,
+        stage="agent_turn",
+        status="succeeded",
+        offset_ms=30,
+        parent_event_id=turn_start.event_id,
+    ).model_copy(
+        update={"metadata": (RuntimeMetadataItem(name="elapsed_ms", value=30),)}
+    )
+    model_start = _event(
+        32,
+        correlation_id=model_id,
+        stage="model_request",
+        status="started",
+        offset_ms=5,
+        parent_event_id=turn_start.event_id,
+    )
+    model_finish = _event(
+        33,
+        correlation_id=model_id,
+        stage="model_request",
+        status="failed",
+        offset_ms=20,
+        parent_event_id=model_start.event_id,
+    ).model_copy(
+        update={
+            "metadata": (
+                RuntimeMetadataItem(name="input_tokens", value=120),
+                RuntimeMetadataItem(name="output_tokens", value=8),
+                RuntimeMetadataItem(name="elapsed_ms", value=15),
+            )
+        }
+    )
+    graph = ExecutionGraphProjector().project(
+        (turn_start, turn_finish, model_start, model_finish)
+    )
+
+    metrics = MetricsProjector().project(graph)
+
+    assert metrics.total_nodes == 2
+    assert metrics.active_nodes == 0
+    assert metrics.succeeded_nodes == 1
+    assert metrics.failed_nodes == 1
+    assert metrics.model_requests == 1
+    assert metrics.tool_calls == 0
+    assert metrics.input_tokens == 120
+    assert metrics.output_tokens == 8
+    assert metrics.reported_elapsed_ms == 45
 
 
 def test_ten_thousand_events_have_bounded_stable_projection() -> None:

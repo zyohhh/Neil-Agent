@@ -64,6 +64,16 @@ class TaskTracker:
         registry.register(SET_TASK_PLAN, self.set_task_plan)
         registry.register(UPDATE_TASK_STEP, self.update_task_step)
 
+    def replace_change_handler(
+        self,
+        handler: PlanChangeHandler | None,
+    ) -> PlanChangeHandler | None:
+        """Replace terminal plan output between Agent requests."""
+
+        previous = self._change_handler
+        self._change_handler = handler
+        return previous
+
     def clear(self) -> None:
         """Clear task-local state when the conversation is reset."""
 

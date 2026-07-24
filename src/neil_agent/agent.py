@@ -181,6 +181,40 @@ class Agent:
         self._messages: list[Message] = []
         self._last_usage: TokenUsage | None = None
 
+    def set_event_bus(
+        self,
+        event_bus: EventBus | None,
+        *,
+        event_factory: RuntimeEventFactory | None = None,
+    ) -> None:
+        """Attach or detach runtime observation between Agent requests."""
+
+        self._runtime_events = (
+            RuntimeEventEmitter(event_bus, factory=event_factory)
+            if event_bus is not None
+            else None
+        )
+
+    def replace_approval_handler(
+        self,
+        handler: ToolApprovalHandler | None,
+    ) -> ToolApprovalHandler | None:
+        """Replace the interactive approval handler between Agent requests."""
+
+        previous = self._approval_handler
+        self._approval_handler = handler
+        return previous
+
+    def replace_activity_handler(
+        self,
+        handler: ActivityHandler | None,
+    ) -> ActivityHandler | None:
+        """Replace terminal activity output between Agent requests."""
+
+        previous = self._activity_handler
+        self._activity_handler = handler
+        return previous
+
     @property
     def messages(self) -> tuple[Message, ...]:
         """Return an immutable snapshot of the successful message history."""

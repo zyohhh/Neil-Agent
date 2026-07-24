@@ -23,6 +23,7 @@ from .cockpit import CockpitSnapshot, build_cockpit_panel
 from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import AuditError, NeilAgentError, SessionError, ToolError
+from .events import EventBus
 from .hooks import LifecycleHooks
 from .instructions import (
     ProjectInstructionManager,
@@ -380,8 +381,38 @@ def run(console: Console) -> None:
             _show_status(console, task_tracker, shell_tools, current_session)
             continue
         if command in COCKPIT_COMMANDS:
-            if command_argument:
-                console.print("[yellow]用法：/cockpit[/yellow]")
+            cockpit_mode = command_argument.strip()
+            if cockpit_mode not in {"", "--live"}:
+                console.print("[yellow]用法：/cockpit [--live][/yellow]")
+            elif cockpit_mode == "--live":
+                completed_turns = _try_show_live_cockpit(
+                    console,
+                    settings,
+                    agent,
+                    llm,
+                    task_tracker,
+                    filesystem_tools.root,
+                )
+                if completed_turns is None:
+                    _show_cockpit(
+                        console,
+                        settings,
+                        agent,
+                        task_tracker,
+                        registry,
+                        filesystem_tools,
+                        instruction_manager.current,
+                        current_session,
+                        shell_tools,
+                    )
+                elif completed_turns:
+                    current_session = _save_current_session(
+                        console,
+                        session_store,
+                        current_session,
+                        agent,
+                        task_tracker,
+                    )
             else:
                 _show_cockpit(
                     console,
@@ -547,17 +578,13 @@ def run(console: Console) -> None:
             console.print(f"[bold red]请求失败：[/bold red]{error}")
         else:
             renderer.finish_answer()
-            try:
-                snapshot = session_store.save(
-                    current_session,
-                    agent.messages,
-                    task_tracker.steps,
-                    task_tracker.latest_quality_check,
-                    last_usage=agent.last_usage,
-                )
-                current_session = session_store.handle_for(snapshot)
-            except SessionError as error:
-                console.print(f"[yellow]本地会话未保存：[/yellow]{error}")
+            current_session = _save_current_session(
+                console,
+                session_store,
+                current_session,
+                agent,
+                task_tracker,
+            )
 
 
 def _show_welcome(
@@ -648,7 +675,7 @@ def _show_help(console: Console) -> None:
     console.print("  /clear  清空对话历史")
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
-    console.print("  /cockpit 显示只读任务、上下文和安全可视化")
+    console.print("  /cockpit [--live] 显示快照或全屏实时执行树")
     console.print("  /context 显示上下文预算和当前占用")
     console.print("  /doctor 检查本地配置和运行环境")
     console.print("  /permissions 显示工具审批与工作区安全边界")
@@ -746,6 +773,72 @@ def _show_cockpit(
         git_available=git_available,
     )
     console.print(build_cockpit_panel(snapshot))
+
+
+def _try_show_live_cockpit(
+    console: Console,
+    settings: Settings,
+    agent: Agent,
+    llm: LLMClient,
+    task_tracker: TaskTracker,
+    workspace: Path,
+) -> int | None:
+    """Run Textual only in a terminal and return ``None`` for Rich fallback."""
+
+    if not console.is_terminal:
+        console.print("[yellow]当前输出不是交互终端，已降级为只读驾驶舱快照。[/yellow]")
+        return None
+    try:
+        from .live_cockpit import run_live_cockpit
+    except Exception:  # noqa: BLE001 - optional UI degradation boundary.
+        console.print("[yellow]Textual 不可用，已降级为只读驾驶舱快照。[/yellow]")
+        return None
+
+    event_bus = EventBus(queue_size=1_024, max_observers=2)
+    previous_activity = agent.replace_activity_handler(None)
+    previous_retry = llm.replace_retry_handler(None)
+    previous_plan = task_tracker.replace_change_handler(None)
+    agent.set_event_bus(event_bus)
+    try:
+        return run_live_cockpit(
+            agent,
+            event_bus,
+            model=settings.deepseek_model,
+            workspace=str(workspace),
+            approval_handler_owner=agent,
+        )
+    except Exception:  # noqa: BLE001 - optional UI degradation boundary.
+        console.print("[yellow]实时驾驶舱启动失败，已降级为只读驾驶舱快照。[/yellow]")
+        return None
+    finally:
+        agent.set_event_bus(None)
+        agent.replace_activity_handler(previous_activity)
+        llm.replace_retry_handler(previous_retry)
+        task_tracker.replace_change_handler(previous_plan)
+        event_bus.close(1)
+
+
+def _save_current_session(
+    console: Console,
+    session_store: SessionStore,
+    current_session: SessionHandle,
+    agent: Agent,
+    task_tracker: TaskTracker,
+) -> SessionHandle:
+    """Persist successful state from either the classic or live interface."""
+
+    try:
+        snapshot = session_store.save(
+            current_session,
+            agent.messages,
+            task_tracker.steps,
+            task_tracker.latest_quality_check,
+            last_usage=agent.last_usage,
+        )
+        return session_store.handle_for(snapshot)
+    except SessionError as error:
+        console.print(f"[yellow]本地会话未保存：[/yellow]{error}")
+        return current_session
 
 
 def _show_permissions(

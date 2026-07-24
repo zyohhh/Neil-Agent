@@ -906,6 +906,27 @@ def test_agent_result_is_identical_with_an_unobserved_event_bus() -> None:
     assert bus.close()
 
 
+def test_agent_can_attach_and_detach_runtime_events_between_requests() -> None:
+    events: list[RuntimeEvent] = []
+    bus = EventBus()
+    subscription = bus.subscribe(events.append)
+    agent = Agent(FakeChatModel())
+
+    agent.set_event_bus(bus)
+    assert "".join(agent.stream_chat("observed")) == "assistant reply"
+    assert bus.flush(2)
+    observed_count = len(events)
+    assert observed_count == 4
+
+    agent.set_event_bus(None)
+    assert "".join(agent.stream_chat("not observed")) == "assistant reply"
+    assert bus.flush(2)
+    assert len(events) == observed_count
+
+    subscription.close()
+    assert bus.close()
+
+
 def test_agent_result_survives_failing_and_overflowing_event_observers() -> None:
     failures = EventBus(queue_size=8)
 

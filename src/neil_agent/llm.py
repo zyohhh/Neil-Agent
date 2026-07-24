@@ -60,6 +60,16 @@ class LLMClient:
         self._sleeper = sleeper
         self._last_usage: TokenUsage | None = None
 
+    def replace_retry_handler(
+        self,
+        handler: RetryHandler | None,
+    ) -> RetryHandler | None:
+        """Replace terminal retry output between model requests."""
+
+        previous = self._retry_handler
+        self._retry_handler = handler
+        return previous
+
     @property
     def last_usage(self) -> TokenUsage | None:
         """Return usage from the most recently completed SDK request."""

@@ -131,6 +131,23 @@ class RuntimeTimeline:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeMetrics:
+    """Bounded counters derived from one execution-graph projection."""
+
+    version: Literal[1]
+    total_nodes: int
+    active_nodes: int
+    succeeded_nodes: int
+    skipped_nodes: int
+    failed_nodes: int
+    model_requests: int
+    tool_calls: int
+    input_tokens: int
+    output_tokens: int
+    reported_elapsed_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class _NormalizedEvents:
     input_event_count: int
     events: tuple[RuntimeEvent, ...]
@@ -354,6 +371,25 @@ class TimelineProjector:
         )
 
 
+class MetricsProjector:
+    """Summarize only safe scalar metadata from an execution graph."""
+
+    def project(self, graph: ExecutionGraph) -> RuntimeMetrics:
+        return RuntimeMetrics(
+            version=RUNTIME_PROJECTION_VERSION,
+            total_nodes=len(graph.nodes),
+            active_nodes=sum(node.status in _INITIAL_STATUSES for node in graph.nodes),
+            succeeded_nodes=sum(node.status == "succeeded" for node in graph.nodes),
+            skipped_nodes=sum(node.status == "skipped" for node in graph.nodes),
+            failed_nodes=sum(node.status == "failed" for node in graph.nodes),
+            model_requests=sum(node.stage == "model_request" for node in graph.nodes),
+            tool_calls=sum(node.stage == "tool_call" for node in graph.nodes),
+            input_tokens=_sum_metadata(graph.nodes, "input_tokens"),
+            output_tokens=_sum_metadata(graph.nodes, "output_tokens"),
+            reported_elapsed_ms=_sum_metadata(graph.nodes, "elapsed_ms"),
+        )
+
+
 def render_runtime_replay(
     events: Iterable[RuntimeEvent],
     *,
@@ -550,6 +586,18 @@ def _metadata_value(
     name: str,
 ) -> bool | int | str | None:
     return next((item.value for item in metadata if item.name == name), None)
+
+
+def _sum_metadata(
+    nodes: tuple[ExecutionNode, ...],
+    name: str,
+) -> int:
+    total = 0
+    for node in nodes:
+        value = _metadata_value(node.finish_metadata, name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += value
+    return total
 
 
 def _event_sort_key(event: RuntimeEvent) -> tuple[datetime, str]:

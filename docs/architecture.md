@@ -13,8 +13,10 @@ cli.py
       一次性运行、版本化协议、显式退出码和双阶段审批协调
         ↘ approval.py
           有界审批记录、精确预览绑定、过期检查和一次性消费
-    ↘ cockpit.py
-      任务、上下文、安全边界和工作区信号的只读 Rich 投影
+    ├→ cockpit.py
+    │    任务、上下文、安全边界和工作区信号的只读 Rich 投影
+    └→ live_cockpit.py
+         Textual 实时执行树、线程桥接、筛选、详情和审批界面
     ↓
 agent.py
   对话历史、工具循环、活动事件、生命周期 hooks、审批协调、修改后验证工作流
@@ -23,7 +25,7 @@ agent.py
         ├→ event_store.py
         │    显式启用的版本化 JSONL 存储、跨进程锁和单备份轮转
         └→ projections.py
-             确定性执行图、时间线和有界纯文本回放
+             确定性执行图、时间线、指标与有界纯文本回放
     ↘ hooks.py
       类型化进程内回调、拒绝、审计和有界请求上下文
         ↘ audit.py
@@ -93,7 +95,7 @@ evals.py
 
 `JsonlEventStore` 的构造不创建文件；只有宿主显式调用 `register(event_bus)` 才会预检 `.neil-agent/runtime-events/` 并订阅事件。每条记录仍由 `RuntimeEvent` 版本 1 模型严格校验，单条和单文件大小都有上限；当前文件、`.1` 备份和锁锚点必须是真实普通文件。大小检查、单备份轮转与追加处于同一个跨进程内核锁临界区，追加后刷新磁盘；加载按备份到当前文件的追加顺序返回保留窗口，截断、超限、未知版本或无效 JSONL 都转换为 `EventStoreError`。
 
-`ExecutionGraphProjector` 与 `TimelineProjector` 是不修改输入的纯投影。它们先按事件 ID 去重，并以规范 JSON 的字典序稳定裁决同 ID 冲突，再按 UTC 时间和事件 ID 排序，因此输入到达顺序不影响结果。缺失开始事件仍生成孤立节点并标记异常；多个开始、重复状态、缺失或无效父事件、结束早于开始都会保留固定异常。冲突终态使用 `failed > skipped > succeeded` 的固定优先级；父级环反复移除环中字典序最大的关联 ID 的父边，直到得到 DAG。纯文本回放只消费这些不可变投影，并限制展示条目，不依赖 Rich、Textual 或 Agent 执行。
+`ExecutionGraphProjector` 与 `TimelineProjector` 是不修改输入的纯投影。它们先按事件 ID 去重，并以规范 JSON 的字典序稳定裁决同 ID 冲突，再按 UTC 时间和事件 ID 排序，因此输入到达顺序不影响结果。缺失开始事件仍生成孤立节点并标记异常；多个开始、重复状态、缺失或无效父事件、结束早于开始都会保留固定异常。冲突终态使用 `failed > skipped > succeeded` 的固定优先级；父级环反复移除环中字典序最大的关联 ID 的父边，直到得到 DAG。`MetricsProjector` 再从图中汇总节点状态、模型/工具数量、服务端 token 和已报告阶段耗时。纯文本回放只消费这些不可变投影，并限制展示条目，不依赖 Rich、Textual 或 Agent 执行。
 
 当注册表同时提供文件写入和质量检查工具时，Agent 会在用户系统提示词后追加不可配置的本地工具工作流。文件修改结果会提醒模型选择合适的质量检查；命令结果固定返回 `Command`、`Working directory`、`Exit code` 和 `Output`，最终回答据此汇总验证结果。
 
@@ -114,7 +116,16 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - `/cockpit` 从当前 Agent、任务计划、工具注册表、项目指令快照、文件检查点和 Git 状态构造不可变的有界快照；它不调用模型、不写文件，也不改变执行状态。
 - 驾驶舱展示任务矩阵、字符/token 软预算与最近服务端实测、工具审批与安全边界、项目指令元数据、检查点数量和 Git 信号。
 - 运行时字符串使用 Rich `Text` 按纯文本渲染并限制长度；项目指令正文、prompt、thinking、工具参数/结果正文和凭据不进入快照。
-- 当前实现仍是请求时生成的 Rich 基础视图，尚未订阅已完成的进程内事件总线，也不包含执行 DAG。事件存储、确定性投影、Textual、Time Machine 和 Neural Map 按 [`visualization-development.md`](visualization-development.md) 独立演进。
+- `/cockpit` 继续是请求时生成的 Rich 基础视图，不订阅事件总线；它也是实时模式不适用或启动失败时的稳定降级入口。
+
+### 实时执行树
+
+- `/cockpit --live` 只在交互终端显式启动 Textual 8 全屏界面。进入时为当前 Agent 临时挂载独立 `EventBus`，退出后立即解除并关闭；普通交互请求、`text`、`json` 和 `stream-json` 协议不创建该总线。
+- Agent 请求在 Textual thread worker 中运行；事件总线观察者只把事件放入容量 1024 的合并桥，再使用线程安全的 Textual message 更新主线程。界面事件窗口最多保留 10000 条；总线或视图丢弃会进入可见计数，不阻塞 Agent。
+- 每批事件都重新经过确定性 `ExecutionGraphProjector` 与 `MetricsProjector`，Textual 不维护第二套节点状态。树按 Agent 回合 → 模型请求 → 工具/审批/检查展开，并提供全部、进行中、失败和工具四种筛选；筛选结果自动保留祖先上下文。
+- 详情抽屉只显示事件已有的状态、稳定 ID、时间、异常和白名单元数据，不显示 prompt、thinking、工具参数或结果正文。界面底部的 Agent 文本流属于当前交互输出，不会被复制到 RuntimeEvent 或图投影。
+- 高风险工具仍展示完整预览并要求 `Y` 明确批准；取消或界面关闭会拒绝待处理审批。全屏期间经典 Rich 活动、重试和计划回调临时静默，避免跨线程写坏终端，退出后恢复原处理器。
+- 宽终端并列显示树和详情；宽度小于 88 列时隐藏详情并优先保留树、精简指标和输入区。resize 会即时切换布局。非交互终端、导入失败或 Textual 启动异常自动回退 `/cockpit` 快照。
 
 ## 上下文预算
 
