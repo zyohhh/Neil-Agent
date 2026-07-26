@@ -757,18 +757,108 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 因目标平台能力门禁未通过，真实网络隔离、子进程树终止和内核级逃逸测试
   没有伪装成已执行；按照预定条件继续维持固定命令白名单。
 
+## 2026-07-26：Windows Sandbox 候选执行链与强制安全任务
+
+### 过滤快照与确定性 manifest
+
+- 新增 `sandbox_snapshot.py`，把真实仓库复制到独占临时目录；敏感目录、
+  凭据文件、`.env`、私钥、缓存和虚拟环境不进入快照，`.env.example`
+  保留。遍历顺序、manifest JSON 与 SHA-256 digest 都是确定性的。
+- 文件数、单文件和累计字节在复制前及流式复制过程中受限；每个文件记录
+  相对路径、类型、字节数和内容 SHA-256。源文件 identity、size、mtime，
+  以及目录 identity 和前后条目集合都必须稳定。
+- POSIX 使用 `O_NOFOLLOW`；Windows 对每层目录和文件使用
+  `OPEN_REPARSE_POINT`，目录额外使用 `BACKUP_SEMANTICS`，且整个遍历窗口
+  不共享 delete，从内核层阻止 junction/rename 替换。符号链接、reparse
+  point、硬链接、非普通文件及任何 Win32 句柄 open/query/close 异常都
+  fail-closed。
+- `PreparedSnapshot` 只清理创建时绑定 identity 的目录；清理逐项复核类型、
+  identity 和 reparse 状态，发现并发替换就保守留下临时目录，不递归进入
+  未知目标。命令对 guest 快照的修改不会回写真实仓库。
+
+### 固定 guest runner 与 canonical 结果
+
+- 新增 `sandbox_guest.py` 和固定 C# runner 源码。请求只接受 snapshot 内
+  相对 `.exe`、分离 argv、相对 cwd、`NEIL_` 前缀环境和有界超时、输出、
+  内存、进程数；canonical JSON 同时绑定 run ID、request hash 和 instance
+  ID，拒绝未知字段、重复 key、非 canonical 编码和路径逃逸。
+- runner 用 `CREATE_SUSPENDED` 创建子进程，STARTUPINFOEX handle list 只
+  继承 NUL/stdout/stderr；先配置 `KILL_ON_JOB_CLOSE`、active process、
+  process memory 和 job memory，再把进程分配到匿名 Job 并恢复。
+- stdout/stderr 由并行 reader 共享同一字节预算，不能先无界捕获再截断。
+  timeout、取消、输出洪泛和 runner 异常都会终止完整 Job；退出前通过
+  `QueryInformationJobObject` 确认 `ActiveProcesses == 0`。只有带
+  `job_terminated=true`、结果 hash 和三重身份绑定的 canonical 结果可导出。
+- reader 收口后再次检查共享预算，堵住子进程写超限后立即以 0 退出、主循环
+  先观察到退出而把截断输出误报成功的竞态；真实编译 runner 与 1025 字节
+  快速洪泛子程序验证 1024 字节预算仍稳定返回 `output_limit`。
+- runner 构建只查找两个固定 .NET Framework `csc.exe` 位置，使用固定源码、
+  参数、reference、最小环境和一次性目录；记录源码/二进制 SHA-256。已在
+  本机用真实 Framework 编译器完成 compile smoke，并验证未知 mode 返回 64。
+
+### `wsb.exe` 两阶段主机编排
+
+- 新增未注册的 `WsbHostExecutor` 候选层，只接受真实 `wsb.exe`、显式 UUID、
+  固定 `execute` / `export` 命令、`shell=False`、最小环境和有界 CLI
+  stdout/stderr/JSON；GUI `WindowsSandbox.exe` 和用户拼接命令均被拒绝。
+- start 配置显式关闭 network、vGPU、clipboard、printer、audio/video，
+  启用 Protected Client，只读映射 snapshot 和 control，不含 LogonCommand
+  或可写目录。
+- 官方 `wsb exec` 不提供进程 I/O，因此执行阶段只让 runner 在 guest 内部
+  落盘。runner 以 0 退出并确认 Job 为空后，host 才把一次性空 export
+  目录动态映射为可写，再运行固定 exporter；解析完成后无条件 stop 显式
+  实例。start/execute/share/export/parse/stop 任一失败、超时、取消或绑定
+  变化都会拒绝结果，绝不退化为宿主进程。
+- `--raw` 响应除严格限制字段、实例 ID 和 exit code 外，还按阶段验证状态；
+  例如 `stop + Running`、`start + Stopped` 等显式矛盾状态一律 fail-closed。
+  未返回状态字段的真实 schema 兼容性仍留给目标平台校准，不能据此标记 ready。
+
+### 强制平台门禁与当前结论
+
+- 新增攻击型 C# probe 和真实平台测试，覆盖宿主 sentinel/凭据与敏感环境
+  不可见、snapshot 不可写、带宿主正向连通对照的外部 IPv4/IPv6/DNS
+  阻断、已输出 child/grandchild 就绪证据的超时进程树清理、host cancel 后
+  执行按阶段校验的 stop、stdout/stderr 洪泛、单进程内存和进程数上限；
+  真实 Windows junction 替换锁另有专门测试。guest loopback 不是宿主地址，
+  聚合 Job 内存与 cancel 前 guest tree 就绪仍保留为目标平台审查项，不
+  伪装成已覆盖。
+- 新增 `.github/workflows/windows-sandbox-security.yml`，仅在受保护、专用
+  `windows-sandbox-security` 自托管 Windows runner 上串行执行，并固定
+  `SANDBOX_REQUIRED=1`。该模式下缺组件、不能创建 junction 或测试 skip
+  都是失败，不能作为 ready 证据。
+- workflow 只允许受保护的 `main` ref，触发范围覆盖锁文件、全部源码和测试；
+  选定安全用例写入独立 JUnit 报告，pytest 成功后仍会拒绝任何 skip，避免
+  自托管 runner 缺能力时假绿。
+- 当前机器是 Windows Home，且没有 `wsb.exe`，所以真实 WSB 攻击用例只在
+  普通模式按设计 skip；强制 workflow 尚未产生目标平台证据。固定 runner
+  与不可信进程仍共享 guest 身份，也尚无目标平台独立安全审查记录，因此
+  安全保证明确保持 `candidate-job-only-not-certified`。
+- `WindowsSandboxBackend.run()`、工具注册表和审批面均未接入候选执行器，
+  `/doctor` 不会报告 ready；`run_command` 没有新增，现有固定命令白名单
+  保持不变。这是硬门槛的预期结果，不以单元测试代替真实隔离认证。
+
+### 验证说明
+
+- Ruff lint 与全仓库格式检查通过；mypy 对 33 个源文件检查通过。
+- pytest 最终结果为 390 项通过、15 项平台条件跳过；其中新增沙箱定向结果
+  为 105 项通过、9 项跳过。真实 C# runner 编译测试已执行，WSB 用例因当前
+  平台缺组件跳过。
+- 5 个内置离线评测场景全部通过；本阶段没有再次调用真实 DeepSeek API。
+
 ## 下一阶段计划
 
-1. 实现可信的 Windows Sandbox 无头执行与结果通道：固定 guest runner、
-   有界 stdout/stderr、实例身份、超时/取消和完整进程树终止；任何初始化或
-   清理步骤失败都保持 fail-closed。
-2. 实现从真实仓库生成过滤只读快照和确定性 manifest 的构建器；复制前后
-   复核 reparse point、硬链接、敏感目录、文件身份和容量，不把命令修改
-   直接回写宿主。
-3. 在启用 Windows Sandbox 的专用安全环境加入强制集成任务，实际验证宿主
-   sentinel/凭据不可读、IPv4/IPv6/DNS/localhost 断网、孙进程清理、输出
-   洪泛、内存/进程上限和 junction 并发逃逸；安全任务不允许 skip。
-4. 只有后端实现、真实平台回归和独立安全审查全部通过后，才增加仅接受
-   executable + argv 的最小 `run_command`，并复用交互逐次审批和非交互
-   v2 request/approve；首版丢弃命令产生的全部修改。任一门禁未通过时继续
-   保持固定命令白名单。
+1. 配置一次性、无敏感凭据的 Windows 11 Pro/Enterprise 24H2+ 专用 runner，
+   实际执行强制安全 workflow，保存 OS/WSB 版本、runner 源码/二进制 hash
+   和全部攻击用例证据；校准真实 `--raw` schema，并修复所有隔离或资源语义
+   差异，直到同一构建重复通过。
+2. 完成独立安全审查，重点验证同 guest 身份下的 runner/结果防篡改、Job
+   breakaway 与资源限制、late writable share、stop 确认和 snapshot TOCTOU；
+   审查问题修复并重新跑完整强制门禁后，才把候选接入
+   `WindowsSandboxBackend.run()` 并允许 `/doctor` 报告 ready。
+3. 扩展现有审批记录，把 executable、argv、逻辑 cwd、snapshot manifest
+   digest、runner/source/binary hash、后端/协议版本、网络策略、资源上限和
+   修改丢弃策略全部绑定进预览；任一字段或文件变化都使旧审批失效，并补齐
+   交互审批与非交互 v2 request/approve 的重放和竞态测试。
+4. 只有前述真实平台证据与审查均通过后，注册最小 `run_command`；它只接受
+   executable + argv，v1 始终不可见，首版丢弃 guest 的全部修改。若任一
+   门禁未通过，继续保持固定命令白名单，不开放 shell 字符串或结果回写。

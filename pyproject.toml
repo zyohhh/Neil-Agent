@@ -36,3 +36,8 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.21",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "windows_sandbox_security: attack-oriented tests that require a real Windows Sandbox installation",
+]

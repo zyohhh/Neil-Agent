@@ -74,7 +74,11 @@ uv run neil-agent -p "更新版本号" --protocol-version 2 --permission-mode ap
 `windows-sandbox` 只读探测 Windows Sandbox 平台能力。该设置不会开放通用
 命令，后端不可用或能力不完整时会 fail-closed，现有质量检查与 Git 命令仍
 保持固定白名单。`/doctor` 不启动沙箱或修改系统，只显示结构化能力状态。
-完整策略和平台门禁见 [`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)。
+仓库已包含过滤只读快照、固定 guest runner 和 `wsb.exe` 两阶段结果导出的
+候选实现，但它尚未接入 Agent 工具，也不代表后端已经通过真实平台认证。
+专用 Windows 安全任务使用 `SANDBOX_REQUIRED=1`，缺少组件或任何隔离用例
+未通过都会失败；普通开发机可以跳过真实平台用例。完整策略、候选边界和
+开放门禁见 [`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)。
 
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 

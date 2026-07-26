@@ -31,8 +31,9 @@ Neil Agent 仍不开放任意 shell。现有 `shell=False`、固定参数、最�
 - **环境变量**：从空环境构造，只暴露固定名称；临时 HOME、USERPROFILE、
   TEMP/TMP 指向该次运行的 scratch。API Key、令牌、代理变量、SSH/云凭据、
   `VIRTUAL_ENV` 和宿主用户目录不继承。
-- **网络**：默认且当前唯一允许的策略是 `deny`；IPv4、IPv6 和 localhost
-  都属于目标平台验收范围。
+- **网络**：默认且当前唯一允许的策略是 `deny`；外部 IPv4/IPv6/DNS 及
+  经对照校准、guest 可达的宿主/LAN endpoint 都属于目标平台验收范围。
+  guest 自己的 loopback 不是宿主可达性的证据。
 - **进程树**：后端必须控制完整子进程树；超时、取消、输出超限、资源超限
   和初始化失败都终止整个树，不能只杀直接子进程。
 - **资源**：固定墙钟超时、内存、进程数和输出上限；stdout/stderr 必须在
@@ -71,6 +72,14 @@ Protected Client，并只映射过滤快照为只读目录。Microsoft 文档指
 默认启用，且可写 mapped folder 会把沙箱修改保留到宿主，因此不能依赖
 默认配置，也不能直接映射真实仓库。
 
+[Windows Sandbox CLI](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-cli)
+从 Windows 11 24H2 起提供 `start`、`exec`、`share` 和 `stop`。其中
+`exec` 不提供进程 I/O，因此候选实现不能直接捕获其 stdout/stderr，也不能
+在不可信命令运行时提前映射可写宿主目录。当前设计先只读映射 snapshot 与
+control，固定 runner 在 guest 内部收集有界结果并确认 Job 为空；runner
+退出后才把一次性空 export 目录映射为可写，再由固定 exporter 导出结果，
+最后无条件停止显式 UUID 实例。
+
 该组件不是所有 Windows 主机的默认能力。后端必须先只读解析可执行文件与
 版本，并在专用 Windows 安全 CI 中完成实际逃逸测试；找不到
 `WindowsSandbox.exe`/`wsb.exe`、版本能力不足或无法可靠停止实例时保持
@@ -89,17 +98,36 @@ Object 或 restricted token 单独只能管理生命周期/资源，不能提供
 会话目录，也会留下持久 ACL 与 TOCTOU 清理风险。只有“临时过滤快照 +
 运行后扫描 diff + 第二次独立审批导入”才适合作为未来的可写工作流。
 
-### 当前 Windows 实现边界
+### 当前 Windows 候选实现边界
 
-仓库中的 Windows 适配层负责：
+仓库现在包含四层彼此约束的候选构件：
 
-1. 只读探测宿主平台和 Windows Sandbox CLI/可选组件。
-2. 校验平台无关策略，并生成固定的高隔离 `.wsb` 配置。
-3. 在任何能力缺失时通过统一沙箱异常拒绝，且没有普通进程 fallback。
-4. 向 `/doctor` 提供结构化状态，不显示环境变量值、命令内容或敏感路径。
+1. `sandbox.py` 保留平台无关契约、只读探测和 fail-closed 公共边界；
+   `WindowsSandboxBackend.run()` 仍拒绝执行。
+2. `sandbox_snapshot.py` 从真实仓库复制过滤后的独立只读快照，生成 canonical
+   manifest 与 SHA-256；Windows 遍历期间用不共享 delete 的目录/文件句柄
+   阻止 junction、reparse point、硬链接和并发替换。
+3. `sandbox_guest.py` 与固定 C# runner 定义 canonical 请求/结果协议，绑定
+   run/request/instance 身份；子进程以 suspended 状态创建，STARTUPINFOEX
+   仅继承三个标准流句柄，分配带进程数、进程/Job 内存和
+   `KILL_ON_JOB_CLOSE` 的 Job 后才恢复。stdout/stderr 在读取时共享有界预算；
+   超时、取消和洪泛终止完整 Job，并查询 `ActiveProcesses == 0` 后才写入
+   `job_terminated=true`。
+4. `windows_sandbox.py` 只接受真实 `wsb.exe`、显式 UUID、固定 guest 命令和
+   有界 `--raw` JSON；按 start → execute → late share → export → stop 顺序
+   执行。任一阶段、结果绑定或 stop 确认失败都会拒绝结果，没有宿主
+   subprocess fallback。
 
-目标机器没有可用 Windows Sandbox 组件时，平台集成验收会明确跳过，同时
-诊断报告 `unavailable`。这种跳过不能用于把后端标成 `ready`。
+这些构件的安全保证字符串仍是
+`candidate-job-only-not-certified`。固定 runner 与不可信子进程目前处于同一
+guest 身份，真实 `wsb.exe --raw` schema、同身份篡改抵抗、网络隔离和资源
+终止语义尚未在目标平台执行；也没有目标平台独立安全审查记录。因此候选
+执行器没有接入 `WindowsSandboxBackend.run()`、工具注册表或审批面，
+`/doctor` 仍不会报告 ready。
+
+目标机器没有可用 Windows Sandbox 组件时，普通平台验收会明确跳过，同时
+诊断报告 `unavailable`。这种跳过不能用于把后端标成 `ready`；设置
+`SANDBOX_REQUIRED=1` 后，同一缺失必须转为失败。
 
 ## Linux 后端评估
 
@@ -128,13 +156,25 @@ PID 和 network namespace 构造最小文件系统，并组合 seccomp。它是�
 专用 Windows 安全 CI 还必须实际验证：
 
 - 沙箱内无法读取宿主 sentinel、`.env`、HOME、SSH 和云凭据。
-- IPv4、IPv6、DNS 与 localhost 网络连接均失败。
-- 子进程和孙进程在超时/取消后全部消失。
-- 输出洪泛、内存和进程数量被限制，宿主工作区不发生修改。
+- 先证明安全 runner 自身可访问外部 IPv4、IPv6 和 DNS，再证明 guest 中
+  同一连接全部失败；宿主可达性还需使用 networking-enabled 对照校准的
+  host/LAN endpoint，不能把 guest loopback 当作宿主地址。
+- 子进程和孙进程在超时后有明确就绪证据且全部消失；取消测试还需先证明
+  guest tree 已启动，再确认显式实例和完整进程树都已停止。
+- 输出洪泛、单进程/聚合 Job 内存和进程数量分别被限制，宿主工作区不发生
+  修改，不能用先触发的单进程上限代替聚合 Job 内存证据。
 - junction/reparse point 与并发替换不能逃出快照。
 
 平台组件不可用时，普通 CI 可以 skip 这些真实隔离测试；安全发布任务必须
 提供 `SANDBOX_REQUIRED=1` 一类的强制模式，使 skip 变为失败。
+
+仓库的 `.github/workflows/windows-sandbox-security.yml` 是这一强制任务：
+它只接受受保护的 `main` ref，面向带 `windows-sandbox-security` 标签、
+受 environment 保护的专用 Windows x64 自托管 runner，禁止并行 WSB 实例，
+并运行攻击型 guest probe、快速输出竞态和真实 junction 替换测试。选定
+用例写入独立 JUnit 报告，任何 skip 都会使任务失败。该 runner 应当是
+一次性、无仓库外凭据的 Windows 11 Pro/Enterprise 24H2 或更高版本机器；
+不能把普通开发机上的 skip 结果当作发布证据。
 
 ## 开放通用命令前的硬门槛
 

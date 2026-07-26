@@ -1,0 +1,74 @@
+name: Windows Sandbox security gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-sandbox-security.yml"
+      - ".python-version"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "src/neil_agent/**"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-sandbox-security
+  cancel-in-progress: false
+
+jobs:
+  sandbox-security:
+    name: Mandatory real-platform isolation tests
+    if: github.ref == 'refs/heads/main' && github.ref_protected
+    environment: windows-sandbox-security
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - windows-sandbox-security
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"
+      SANDBOX_REQUIRED: "1"
+    steps:
+      - name: Check out the reviewed revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install the locked Python toolchain
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          version: "0.11.16"
+          enable-cache: false
+
+      - name: Synchronize locked dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run the mandatory Windows Sandbox security suite
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "windows-sandbox-security.junit.xml"
+          uv run --frozen pytest -q --junitxml="$report" `
+            tests/test_windows_sandbox_security.py `
+            tests/test_sandbox_guest.py::test_real_runner_reclassifies_fast_flood_after_child_exit `
+            tests/test_sandbox_snapshot.py::test_windows_directory_guard_blocks_real_junction_replacement
+          $pytestExitCode = $LASTEXITCODE
+          if ($pytestExitCode -ne 0) {
+            exit $pytestExitCode
+          }
+
+          [xml]$junit = Get-Content -LiteralPath $report -Raw
+          $skipped = @($junit.SelectNodes("//testcase/skipped"))
+          if ($skipped.Count -ne 0) {
+            Write-Error (
+              "Mandatory Windows Sandbox security suite skipped " +
+              "$($skipped.Count) selected test(s)."
+            )
+            exit 1
+          }
