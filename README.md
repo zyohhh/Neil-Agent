@@ -31,7 +31,7 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/context`：区分下一次请求的本地软预算估算与最近一次服务端实测 `usage`。
 - `/cockpit`：显示任务、上下文、安全边界和工作区信号的只读基础快照，不调用模型。
 - `/cockpit --live`：进入全屏实时执行树；在界面底部提交任务，使用 `1`–`4` 筛选节点、`Ctrl+X` 取消请求、`Ctrl+Q` 退出。非交互终端或 Textual 启动失败时自动降级为基础快照。
-- `/rewind-file`：预览并恢复本进程最近一次 Agent 文件工具编辑；外部变化会拒绝恢复。
+- `/rewind-task`：预览并恢复本进程最近一次 Agent 回合的全部有效文件编辑；`/rewind-file` 保留为兼容别名。
 - `/permissions`：显示真正由代码执行的工具审批和工作区边界。
 
 Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。

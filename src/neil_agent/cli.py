@@ -72,7 +72,12 @@ EXPORT_SESSION_COMMANDS = {"export", "/export"}
 IMPORT_SESSION_COMMANDS = {"import", "/import"}
 BRANCH_SESSION_COMMANDS = {"branch", "/branch"}
 PERMISSIONS_COMMANDS = {"permissions", "/permissions"}
-REWIND_FILE_COMMANDS = {"rewind-file", "/rewind-file"}
+REWIND_FILE_COMMANDS = {
+    "rewind-file",
+    "/rewind-file",
+    "rewind-task",
+    "/rewind-task",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +345,7 @@ def run(console: Console) -> None:
         activity_handler=renderer.show_activity,
         instruction_scope_handler=instruction_manager.resolve_tool_call,
         hooks=lifecycle_hooks,
+        file_checkpoints=filesystem_tools.checkpoints,
     )
     _show_welcome(
         console,
@@ -499,9 +505,9 @@ def run(console: Console) -> None:
             continue
         if command in REWIND_FILE_COMMANDS:
             if command_argument:
-                console.print("[yellow]用法：/rewind-file[/yellow]")
+                console.print("[yellow]用法：/rewind-task[/yellow]")
             else:
-                _rewind_latest_file(console, filesystem_tools)
+                _rewind_latest_task(console, filesystem_tools)
             continue
         if command in SESSIONS_COMMANDS:
             _show_sessions(
@@ -683,7 +689,8 @@ def _show_help(console: Console) -> None:
     console.print("  /reload-instructions 重新加载项目指令")
     console.print("  /init   预览并创建根 AGENTS.md（仅限不存在时）")
     console.print("  /compact [关注点] 压缩较早轮次并保留压缩前备份")
-    console.print("  /rewind-file 预览并恢复本进程最近一次 Agent 文件编辑")
+    console.print("  /rewind-task 预览并恢复最近一次 Agent 任务的全部文件编辑")
+    console.print("  /rewind-file /rewind-task 的兼容别名")
     console.print("  /sessions [选项] [关键词] 分页、排序或筛选本地会话")
     console.print("  /resume <id> 恢复指定会话")
     console.print("  /export [id] 预览并导出会话（默认当前会话）")
@@ -866,7 +873,7 @@ def _show_permissions(
         f"  直接执行：{', '.join(direct) or '无'}\n"
         f"  每次需要批准：{', '.join(approval) or '无'}\n"
         "  文件：拒绝工作区外路径、.env、私钥和受保护目录\n"
-        "  文件恢复：/rewind-file 仅恢复本进程内最近一次 Agent 工具编辑\n"
+        "  文件恢复：/rewind-task 恢复本进程内最近一次 Agent 任务的文件编辑\n"
         "  命令：仅固定质量检查和受限 Git 操作，不提供任意 shell\n"
         "  网络：只有模型 API 客户端可用；本地工具不提供网络访问\n"
         f"  生命周期审计：{'已启用元数据 JSONL' if audit_log_enabled else '未启用'}\n"
@@ -877,35 +884,39 @@ def _show_permissions(
     )
 
 
-def _rewind_latest_file(
+def _rewind_latest_task(
     console: Console,
     filesystem_tools: FileSystemTools,
 ) -> None:
-    """Preview and restore one latest in-memory Agent file checkpoint."""
+    """Preview and restore the latest in-memory Agent task checkpoint."""
 
     try:
         prepared = filesystem_tools.prepare_latest_restore()
     except ToolError as error:
-        console.print(f"[yellow]无法准备文件恢复：[/yellow]{error}")
+        console.print(f"[yellow]无法准备任务文件恢复：[/yellow]{error}")
         return
-    action = "删除 Agent 新建文件" if prepared.deletes_created_file else "恢复原内容"
-    console.print("\n[bold yellow]恢复最近文件编辑[/bold yellow]")
+    file_lines = "\n".join(
+        f"  - {entry.path}："
+        f"{'删除 Agent 新建文件' if entry.deletes_created_file else '恢复原内容'}"
+        for entry in prepared.files
+    )
+    console.print("\n[bold yellow]恢复最近任务的文件编辑[/bold yellow]")
     console.print(
-        f"  文件：{prepared.path}\n"
         f"  检查点：{prepared.checkpoint_id}\n"
-        f"  操作：{action}\n\n"
+        f"  文件数：{prepared.file_count}\n"
+        f"{file_lines}\n\n"
         f"{prepared.preview}",
         markup=False,
         highlight=False,
         soft_wrap=True,
     )
-    if not _confirm_local_action(console, "执行该文件恢复？[y/N] "):
-        console.print("[yellow]已取消文件恢复。[/yellow]")
+    if not _confirm_local_action(console, "执行该任务文件恢复？[y/N] "):
+        console.print("[yellow]已取消任务文件恢复。[/yellow]")
         return
     try:
         result = filesystem_tools.apply_latest_restore(prepared)
     except ToolError as error:
-        console.print(f"[bold red]文件恢复失败：[/bold red]{error}")
+        console.print(f"[bold red]任务文件恢复失败：[/bold red]{error}")
         return
     console.print(f"[green]{result}[/green]")
 

@@ -353,6 +353,7 @@ def run_noninteractive(
             instruction_scope_handler=instruction_manager.resolve_tool_call,
             hooks=active_hooks,
             approval_handler=approval_broker,
+            file_checkpoints=filesystem.checkpoints,
         )
         writer.start(
             session_id=session.session_id,

@@ -398,14 +398,14 @@ def test_rewind_file_requires_confirmation_and_restores_latest_edit(
     console = MagicMock(spec=Console)
     console.input.return_value = "yes"
 
-    cli._rewind_latest_file(cast(Console, console), tools)
+    cli._rewind_latest_task(cast(Console, console), tools)
 
     assert target.read_text(encoding="utf-8") == "before"
     printed = "\n".join(
         str(call.args[0]) for call in console.print.call_args_list if call.args
     )
-    assert "恢复最近文件编辑" in printed
-    assert "已恢复文件原内容" in printed
+    assert "恢复最近任务的文件编辑" in printed
+    assert "已恢复最近任务检查点" in printed
 
 
 def test_run_lists_and_restores_an_explicit_local_session(

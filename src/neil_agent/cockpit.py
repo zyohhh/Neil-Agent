@@ -225,7 +225,7 @@ def _workspace_view(snapshot: CockpitSnapshot) -> RenderableType:
         ),
     )
     table.add_row(
-        "文件检查点",
+        "任务检查点",
         Text(f"{snapshot.checkpoint_count} IN-MEMORY", style="cyan"),
     )
     if snapshot.git_available:

@@ -20,6 +20,7 @@ from neil_agent.schemas import (
     TokenUsage,
 )
 from neil_agent.task import TaskTracker
+from neil_agent.tools.filesystem import FileSystemTools
 from neil_agent.tools.registry import ToolRegistry
 
 
@@ -795,6 +796,92 @@ def test_agent_returns_denied_write_to_model_without_execution() -> None:
     )
     assert "TOP-SECRET-CONTENT" not in activity_text
     assert "内容规模：1 行，18 字符" in activity_text
+
+
+def test_agent_turn_finalizes_one_checkpoint_for_multiple_file_tools(
+    tmp_path: Path,
+) -> None:
+    filesystem = FileSystemTools(tmp_path)
+    registry = ToolRegistry()
+    filesystem.register(registry)
+    calls = (
+        ToolCall(
+            id="write-one",
+            name="write_file",
+            arguments={"path": "one.txt", "content": "one"},
+        ),
+        ToolCall(
+            id="write-two",
+            name="write_file",
+            arguments={"path": "two.txt", "content": "two"},
+        ),
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=calls)],
+        ["done", ModelResponse(content="done")],
+    ]
+    agent = Agent(
+        model,
+        registry=registry,
+        approval_handler=lambda _call, _preview: True,
+        file_checkpoints=filesystem.checkpoints,
+    )
+
+    assert "".join(agent.stream_chat("write both files")) == "done"
+
+    checkpoint = filesystem.checkpoints.latest
+    assert checkpoint is not None
+    assert checkpoint.file_count == 2
+    assert [edit.path for edit in checkpoint.edits] == ["one.txt", "two.txt"]
+
+
+def test_failed_agent_turn_still_finalizes_its_file_checkpoint(
+    tmp_path: Path,
+) -> None:
+    filesystem = FileSystemTools(tmp_path)
+    registry = ToolRegistry()
+    filesystem.register(registry)
+    call = ToolCall(
+        id="write-before-failure",
+        name="write_file",
+        arguments={"path": "changed.txt", "content": "changed"},
+    )
+
+    class FailAfterWriteModel(FakeChatModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.request_count = 0
+
+        def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            system_prompt: str,
+            tools: Sequence[ToolDefinition] = (),
+        ) -> Iterator[str | ModelResponse]:
+            del messages, system_prompt, tools
+            self.request_count += 1
+            if self.request_count == 1:
+                yield ModelResponse(tool_calls=(call,))
+                return
+            raise LLMError("failed after write")
+
+    agent = Agent(
+        FailAfterWriteModel(),
+        registry=registry,
+        approval_handler=lambda _call, _preview: True,
+        file_checkpoints=filesystem.checkpoints,
+    )
+
+    with pytest.raises(LLMError, match="failed after write"):
+        list(agent.stream_chat("write and continue"))
+
+    checkpoint = filesystem.checkpoints.latest
+    assert checkpoint is not None
+    assert checkpoint.file_count == 1
+    assert checkpoint.edits[0].path == "changed.txt"
+    assert filesystem.checkpoints.active is False
 
 
 def test_agent_emits_correlated_metadata_only_runtime_events() -> None:

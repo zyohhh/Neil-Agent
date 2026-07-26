@@ -1,4 +1,4 @@
-# Claude Code 官方文档对照审核（更新于 2026-07-23）
+# Claude Code 官方文档对照审核（更新于 2026-07-26）
 
 本审核把 Claude Code 当作成熟产品参考，不把 Neil Agent 改造成 Claude Code 的复制品。结论基于 Anthropic 官方的[项目指令](https://code.claude.com/docs/en/memory)、[权限](https://code.claude.com/docs/en/permissions)、[沙箱](https://code.claude.com/docs/en/sandboxing)、[会话](https://code.claude.com/docs/en/sessions)、[检查点](https://code.claude.com/docs/en/checkpointing)、[非交互模式](https://code.claude.com/docs/en/headless)和 [hooks](https://code.claude.com/docs/en/hooks) 文档。
 
@@ -37,6 +37,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 12. 增加可选的元数据 JSONL 审计 sink；它预检真实路径、限制单条与总大小并做单备份轮转，不记录正文或凭据。
 13. 增加 `/rewind-file` 最小文件检查点，只恢复本进程最新一次 Agent 工具编辑，预览并批准后仍重新检查路径与内容。
 14. 审计的大小检查、单备份轮转和追加现在由跨进程内核文件锁串行化；`/doctor` 可只读检查锁、大小、记录数与格式，不返回日志正文。
+15. 文件检查点升级为一次 Agent 回合一个任务单元；`/rewind-task` 全量预检并恢复多个路径，容量不足在写入前拒绝，进程内中途失败会回滚已应用路径。
 
 本轮实现后的自动化结果见开发记录；离线检查不调用真实 DeepSeek API。
 
@@ -44,11 +45,10 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 
 - Claude Code 把项目 `CLAUDE.md` 作为上下文而非安全配置。Neil Agent 仍把包裹后的项目段拼入系统字符串，这是当前 DeepSeek/LLM 接口的简化；新增的低信任声明和代码权限边界降低了优先级混淆风险，但后续仍可把项目上下文改为独立消息块。
 - Claude Code 的 `/export` 面向人类可读文本。Neil Agent 的 `/export` 仍是为安全导入设计的严格 JSON 信封；新增的 `-p --output-format json|stream-json` 才是脚本协议，两者语义必须持续区分。
-- Claude Code 的检查点可以按对话恢复多文件状态。Neil Agent 只有本进程、单步后进先出的文件内容恢复，不持久化权限/目录元数据，也不覆盖外部程序修改；Git 仍是跨进程和多文件回退的可靠机制。
+- Claude Code 的检查点可以按对话持续恢复多文件状态。Neil Agent 现在按单次 Agent 回合恢复多文件正文，但仍只存在于本进程，不持久化权限/目录元数据，也不承诺进程崩溃时的多文件原子性；Git 仍是跨进程和持久化回退的可靠机制。
 - Claude Code 同时使用权限规则和 OS 级沙箱。Neil Agent 在原生 Windows 上只有工具白名单、路径验证、安全环境和逐次审批，不能声称等价于 OS 沙箱。
 
 ## 后续优先级
 
 1. 使用真实 DeepSeek API 手工核对 `usage`、默认只读 v1、显式审批 v2 和会话保存；自动化继续不消耗额度。
-2. 若扩展文件检查点，优先定义多文件任务边界、容量失败行为和持久化威胁模型；在此之前维持单步内存恢复并以 Git 作为可靠回退。
-3. 若继续推进通用命令，按 [`sandbox-assessment.md`](sandbox-assessment.md) 实现至少一个 fail-closed 平台后端并完成逃逸测试；在此之前保持固定 allowlist。
+2. 若继续推进通用命令，按 [`sandbox-assessment.md`](sandbox-assessment.md) 实现至少一个 fail-closed 平台后端并完成逃逸测试；在此之前保持固定 allowlist。

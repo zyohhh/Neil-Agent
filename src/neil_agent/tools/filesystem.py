@@ -10,8 +10,10 @@ from hashlib import sha256
 from pathlib import Path
 
 from ..checkpoint import (
+    FileEditCheckpoint,
     FileCheckpointHistory,
     PreparedFileRestore,
+    PreparedFileRestoreEntry,
     content_hash,
 )
 from ..errors import ToolError
@@ -21,6 +23,7 @@ from .registry import ToolRegistry
 MAX_FILE_SIZE_BYTES = 1_000_000
 MAX_SEARCH_RESULTS = 100
 MAX_DIFF_PREVIEW_CHARS = 20_000
+MAX_TASK_RESTORE_PREVIEW_CHARS = 100_000
 BLOCKED_DIRECTORIES = frozenset(
     {
         ".git",
@@ -164,16 +167,15 @@ class FileSystemTools:
             return f"文件内容没有变化：{self._relative_display(file_path)}"
 
         action = "更新" if current_content is not None else "创建"
+        relative = self._relative_display(file_path)
+        self.checkpoints.ensure_capacity(relative, current_content, content)
         self._atomic_write(file_path, content)
         checkpoint = self.checkpoints.record(
-            self._relative_display(file_path),
+            relative,
             current_content,
             content,
         )
-        return (
-            f"已{action}文件：{self._relative_display(file_path)}；"
-            f"恢复检查点：{checkpoint.checkpoint_id}"
-        )
+        return f"已{action}文件：{relative}；任务恢复检查点：{checkpoint.checkpoint_id}"
 
     def preview_replace_text(
         self,
@@ -215,73 +217,152 @@ class FileSystemTools:
         self._validate_new_content(updated_content)
         if current_content == updated_content:
             return f"文件内容没有变化：{self._relative_display(file_path)}"
+        relative = self._relative_display(file_path)
+        self.checkpoints.ensure_capacity(relative, current_content, updated_content)
         self._atomic_write(file_path, updated_content)
         checkpoint = self.checkpoints.record(
-            self._relative_display(file_path),
+            relative,
             current_content,
             updated_content,
         )
         return (
-            f"已在 {self._relative_display(file_path)} 中替换 "
-            f"{expected_replacements} 处文本；恢复检查点："
+            f"已在 {relative} 中替换 "
+            f"{expected_replacements} 处文本；任务恢复检查点："
             f"{checkpoint.checkpoint_id}"
         )
 
     def prepare_latest_restore(self) -> PreparedFileRestore:
-        """Preview reversal of the latest Agent-owned edit."""
+        """Preview reversal of every effective edit in the latest Agent task."""
 
         checkpoint = self.checkpoints.latest
         if checkpoint is None:
-            raise ToolError("当前进程没有可恢复的文件编辑检查点。")
-        file_path = self._resolve_checkpoint_file(checkpoint.path)
-        current_content = self._read_required_text(file_path, checkpoint.path)
-        current_hash = content_hash(current_content)
-        if current_hash != checkpoint.resulting_hash:
-            raise ToolError("文件在 Agent 编辑后发生外部变化，拒绝恢复。")
-        if checkpoint.original_content is None:
-            preview = self._format_delete_diff(file_path, current_content)
-            deletes_created_file = True
-        else:
-            preview = self._format_diff(
-                file_path,
-                current_content,
-                checkpoint.original_content,
+            raise ToolError("当前进程没有可恢复的文件任务检查点。")
+        entries: list[PreparedFileRestoreEntry] = []
+        previews: list[tuple[str, str, str]] = []
+        for edit in checkpoint.edits:
+            file_path = self._resolve_checkpoint_file(edit.path)
+            current_content = self._read_required_text(file_path, edit.path)
+            current_hash = content_hash(current_content)
+            if current_hash != edit.resulting_hash:
+                raise ToolError(
+                    f"任务文件 {edit.path} 在 Agent 编辑后发生外部变化，拒绝恢复。"
+                )
+            if edit.original_content is None:
+                preview = self._format_delete_diff(file_path, current_content)
+                action = "删除 Agent 新建文件"
+                deletes_created_file = True
+            else:
+                preview = self._format_diff(
+                    file_path,
+                    current_content,
+                    edit.original_content,
+                )
+                action = "恢复原内容"
+                deletes_created_file = False
+            entries.append(
+                PreparedFileRestoreEntry(
+                    path=edit.path,
+                    current_hash=current_hash,
+                    current_content=current_content,
+                    deletes_created_file=deletes_created_file,
+                )
             )
-            deletes_created_file = False
+            previews.append((edit.path, action, preview))
         return PreparedFileRestore(
             checkpoint_id=checkpoint.checkpoint_id,
-            path=checkpoint.path,
-            current_hash=current_hash,
-            preview=preview,
-            deletes_created_file=deletes_created_file,
+            files=tuple(entries),
+            preview=self._format_task_restore_preview(previews),
         )
 
     def apply_latest_restore(self, prepared: PreparedFileRestore) -> str:
-        """Restore after rechecking both the latest checkpoint and file hash."""
+        """Restore one task after full preflight, with in-process failure rollback."""
 
         checkpoint = self.checkpoints.latest
         if (
             checkpoint is None
             or checkpoint.checkpoint_id != prepared.checkpoint_id
-            or checkpoint.path != prepared.path
+            or tuple(edit.path for edit in checkpoint.edits)
+            != tuple(entry.path for entry in prepared.files)
         ):
-            raise ToolError("文件检查点已变化，请重新预览。")
-        file_path = self._resolve_checkpoint_file(prepared.path)
-        current_content = self._read_required_text(file_path, prepared.path)
-        current_hash = content_hash(current_content)
-        if current_hash != prepared.current_hash:
-            raise ToolError("批准后文件内容发生变化，拒绝恢复。")
-        if checkpoint.original_content is None:
+            raise ToolError("文件任务检查点已变化，请重新预览。")
+
+        prepared_by_path = {entry.path: entry for entry in prepared.files}
+        current_hashes: dict[str, str] = {}
+        for edit in checkpoint.edits:
+            entry = prepared_by_path[edit.path]
+            if content_hash(entry.current_content) != entry.current_hash:
+                raise ToolError("文件恢复预览无效，请重新预览。")
+            file_path = self._resolve_checkpoint_file(edit.path)
+            current_content = self._read_required_text(file_path, edit.path)
+            current_hash = content_hash(current_content)
+            if (
+                current_hash != entry.current_hash
+                or current_hash != edit.resulting_hash
+            ):
+                raise ToolError(f"批准后任务文件 {edit.path} 发生变化，拒绝恢复。")
+            current_hashes[edit.path] = current_hash
+
+        applied: list[tuple[FileEditCheckpoint, PreparedFileRestoreEntry]] = []
+        try:
+            for edit in checkpoint.edits:
+                entry = prepared_by_path[edit.path]
+                file_path = self._resolve_checkpoint_file(edit.path)
+                current_content = self._read_required_text(file_path, edit.path)
+                if content_hash(current_content) != entry.current_hash:
+                    raise ToolError(
+                        f"恢复过程中任务文件 {edit.path} 发生变化，拒绝继续。"
+                    )
+                if edit.original_content is None:
+                    try:
+                        file_path.unlink()
+                    except OSError as error:
+                        raise ToolError(
+                            f"删除 Agent 新建文件失败：{edit.path}"
+                        ) from error
+                else:
+                    self._atomic_write(file_path, edit.original_content)
+                applied.append((edit, entry))
+            self.checkpoints.consume(prepared.checkpoint_id, current_hashes)
+        except ToolError as error:
+            rollback_complete = self._rollback_task_restore(applied)
+            if not rollback_complete:
+                raise ToolError(
+                    "任务恢复失败且自动回滚不完整；检查点已保留，"
+                    "请立即检查工作区并使用 Git 恢复。"
+                ) from error
+            raise ToolError(
+                "任务恢复失败，已回滚本次恢复操作；检查点已保留。"
+            ) from error
+
+        restored_count = prepared.file_count - prepared.delete_count
+        return (
+            f"已恢复最近任务检查点：{prepared.file_count} 个文件"
+            f"（恢复 {restored_count}，删除 {prepared.delete_count}）"
+        )
+
+    def _rollback_task_restore(
+        self,
+        applied: list[tuple[FileEditCheckpoint, PreparedFileRestoreEntry]],
+    ) -> bool:
+        """Best-effort rollback without overwriting changes made during rollback."""
+
+        complete = True
+        for edit, entry in reversed(applied):
+            original_content = edit.original_content
             try:
-                file_path.unlink()
-            except OSError as error:
-                raise ToolError("删除 Agent 新建文件失败，检查点已保留。") from error
-            action = "删除 Agent 新建文件"
-        else:
-            self._atomic_write(file_path, checkpoint.original_content)
-            action = "恢复文件原内容"
-        self.checkpoints.consume(prepared.checkpoint_id, current_hash)
-        return f"已{action}：{prepared.path}"
+                if original_content is None:
+                    file_path = self._prepare_write_target(entry.path)
+                    if file_path.exists():
+                        raise ToolError("恢复回滚期间 Agent 新建文件路径已被外部占用。")
+                else:
+                    file_path = self._resolve_checkpoint_file(entry.path)
+                    restored_content = self._read_required_text(file_path, entry.path)
+                    if content_hash(restored_content) != content_hash(original_content):
+                        raise ToolError("恢复回滚期间文件发生外部变化。")
+                self._atomic_write(file_path, entry.current_content)
+            except ToolError:
+                complete = False
+        return complete
 
     def _resolve_checkpoint_file(self, path: str) -> Path:
         """Resolve a recorded path without following a replacement link."""
@@ -396,6 +477,39 @@ class FileSystemTools:
                 f"期望 {expected_replacements} 处，实际 {actual_replacements} 处。"
             )
         return current_content.replace(old_text, new_text, expected_replacements)
+
+    @staticmethod
+    def _format_task_restore_preview(
+        previews: list[tuple[str, str, str]],
+    ) -> str:
+        """Show every target while bounding the combined reverse diff."""
+
+        if not previews:
+            raise ToolError("文件任务检查点不包含可恢复文件。")
+        headers = [
+            f"=== {path} · {action} ===\n" for path, action, _preview in previews
+        ]
+        separators_size = max(len(previews) - 1, 0) * 2
+        available = (
+            MAX_TASK_RESTORE_PREVIEW_CHARS
+            - sum(len(header) for header in headers)
+            - separators_size
+        )
+        if available < 0:
+            raise ToolError("文件任务恢复范围过大，无法安全生成完整路径预览。")
+        per_file_limit = available // len(previews)
+        marker = "\n... 该文件的反向 diff 已按任务预览上限截断。"
+        sections: list[str] = []
+        for header, (_path, _action, preview) in zip(
+            headers,
+            previews,
+            strict=True,
+        ):
+            if len(preview) > per_file_limit:
+                kept_chars = max(per_file_limit - len(marker), 0)
+                preview = preview[:kept_chars] + marker[:per_file_limit]
+            sections.append(header + preview)
+        return "\n\n".join(sections)
 
     def _format_diff(
         self,

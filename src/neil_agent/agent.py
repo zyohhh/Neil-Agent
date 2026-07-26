@@ -13,6 +13,7 @@ from .activity import (
     describe_tool_result,
     safe_tool_name,
 )
+from .checkpoint import FileCheckpointHistory
 from .config import DEFAULT_SYSTEM_PROMPT
 from .context import (
     ContextSelection,
@@ -149,6 +150,7 @@ class Agent:
         hooks: LifecycleHooks | None = None,
         event_bus: EventBus | None = None,
         event_factory: RuntimeEventFactory | None = None,
+        file_checkpoints: FileCheckpointHistory | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -178,6 +180,7 @@ class Agent:
             if event_bus is not None
             else None
         )
+        self._file_checkpoints = file_checkpoints
         self._messages: list[Message] = []
         self._last_usage: TokenUsage | None = None
 
@@ -507,6 +510,11 @@ class Agent:
             metadata=self._turn_start_metadata(user_message, request_messages),
         )
         counters = {"model_requests": 0, "tool_calls": 0}
+        checkpoint_task_id = (
+            self._file_checkpoints.begin_task()
+            if self._file_checkpoints is not None
+            else None
+        )
         try:
             yield from self._stream_chat_loop(
                 user_message,
@@ -536,6 +544,9 @@ class Agent:
                 },
             )
             raise
+        finally:
+            if self._file_checkpoints is not None and checkpoint_task_id is not None:
+                self._file_checkpoints.finish_task(checkpoint_task_id)
 
     def _stream_chat_loop(
         self,
