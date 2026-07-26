@@ -20,6 +20,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 | 可观察性 | 模型、工具、审批、计划和重试都有实时活动 | 已达到可理解的执行轨迹，不暴露思维链 |
 | 自动化 | 离线评测，以及一次性 `text`、`json`、`stream-json` | v1 默认只读；v2 以两阶段精确审批开放受限写操作 |
 | Hooks | 类型化进程内 `before/after model/tool` 回调 | 支持审计、拒绝和有界上下文；有意不执行任意 shell |
+| OS 沙箱 | 不可变策略、Windows 能力探测、限制性配置和 fail-closed 诊断 | 执行通道尚未 ready，因此专业地维持固定命令白名单 |
 
 ## 已实施优化
 
@@ -31,24 +32,26 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 6. 新增 `-p/--print` 一次性入口；默认 v1 只读，`json` 和 `stream-json` 不混入终端装饰或思考内容，默认不保存会话。
 7. 新增类型化生命周期 hooks：前置阶段可拒绝，`before_model` 可提供有界请求上下文，后置阶段只审计；回调异常默认关闭相关操作。
 8. 依据 DeepSeek 官方字符比例调整 token 软估算，并明确实际请求与费用仍以服务端 `usage` 为准。
-9. 完成 Windows AppContainer/Windows Sandbox 与 Linux bubblewrap 的初步隔离评估；通用命令继续保持关闭。
+9. 完成 Windows AppContainer/Windows Sandbox 与 Linux bubblewrap 的初步隔离评估，并形成平台无关的 fail-closed 策略。
 10. 接收并累加 DeepSeek `usage`，在 `/context`、会话版本 3 和一次性结构化结果中保留最近成功回合的服务端实测。
 11. 用独立版本化夹具固定 v1/v2 的 `json` / `stream-json` 字段与错误代码；v2 通过 request/approve 两次运行、精确预览绑定和一次性消费开放受限操作，不改变 v1。
 12. 增加可选的元数据 JSONL 审计 sink；它预检真实路径、限制单条与总大小并做单备份轮转，不记录正文或凭据。
 13. 增加 `/rewind-file` 最小文件检查点，只恢复本进程最新一次 Agent 工具编辑，预览并批准后仍重新检查路径与内容。
 14. 审计的大小检查、单备份轮转和追加现在由跨进程内核文件锁串行化；`/doctor` 可只读检查锁、大小、记录数与格式，不返回日志正文。
 15. 文件检查点升级为一次 Agent 回合一个任务单元；`/rewind-task` 全量预检并恢复多个路径，容量不足在写入前拒绝，进程内中途失败会回滚已应用路径。
+16. 新增 Windows Sandbox 只读能力探测、安全 `.wsb` 配置和 `/doctor` 结构化门禁；后端缺失或能力不完整时不启动任何命令，也不回退普通子进程。
+17. 真实 DeepSeek 验收扩展到 v1 默认工具/usage/显式保存、压缩恢复，以及 v2 request/approve/重放，并通过双重成本确认在临时工作区完成 5/5 验收。
 
-本轮实现后的自动化结果见开发记录；离线检查不调用真实 DeepSeek API。
+本轮实现后的自动化与显式真实验收结果见开发记录；常规测试和离线检查仍不调用真实 DeepSeek API。
 
 ## 明确保留的差异
 
 - Claude Code 把项目 `CLAUDE.md` 作为上下文而非安全配置。Neil Agent 仍把包裹后的项目段拼入系统字符串，这是当前 DeepSeek/LLM 接口的简化；新增的低信任声明和代码权限边界降低了优先级混淆风险，但后续仍可把项目上下文改为独立消息块。
 - Claude Code 的 `/export` 面向人类可读文本。Neil Agent 的 `/export` 仍是为安全导入设计的严格 JSON 信封；新增的 `-p --output-format json|stream-json` 才是脚本协议，两者语义必须持续区分。
 - Claude Code 的检查点可以按对话持续恢复多文件状态。Neil Agent 现在按单次 Agent 回合恢复多文件正文，但仍只存在于本进程，不持久化权限/目录元数据，也不承诺进程崩溃时的多文件原子性；Git 仍是跨进程和持久化回退的可靠机制。
-- Claude Code 同时使用权限规则和 OS 级沙箱。Neil Agent 在原生 Windows 上只有工具白名单、路径验证、安全环境和逐次审批，不能声称等价于 OS 沙箱。
+- Claude Code 同时使用权限规则和已投入执行的 OS 级沙箱。Neil Agent 现在有平台无关契约、Windows 静态探测和 fail-closed 配置准备，但还没有通过真实逃逸测试的无头执行通道；因此不能声称等价，也不会开放通用命令。
 
 ## 后续优先级
 
-1. 使用真实 DeepSeek API 手工核对 `usage`、默认只读 v1、显式审批 v2 和会话保存；自动化继续不消耗额度。
-2. 若继续推进通用命令，按 [`sandbox-assessment.md`](sandbox-assessment.md) 实现至少一个 fail-closed 平台后端并完成逃逸测试；在此之前保持固定 allowlist。
+1. 完成可信的 Windows Sandbox guest runner、有界结果通道和完整实例/进程树终止，再在启用组件的专用主机运行不可跳过的真实隔离测试。
+2. 实现过滤只读快照与确定性 manifest；只有安全审查和所有逃逸门禁通过后，才评估注册仅接受 executable + argv 的最小通用命令。

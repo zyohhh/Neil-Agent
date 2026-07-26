@@ -8,6 +8,7 @@ from neil_agent.audit import AUDIT_LOCK_FILENAME, JsonlAuditSink, _AuditFileLock
 from neil_agent.config import Settings
 from neil_agent.diagnostics import run_diagnostics
 from neil_agent.errors import ToolError
+from neil_agent.sandbox import SandboxCapabilities, WindowsSandboxBackend
 from neil_agent.session import SessionStore
 from neil_agent.tools.shell import ShellTools
 
@@ -37,6 +38,7 @@ def test_doctor_reports_healthy_local_state_without_revealing_api_key(
     assert [check.name for check in report.checks] == [
         "配置",
         "工作区",
+        "OS 沙箱",
         "本地会话",
         "生命周期审计",
         "Git",
@@ -45,6 +47,139 @@ def test_doctor_reports_healthy_local_state_without_revealing_api_key(
     assert report.error_count == 0
     assert report.warning_count == 0
     assert "top-secret-key" not in repr(report)
+
+
+def test_doctor_does_not_probe_a_disabled_sandbox(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+
+    def unexpected_probe(_backend: WindowsSandboxBackend) -> SandboxCapabilities:
+        raise AssertionError("disabled sandbox must not be probed")
+
+    monkeypatch.setattr(WindowsSandboxBackend, "probe", unexpected_probe)
+
+    report = run_diagnostics(
+        _settings(tmp_path),
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    sandbox_check = next(check for check in report.checks if check.name == "OS 沙箱")
+    assert sandbox_check.status == "ok"
+    assert sandbox_check.summary == "未启用（可选）"
+
+
+def test_doctor_reports_an_unavailable_enabled_sandbox_as_an_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    capabilities = SandboxCapabilities(
+        backend="windows-sandbox",
+        available=False,
+        ready=False,
+        reason_code="executable_not_found",
+        summary="未找到 Windows Sandbox。",
+    )
+    monkeypatch.setattr(
+        WindowsSandboxBackend,
+        "probe",
+        lambda _backend: capabilities,
+    )
+
+    report = run_diagnostics(
+        _settings(tmp_path, sandbox_backend="windows-sandbox"),
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    sandbox_check = next(check for check in report.checks if check.name == "OS 沙箱")
+    assert sandbox_check.status == "error"
+    assert sandbox_check.summary == "Windows Sandbox 不可用"
+    assert "executable_not_found" in repr(sandbox_check)
+
+
+def test_doctor_rejects_incomplete_sandbox_capabilities_without_leaking_paths(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    secret = "PRIVATE-SANDBOX-PATH"
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    capabilities = SandboxCapabilities(
+        backend="windows-sandbox",
+        available=True,
+        ready=False,
+        reason_code="execution_channel_unavailable",
+        summary=f"执行通道尚未完成：{secret}",
+        executable=tmp_path / secret / "WindowsSandbox.exe",
+        workspace_modes=("none", "read-only-snapshot"),
+        network_modes=("deny",),
+    )
+    monkeypatch.setattr(
+        WindowsSandboxBackend,
+        "probe",
+        lambda _backend: capabilities,
+    )
+
+    report = run_diagnostics(
+        _settings(tmp_path, sandbox_backend="windows-sandbox"),
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    sandbox_check = next(check for check in report.checks if check.name == "OS 沙箱")
+    assert sandbox_check.status == "error"
+    assert sandbox_check.summary == "Windows Sandbox 能力不完整"
+    assert "取消=缺失" in repr(sandbox_check)
+    assert secret not in repr(sandbox_check)
+
+
+def test_doctor_accepts_only_a_complete_fail_closed_sandbox(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    capabilities = SandboxCapabilities(
+        backend="windows-sandbox",
+        available=True,
+        ready=True,
+        reason_code="ready",
+        summary="全部安全门禁可用。",
+        executable=tmp_path / "WindowsSandbox.exe",
+        workspace_modes=("read-only-snapshot",),
+        network_modes=("deny",),
+        supports_cancellation=True,
+        supports_timeout=True,
+        supports_output_limit=True,
+        supports_memory_limit=True,
+        supports_process_limit=True,
+    )
+    monkeypatch.setattr(
+        WindowsSandboxBackend,
+        "probe",
+        lambda _backend: capabilities,
+    )
+
+    report = run_diagnostics(
+        _settings(tmp_path, sandbox_backend="windows-sandbox"),
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    sandbox_check = next(check for check in report.checks if check.name == "OS 沙箱")
+    assert sandbox_check.status == "ok"
+    assert sandbox_check.summary == "Windows Sandbox 已就绪"
+    assert "网络模式：deny" in repr(sandbox_check)
 
 
 def test_doctor_warns_for_insecure_endpoint_corrupt_session_and_missing_git(

@@ -64,3 +64,25 @@ def test_retry_base_delay_cannot_exceed_maximum() -> None:
             retry_base_delay=10,
             retry_max_delay=5,
         )
+
+
+def test_sandbox_backend_is_disabled_by_default_and_loads_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SANDBOX_BACKEND", raising=False)
+    default_settings = Settings(_env_file=None, deepseek_api_key="test-key")
+
+    monkeypatch.setenv("SANDBOX_BACKEND", "windows-sandbox")
+    enabled_settings = Settings(_env_file=None, deepseek_api_key="test-key")
+
+    assert default_settings.sandbox_backend == "disabled"
+    assert enabled_settings.sandbox_backend == "windows-sandbox"
+
+
+def test_sandbox_backend_rejects_unknown_values() -> None:
+    with pytest.raises(ValidationError, match="sandbox_backend"):
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            sandbox_backend="subprocess",  # type: ignore[arg-type]
+        )

@@ -29,6 +29,7 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/import <文件名>`：预览后导入 `.neil-agent/exports/` 中的严格版本化文件。
 - `/compact [关注点]`：总结较早轮次、保留最近完整上下文，并保存压缩前会话副本。
 - `/context`：区分下一次请求的本地软预算估算与最近一次服务端实测 `usage`。
+- `/doctor`：只读检查配置、工作区、会话、审计、OS 沙箱能力和 Git，不调用模型或自动修复。
 - `/cockpit`：显示任务、上下文、安全边界和工作区信号的只读基础快照，不调用模型。
 - `/cockpit --live`：进入全屏实时执行树；在界面底部提交任务，使用 `1`–`4` 筛选节点、`Ctrl+X` 取消请求、`Ctrl+Q` 退出。非交互终端或 Textual 启动失败时自动降级为基础快照。
 - `/rewind-task`：预览并恢复本进程最近一次 Agent 回合的全部有效文件编辑；`/rewind-file` 保留为兼容别名。
@@ -69,6 +70,12 @@ uv run neil-agent -p "更新版本号" --protocol-version 2 --permission-mode ap
 如需本地生命周期审计，可设置 `AUDIT_LOG_ENABLED=true`。日志写入
 `.neil-agent/audit/events.jsonl`，只记录有界元数据，不记录 prompt、thinking、工具参数/正文或 API Key；`AUDIT_LOG_MAX_BYTES` 控制单文件轮转上限。审计写入使用操作系统文件锁串行化检查、轮转和追加，锁等待超时会明确失败，进程崩溃后锁由内核释放。`/doctor` 只读报告审计文件大小、记录数、格式与锁状态，不显示日志正文。
 
+`SANDBOX_BACKEND` 默认为 `disabled`；也可显式选择
+`windows-sandbox` 只读探测 Windows Sandbox 平台能力。该设置不会开放通用
+命令，后端不可用或能力不完整时会 fail-closed，现有质量检查与 Git 命令仍
+保持固定白名单。`/doctor` 不启动沙箱或修改系统，只显示结构化能力状态。
+完整策略和平台门禁见 [`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)。
+
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 
 ```text
@@ -78,7 +85,10 @@ uv run neil-agent-eval --task root-project-instructions --format json
 默认评测完全离线，使用假模型和临时工作区，不读取 API Key。真实 DeepSeek 验收必须同时提供两个显式参数：
 
 ```text
-uv run neil-agent-eval --real-deepseek --confirm-api-cost
+uv run neil-agent-eval --real-deepseek --confirm-api-cost --format json
 ```
 
-真实验收会消耗 API 额度，只执行临时工作区内的只读工具、项目指令、压缩和恢复检查，不主动制造限流或网络故障。
+真实验收会消耗 API 额度。它在一次性临时工作区中核对服务端 `usage`、v1
+默认只读工具与显式会话保存、压缩恢复，以及 v2 request/approve 和审批
+重放保护；唯一写入发生在该临时目录，结束后删除。验收不主动制造限流或
+网络故障，也不会输出 API Key、完整审批 ID、审批预览或原始模型响应。

@@ -39,3 +39,7 @@ class ApprovalError(NeilAgentError):
 
 class EventStoreError(NeilAgentError):
     """A runtime event store path, record, lock, or rotation is invalid."""
+
+
+class SandboxError(NeilAgentError):
+    """An OS sandbox is unavailable, incomplete, or rejected a run."""

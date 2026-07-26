@@ -9,11 +9,18 @@ from typing import Literal
 
 from .audit import JsonlAuditSink
 from .config import Settings
-from .errors import AuditError, NeilAgentError, SessionError
+from .errors import AuditError, NeilAgentError, SandboxError, SessionError
+from .sandbox import SandboxCapabilities, WindowsSandboxBackend
 from .session import SessionStore
 from .tools.shell import ShellTools
 
 DiagnosticStatus = Literal["ok", "warning", "error"]
+_SANDBOX_REASON_SUMMARIES = {
+    "unsupported_platform": "当前平台不支持所选后端",
+    "executable_not_found": "未找到 Windows Sandbox 可执行文件",
+    "execution_channel_unavailable": "受控执行与结果回传通道尚未就绪",
+    "ready": "全部强制安全门禁已就绪",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +60,7 @@ def run_diagnostics(
         checks=(
             _check_configuration(settings),
             _check_workspace(workspace_root),
+            _check_sandbox(settings),
             _check_sessions(session_store),
             _check_audit(settings, workspace_root),
             _check_git(shell_tools),
@@ -94,6 +102,86 @@ def _check_workspace(workspace_root: Path) -> DiagnosticCheck:
         summary=summary,
         details=(f"路径：{workspace_root}",),
     )
+
+
+def _check_sandbox(settings: Settings) -> DiagnosticCheck:
+    if settings.sandbox_backend == "disabled":
+        return DiagnosticCheck(
+            name="OS 沙箱",
+            status="ok",
+            summary="未启用（可选）",
+            details=("SANDBOX_BACKEND=disabled",),
+        )
+
+    try:
+        capabilities = WindowsSandboxBackend().probe()
+    except (SandboxError, OSError, ValueError):
+        return DiagnosticCheck(
+            name="OS 沙箱",
+            status="error",
+            summary="Windows Sandbox 能力探测失败",
+            details=("探测过程已 fail-closed，未启动任何命令。",),
+        )
+
+    complete = _sandbox_capabilities_complete(
+        capabilities,
+        expected_backend=settings.sandbox_backend,
+    )
+    if complete:
+        summary = "Windows Sandbox 已就绪"
+    elif capabilities.available:
+        summary = "Windows Sandbox 能力不完整"
+    else:
+        summary = "Windows Sandbox 不可用"
+
+    workspace_modes = "、".join(capabilities.workspace_modes) or "无"
+    network_modes = "、".join(capabilities.network_modes) or "无"
+    reason_code = (
+        capabilities.reason_code
+        if capabilities.reason_code in _SANDBOX_REASON_SUMMARIES
+        else "unknown"
+    )
+    return DiagnosticCheck(
+        name="OS 沙箱",
+        status="ok" if complete else "error",
+        summary=summary,
+        details=(
+            f"后端：{settings.sandbox_backend}",
+            f"探测结果：{_SANDBOX_REASON_SUMMARIES.get(reason_code, '未知状态')}",
+            f"原因代码：{reason_code}",
+            f"工作区模式：{workspace_modes}",
+            f"网络模式：{network_modes}",
+            "安全门禁："
+            f"取消={_support_label(capabilities.supports_cancellation)}，"
+            f"超时={_support_label(capabilities.supports_timeout)}，"
+            f"输出限制={_support_label(capabilities.supports_output_limit)}，"
+            f"内存限制={_support_label(capabilities.supports_memory_limit)}，"
+            f"进程限制={_support_label(capabilities.supports_process_limit)}",
+        ),
+    )
+
+
+def _sandbox_capabilities_complete(
+    capabilities: SandboxCapabilities,
+    *,
+    expected_backend: str,
+) -> bool:
+    return (
+        capabilities.backend == expected_backend
+        and capabilities.available
+        and capabilities.ready
+        and "read-only-snapshot" in capabilities.workspace_modes
+        and "deny" in capabilities.network_modes
+        and capabilities.supports_cancellation
+        and capabilities.supports_timeout
+        and capabilities.supports_output_limit
+        and capabilities.supports_memory_limit
+        and capabilities.supports_process_limit
+    )
+
+
+def _support_label(supported: bool) -> str:
+    return "支持" if supported else "缺失"
 
 
 def _check_sessions(session_store: SessionStore) -> DiagnosticCheck:

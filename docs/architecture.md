@@ -37,7 +37,7 @@ agent.py
     ↘ context.py
       API 字符估算、完整轮次历史预算、待应用压缩结果
     ↘ diagnostics.py
-      配置、工作区、会话和 Git 的只读本地诊断
+      配置、工作区、会话、OS 沙箱能力和 Git 的只读本地诊断
     ↘ instructions.py
       分层 AGENTS.md 加载、热重载和非覆盖初始化
     ↘ session.py
@@ -55,11 +55,14 @@ tools/registry.py
     └→ tools/shell.py
          固定质量检查、只读 Git、本地暂存和提交、子进程安全边界
 
+sandbox.py
+  平台无关的不可变执行策略、Windows Sandbox 能力探测和 fail-closed 适配层
+
 evals.py
-  默认离线场景执行器、双重显式开启的真实 DeepSeek 验收
+  默认离线场景执行器、双重显式开启的真实 DeepSeek 协议验收
 ```
 
-`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置。
+`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置。沙箱适配层不会注册工具；通用命令是否可见仍必须由宿主在平台安全门禁通过后显式决定。
 
 ## 项目指令边界
 
@@ -159,10 +162,11 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 ## 本地诊断边界
 
-- `/doctor` 只检查当前已加载配置、工作区权限、会话目录、启用后的审计文件/锁和 Git，不调用模型 API，也不修改文件、会话、审计日志或 Git 状态。
+- `/doctor` 只检查当前已加载配置、工作区权限、会话目录、启用后的审计文件/锁、OS 沙箱静态能力和 Git，不调用模型 API，也不修改文件、会话、审计日志、系统沙箱配置或 Git 状态。
 - API Key 只报告已配置且值已隐藏；诊断对象、终端详情和错误信息都不包含 Key。非 HTTPS API 地址会产生警告。
 - 工作区检查使用本地权限信息；会话检查复用 `SessionStore.list_sessions()` 的路径、符号链接、格式和版本边界。
 - 审计检查不会创建目录或文件；它先做非阻塞锁探测，空闲时在锁内统计当前/备份文件的记录和格式，繁忙时只报告警告。诊断不返回任何审计正文。
+- OS 沙箱检查只读取平台和可执行组件能力。默认 `disabled` 是安全的正常状态；显式选择 Windows 后端但组件不可用或能力不完整时报告错误，且不会启动探针进程、创建 profile、修改 ACL 或回退到普通子进程。
 - Git 检查复用受限的 `git_status_snapshot()`，仅报告可用性和是否存在未提交变更，不复制文件列表或 diff。
 - Git 不可用、非 HTTPS 地址或损坏会话属于警告；工作区不可读或会话目录不安全属于错误。诊断不自动修复任何问题。
 
@@ -297,7 +301,8 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - `--task <id>` 可重复指定单个场景，`--format json` 输出稳定字段和毫秒耗时；`run_quality_check(eval)` 复用同一离线 JSON 命令，不会自动启用真实 DeepSeek 模式。
 - 未注册离线执行器的任务会明确失败，防止只增加文字场景却未接入执行逻辑；进程以非零退出码报告失败，可直接接入本地检查或 CI。
 - `--real-deepseek` 单独使用不会发送请求；必须同时提供 `--confirm-api-cost` 才会运行真实验收。
-- 真实模式只在临时目录使用 `read_file`，验证项目指令、只读工具、显式压缩和新 Agent 恢复；它报告自然发生的重试次数，但不把“未遇到外部故障”视为失败，也不会主动制造限流。
+- 真实模式把工作区固定到自动删除的临时目录，验收设置固定关闭 thinking、单轮工具上限、1024 输出 token、40000 字符上下文、60 秒超时和最多一次瞬时失败重试。它验证 v1 五个默认只读工具、精确 `read_file`、项目指令、服务端 `usage`、显式会话保存、压缩恢复，以及 v2 request/approve 和消费后重放拒绝。
+- v2 的唯一写入只发生在临时目录；审批 ID、预览和原始模型响应不进入报告。v1 前置失败时不会继续发起压缩和 v2 请求。自然重试只观察真实发生次数，不主动制造限流或网络故障。
 
 ## 异常边界
 
@@ -311,7 +316,8 @@ NeilAgentError
 ├── HookError    生命周期 hook 注册、决策或回调错误
 ├── AuditError   本地审计初始化或写入错误
 ├── ApprovalError 一次性审批记录无效、过期或已消费
-└── EventStoreError 运行时事件存储、格式或轮转错误
+├── EventStoreError 运行时事件存储、格式或轮转错误
+└── SandboxError OS 沙箱不可用、能力不完整或拒绝执行
 ```
 
 工具执行错误通常会转换为 `ToolResult(is_error=True)` 返回模型；无法在工具内部处理的 Agent 或 LLM 错误由 CLI 捕获并展示。
@@ -333,5 +339,6 @@ NeilAgentError
 | `WORKSPACE_ROOT` | 本地工具工作区边界 | `.` |
 | `COMMAND_TIMEOUT` | 本地命令超时时间（秒） | `120` |
 | `MAX_COMMAND_OUTPUT_CHARS` | 返回模型的命令输出上限 | `20000` |
+| `SANDBOX_BACKEND` | 可选 OS 沙箱能力门禁（`disabled` / `windows-sandbox`） | `disabled` |
 | `AUDIT_LOG_ENABLED` | 是否启用元数据专用 JSONL 生命周期审计 | `false` |
 | `AUDIT_LOG_MAX_BYTES` | 审计日志单文件轮转上限 | `1000000` |

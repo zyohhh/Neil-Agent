@@ -10,7 +10,7 @@
 - 文档创建时间：2026 年 7 月
 - GitHub 仓库：https://github.com/zyohhh/Neil-Agent
 - 当前版本：v0.1.0-dev
-- 当前状态：服务端用量、结构化协议契约、元数据审计和最小文件恢复已完成，等待真实 DeepSeek 验收
+- 当前状态：真实 v1/v2 协议验收已通过；OS 沙箱契约与 Windows fail-closed 能力门禁已接入，通用命令仍保持关闭
 
 ## 文件职责
 
@@ -19,7 +19,7 @@
 | `cli.py` | 通过可注入 Console 接收输入、展示流式文本并处理终端命令 |
 | `agent.py` | 管理多轮历史、压缩检查点、受限工具循环和修改后验证工作流 |
 | `context.py` | 估算上下文、选择完整历史轮次并保存待应用的压缩结果 |
-| `diagnostics.py` | 为 `/doctor` 执行不联网、不泄露密钥的本地环境检查 |
+| `diagnostics.py` | 为 `/doctor` 执行不联网、不泄露密钥的本地环境与 OS 沙箱能力检查 |
 | `instructions.py` | 分层加载、热重载并非覆盖式初始化有界 `AGENTS.md` 项目指令 |
 | `evals.py` | 运行默认离线评测和双重显式开启的真实 DeepSeek 验收 |
 | `llm.py` | 封装 DeepSeek 请求、可观察重试、流式事件、工具调用和服务端用量解析 |
@@ -31,6 +31,7 @@
 | `schemas.py` | 定义消息、思考内容、工具定义、调用、结果和模型响应结构 |
 | `task.py` | 管理单次任务计划、步骤状态和最近一次质量检查快照 |
 | `session.py` | 迁移、命名、搜索、原子保存和恢复工作区内的版本化会话快照 |
+| `sandbox.py` | 定义不可变 OS 沙箱契约、Windows 能力探测、安全配置和 fail-closed 执行边界 |
 | `config.py` | 从环境变量或 `.env` 读取并校验 API Key、模型、提示词、重试和运行限制 |
 | `registry.py` | 注册工具、生成预览、执行审批检查并统一返回结果 |
 | `filesystem.py` | 在工作区内读取、搜索以及原子写入 UTF-8 文件 |
@@ -690,8 +691,84 @@ CLI 展示修改预览并等待用户输入 y/yes
 - pytest 结果为 239 项通过、5 项平台条件跳过；5 个内置离线评测场景全部通过。
 - 自动化测试、协议契约、无头 Textual 测试和离线评测均未调用真实 DeepSeek API。
 
+## 2026-07-26：真实协议验收与 Windows 沙箱能力门禁
+
+### 成本受控的真实 DeepSeek 验收
+
+- 扩展原有双重显式入口；仍必须同时提供 `--real-deepseek` 和
+  `--confirm-api-cost`，单独提供任一参数都不会触发真实请求。
+- 真实验收把所有文件、会话和审批固定在自动删除的临时工作区，并使用固定
+  短系统提示词、关闭 thinking、1024 输出 token、40000 字符上下文、单轮
+  工具上限、60 秒请求超时和最多一次瞬时失败重试，避免继承无界用户配置。
+- v1 通过 `stream-json` 核对默认协议版本、只读标志和固定的五个只读工具；
+  模型精确调用一次 `read_file`，最终回答同时满足项目指令和文件证据。
+- v1 结果必须包含正值服务端 `usage`；显式保存的版本 3 会话必须以独占
+  创建落盘，并保留完全一致的 `last_usage`。
+- 压缩验收要求恰好一次真实摘要请求，核对摘要请求的服务端 `usage`，保存
+  检查点后用新的离线 Agent 恢复，避免为纯恢复检查增加 API 调用。
+- v2 request 只生成一项 `write_file` 精确预览且目标不存在；approve 使用
+  同一 prompt 和 approval ID 精确执行；再次使用该 ID 会在模型调用前被
+  `ApprovalStore` 拒绝，目标内容保持不变。
+- 失败报告只使用固定阶段码，不输出原始模型文本、临时路径、审批预览或完整
+  approval ID；v1 前置失败会停止后续真实阶段，避免无意义消耗。
+
+### 平台无关沙箱契约
+
+- 新增不可变 `SandboxLimits`、`SandboxPolicy`、`RunSpec`、
+  `SandboxCapabilities` 和 `SandboxResult`，固定 `none` / 只读快照工作区、
+  无网络、最小环境、绝对可执行文件、分离 argv、墙钟/输出/内存/进程上限，
+  以及超时、取消、输出/资源超限和后端错误的终止语义。
+- 环境变量从固定名称和值格式白名单构造，拒绝 Key、token、credential、
+  password 和 proxy 类名称；脚本/批处理后缀、NUL、换行参数、相对 executable
+  和越界工作目录在执行准备前拒绝。
+- 快照必须是真实绝对目录且不能是卷根；遍历时拒绝路径任一 reparse
+  component、符号链接/junction、硬链接、非普通文件、受保护目录和凭据
+  文件，并限制 100000 个条目、50 MiB 单文件和 512 MiB 累计字节。
+- 新增 `SandboxError`；后端不可用、能力不完整或策略无法完整强制时统一
+  fail-closed，不存在普通 `subprocess` fallback。
+
+### Windows Sandbox 适配与结构化诊断
+
+- `WindowsSandboxBackend.probe()` 只读检查 Windows 平台和
+  `WindowsSandbox.exe` / `wsb.exe`，不创建 profile、ACL、临时文件或进程。
+- 配置生成器显式禁用 `VGpu`、networking、clipboard、printer 和 audio/video
+  input，启用 Protected Client，只允许一个过滤快照的 read-only mapped
+  folder；argv、环境值和 LogonCommand 不进入 XML。
+- Windows Sandbox 会把不足的内存配置自动提高到至少 2048 MiB，因此适配层
+  对无法兑现的更低限制直接拒绝，而不是把它错误描述为已强制。
+- 新增 `SANDBOX_BACKEND=disabled|windows-sandbox`，默认关闭。`/doctor`
+  在关闭时不 probe；显式启用后只有工作区、断网、取消、超时、输出、内存
+  和进程树门禁全部 ready 才报告正常，其他状态均为错误，且不显示可执行
+  路径或未经信任的探测正文。
+- 本机没有 Windows Sandbox 可执行组件，且可信的无头结果通道与完整进程树
+  取消尚未实现，因此后端状态不是 ready，`run()` 始终拒绝。现有固定质量
+  检查与 Git 命令没有改走新后端，也没有注册通用命令。
+
+### 验证说明
+
+- Ruff lint 与全仓库格式检查通过；mypy 对 30 个源文件检查通过。
+- pytest 最终结果为 285 项通过、6 项平台条件跳过；新增单元测试覆盖策略、
+  argv/环境、敏感快照、符号链接/重解析点、硬链接、容量、Windows XML、
+  disabled/unavailable/incomplete/ready 诊断，以及绝不启动宿主 fallback。
+- 5 个内置离线评测场景全部通过，不读取真实 Key、不访问网络。
+- 用户显式批准后运行真实 DeepSeek 验收，5/5 通过：v1 使用 1656 tokens，
+  压缩使用 3819 tokens，v2 request/approve 合计 6510 tokens，总计 11985
+  个服务端报告 tokens；观察到 0 次自然重试。
+- 因目标平台能力门禁未通过，真实网络隔离、子进程树终止和内核级逃逸测试
+  没有伪装成已执行；按照预定条件继续维持固定命令白名单。
+
 ## 下一阶段计划
 
-1. 由用户显式运行真实 DeepSeek 验收，核对服务端 `usage`、v1 默认只读和 v2 request/approve 双阶段行为；自动化继续不读取真实 Key、不消耗额度。
-2. 若需要通用命令，先实现至少一个 fail-closed OS 沙箱后端及逃逸回归；在此之前维持固定命令白名单。
-3. 高级可视化下一小步为 Phase 2A：在现有全屏骨架中增加 Context Tomography，分层展示固定开销、工具 schema、项目指令、历史轮次和裁剪信号。
+1. 实现可信的 Windows Sandbox 无头执行与结果通道：固定 guest runner、
+   有界 stdout/stderr、实例身份、超时/取消和完整进程树终止；任何初始化或
+   清理步骤失败都保持 fail-closed。
+2. 实现从真实仓库生成过滤只读快照和确定性 manifest 的构建器；复制前后
+   复核 reparse point、硬链接、敏感目录、文件身份和容量，不把命令修改
+   直接回写宿主。
+3. 在启用 Windows Sandbox 的专用安全环境加入强制集成任务，实际验证宿主
+   sentinel/凭据不可读、IPv4/IPv6/DNS/localhost 断网、孙进程清理、输出
+   洪泛、内存/进程上限和 junction 并发逃逸；安全任务不允许 skip。
+4. 只有后端实现、真实平台回归和独立安全审查全部通过后，才增加仅接受
+   executable + argv 的最小 `run_command`，并复用交互逐次审批和非交互
+   v2 request/approve；首版丢弃命令产生的全部修改。任一门禁未通过时继续
+   保持固定命令白名单。

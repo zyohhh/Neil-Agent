@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -112,6 +112,12 @@ class Settings(BaseSettings):
         default=20_000,
         ge=1_000,
         description="Maximum command output returned to the model.",
+    )
+    sandbox_backend: Literal["disabled", "windows-sandbox"] = Field(
+        default="disabled",
+        description=(
+            "Fail-closed OS sandbox backend for explicitly enabled general commands."
+        ),
     )
     audit_log_enabled: bool = Field(
         default=False,
