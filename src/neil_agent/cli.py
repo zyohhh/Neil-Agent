@@ -681,7 +681,7 @@ def _show_help(console: Console) -> None:
     console.print("  /clear  清空对话历史")
     console.print("  /exit   退出程序")
     console.print("  /help   显示帮助")
-    console.print("  /cockpit [--live] 显示快照或全屏实时执行树")
+    console.print("  /cockpit [--live] 显示快照或 DAG/上下文实时驾驶舱")
     console.print("  /context 显示上下文预算和当前占用")
     console.print("  /doctor 检查本地配置和运行环境")
     console.print("  /permissions 显示工具审批与工作区安全边界")

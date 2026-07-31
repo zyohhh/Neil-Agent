@@ -18,7 +18,9 @@ from .config import DEFAULT_SYSTEM_PROMPT
 from .context import (
     ContextSelection,
     ContextStats,
+    ContextTomography,
     PreparedCompaction,
+    build_context_tomography,
     count_rounds,
     estimate_fixed_chars,
     estimate_fixed_tokens,
@@ -254,15 +256,7 @@ class Agent:
 
         fixed_chars = self._fixed_context_chars()
         fixed_tokens = self._fixed_context_tokens()
-        selection = self._select_history(
-            max_rounds=self._max_rounds - 1,
-            max_chars=max(self._max_context_chars - fixed_chars, 0),
-            max_tokens=(
-                None
-                if self._max_context_tokens is None
-                else max(self._max_context_tokens - fixed_tokens, 0)
-            ),
-        )
+        selection = self._context_selection(())
         return ContextStats(
             budget_chars=self._max_context_chars,
             fixed_chars=fixed_chars,
@@ -277,6 +271,33 @@ class Agent:
             fixed_tokens=fixed_tokens,
             stored_message_tokens=estimate_messages_tokens(self._messages),
             selected_message_tokens=selection.estimated_tokens,
+        )
+
+    def context_tomography(self, current_input: str = "") -> ContextTomography:
+        """Return a five-layer local estimate without exposing context text."""
+
+        current_chain = (
+            ()
+            if not current_input.strip()
+            else (self._make_user_message(current_input),)
+        )
+        selection = self._context_selection(current_chain)
+        base_prompt = self._base_system_prompt
+        if self._project_instructions.strip():
+            base_prompt = base_prompt.rstrip()
+        return build_context_tomography(
+            system_prompt_without_project=self._with_tool_workflow(
+                base_prompt,
+                self._registry,
+            ),
+            system_prompt=self._system_prompt,
+            has_project_instructions=bool(self._project_instructions.strip()),
+            tools=self._tool_definitions(),
+            selected_history=selection,
+            current_chain=current_chain,
+            stored_rounds=count_rounds(self._messages),
+            budget_chars=self._max_context_chars,
+            budget_tokens=self._max_context_tokens,
         )
 
     def restore_messages(
@@ -746,28 +767,32 @@ class Agent:
         return Message(role="assistant", content=response)
 
     def _request_messages(self, user_message: Message) -> list[Message]:
-        available_history_chars = max(
-            self._max_context_chars
-            - self._fixed_context_chars()
-            - estimate_message_chars(user_message),
-            0,
-        )
-        available_history_tokens = (
-            None
-            if self._max_context_tokens is None
-            else max(
-                self._max_context_tokens
-                - self._fixed_context_tokens()
-                - estimate_message_tokens(user_message),
-                0,
-            )
-        )
-        selection = self._select_history(
-            max_rounds=self._max_rounds - 1,
-            max_chars=available_history_chars,
-            max_tokens=available_history_tokens,
-        )
+        selection = self._context_selection((user_message,))
         return [*selection.messages, user_message]
+
+    def _context_selection(
+        self,
+        current_chain: Sequence[Message],
+    ) -> ContextSelection:
+        return self._select_history(
+            max_rounds=self._max_rounds - 1,
+            max_chars=max(
+                self._max_context_chars
+                - self._fixed_context_chars()
+                - estimate_messages_chars(current_chain),
+                0,
+            ),
+            max_tokens=(
+                None
+                if self._max_context_tokens is None
+                else max(
+                    self._max_context_tokens
+                    - self._fixed_context_tokens()
+                    - estimate_messages_tokens(current_chain),
+                    0,
+                )
+            ),
+        )
 
     def _commit_messages(self, messages: Sequence[Message]) -> None:
         self._messages.extend(messages)

@@ -15,11 +15,14 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Input, Log, Static, Tree
+from textual.timer import Timer
+from textual.widgets import Button, ContentSwitcher, Footer, Input, Log, Static, Tree
 from textual.widgets.tree import TreeNode
 
+from .context import ContextLayerKind, ContextTomography
 from .errors import NeilAgentError
 from .events import EventBus, EventSubscription, RuntimeEvent
 from .projections import (
@@ -40,6 +43,7 @@ NARROW_TERMINAL_WIDTH = 88
 SHORT_TERMINAL_HEIGHT = 36
 
 NodeFilter = Literal["all", "active", "failed", "tools"]
+MonitorView = Literal["execution", "context"]
 
 _FILTER_LABELS: dict[NodeFilter, str] = {
     "all": "ALL",
@@ -61,12 +65,35 @@ _STATUS_MARKER = {
     "skipped": "○",
     "failed": "▲",
 }
+_CONTEXT_LAYER_LABELS: dict[ContextLayerKind, str] = {
+    "system": "SYSTEM FIXED",
+    "tool_schemas": "TOOL SCHEMAS",
+    "project_instructions": "PROJECT RULES",
+    "selected_history": "HISTORY KEPT",
+    "current_chain": "CURRENT CHAIN",
+}
+_CONTEXT_LAYER_STYLES: dict[ContextLayerKind, str] = {
+    "system": "#91f5e9",
+    "tool_schemas": "#d7b7ff",
+    "project_instructions": "#ffb454",
+    "selected_history": "#9ee37d",
+    "current_chain": "#68b5ff",
+}
+_CONTEXT_LAYER_UNITS: dict[ContextLayerKind, str] = {
+    "system": "BLOCK",
+    "tool_schemas": "DEFS",
+    "project_instructions": "BLOCK",
+    "selected_history": "MSGS",
+    "current_chain": "MSGS",
+}
 
 
 class LiveAgent(Protocol):
     """Agent surface needed by the live cockpit."""
 
     def stream_chat(self, user_input: str) -> Iterator[str]: ...
+
+    def context_tomography(self, current_input: str = "") -> ContextTomography: ...
 
 
 class RuntimeEventsReady(Message):
@@ -270,6 +297,14 @@ class LiveCockpitApp(App[None]):
             tooltip="展开结果区或返回实时执行树",
         ),
         Binding("ctrl+o", "toggle_output", "", show=False, priority=True),
+        Binding(
+            "f3",
+            "toggle_monitor",
+            "DAG/上下文",
+            priority=True,
+            tooltip="切换实时执行树与上下文断层图",
+        ),
+        Binding("ctrl+t", "toggle_monitor", "", show=False, priority=True),
         Binding("1", "filter_all", "全部"),
         Binding("2", "filter_active", "进行中"),
         Binding("3", "filter_failed", "失败"),
@@ -304,6 +339,11 @@ class LiveCockpitApp(App[None]):
         padding: 0 1;
     }
 
+    .workspace-view {
+        width: 1fr;
+        height: 1fr;
+    }
+
     #dag-panel {
         width: 2fr;
         min-width: 40;
@@ -319,6 +359,21 @@ class LiveCockpitApp(App[None]):
         background: #0e1019;
     }
 
+    #context-panel {
+        width: 2fr;
+        min-width: 40;
+        margin-right: 1;
+        border: round #277c6f;
+        background: #09131a;
+    }
+
+    #context-detail-panel {
+        width: 1fr;
+        min-width: 28;
+        border: round #315b7a;
+        background: #0b111c;
+    }
+
     .panel-title {
         height: 2;
         padding: 0 1;
@@ -332,6 +387,16 @@ class LiveCockpitApp(App[None]):
         background: #191426;
     }
 
+    #context-panel .panel-title {
+        color: #9eeadf;
+        background: #10231f;
+    }
+
+    #context-detail-panel .panel-title {
+        color: #9bcdf5;
+        background: #111d2b;
+    }
+
     #execution-tree {
         height: 1fr;
         padding: 0 1 1 1;
@@ -340,6 +405,14 @@ class LiveCockpitApp(App[None]):
     }
 
     #node-detail {
+        height: 1fr;
+        padding: 1 2;
+        color: #c6d4df;
+        overflow-y: auto;
+    }
+
+    #context-layers,
+    #context-detail {
         height: 1fr;
         padding: 1 2;
         color: #c6d4df;
@@ -384,17 +457,15 @@ class LiveCockpitApp(App[None]):
         color: #71879a;
     }
 
-    LiveCockpitApp.narrow #workspace {
-        layout: horizontal;
-    }
-
-    LiveCockpitApp.narrow #dag-panel {
+    LiveCockpitApp.narrow #dag-panel,
+    LiveCockpitApp.narrow #context-panel {
         width: 1fr;
         min-width: 0;
         margin-right: 0;
     }
 
-    LiveCockpitApp.narrow #detail-panel {
+    LiveCockpitApp.narrow #detail-panel,
+    LiveCockpitApp.narrow #context-detail-panel {
         display: none;
     }
 
@@ -428,6 +499,24 @@ class LiveCockpitApp(App[None]):
 
     LiveCockpitApp.short #stream-title {
         display: none;
+    }
+
+    LiveCockpitApp.short #context-panel {
+        width: 1fr;
+        min-width: 0;
+        margin-right: 0;
+    }
+
+    LiveCockpitApp.short #context-detail-panel {
+        display: none;
+    }
+
+    LiveCockpitApp.short #context-title {
+        display: none;
+    }
+
+    LiveCockpitApp.short #context-layers {
+        padding: 0 1;
     }
 
     LiveCockpitApp.output-expanded #workspace {
@@ -467,9 +556,12 @@ class LiveCockpitApp(App[None]):
         )
         self._graph = ExecutionGraphProjector().project(self._events)
         self._metrics = MetricsProjector().project(self._graph)
+        self._context_snapshot = agent.context_tomography()
+        self._monitor_view: MonitorView = "execution"
         self._filter: NodeFilter = "all"
         self._selected_correlation_id: str | None = None
         self._subscription: EventSubscription | None = None
+        self._metrics_timer: Timer | None = None
         self._bridge = RuntimeEventBridge(
             lambda: self.post_message(RuntimeEventsReady())
         )
@@ -502,25 +594,45 @@ class LiveCockpitApp(App[None]):
         return self.has_class("output-expanded")
 
     @property
+    def monitor_view(self) -> MonitorView:
+        return self._monitor_view
+
+    @property
+    def context_snapshot(self) -> ContextTomography:
+        return self._context_snapshot
+
+    @property
     def _cockpit_screen(self) -> Screen[Any]:
         return self.screen_stack[0]
 
     def compose(self) -> ComposeResult:
         yield Static(self._brand_text(), id="brand")
         yield Static(id="metrics")
-        with Horizontal(id="workspace"):
-            with Vertical(id="dag-panel"):
-                yield Static(id="tree-title", classes="panel-title")
-                tree: Tree[str] = Tree("EXECUTION TREE", id="execution-tree")
-                tree.show_guides = True
-                tree.guide_depth = 3
-                yield tree
-            with Vertical(id="detail-panel"):
-                yield Static("NODE TELEMETRY", classes="panel-title")
-                yield Static(
-                    Text("选择节点以查看安全元数据", style="dim"),
-                    id="node-detail",
-                )
+        with ContentSwitcher(initial="execution-view", id="workspace"):
+            with Horizontal(id="execution-view", classes="workspace-view"):
+                with Vertical(id="dag-panel"):
+                    yield Static(id="tree-title", classes="panel-title")
+                    tree: Tree[str] = Tree("EXECUTION TREE", id="execution-tree")
+                    tree.show_guides = True
+                    tree.guide_depth = 3
+                    yield tree
+                with Vertical(id="detail-panel"):
+                    yield Static("NODE TELEMETRY", classes="panel-title")
+                    yield Static(
+                        Text("选择节点以查看安全元数据", style="dim"),
+                        id="node-detail",
+                    )
+            with Horizontal(id="context-view", classes="workspace-view"):
+                with Vertical(id="context-panel"):
+                    yield Static(
+                        "CONTEXT LAYERS  ·  LOCAL ESTIMATE",
+                        id="context-title",
+                        classes="panel-title",
+                    )
+                    yield Static(id="context-layers")
+                with Vertical(id="context-detail-panel"):
+                    yield Static("BUDGET TELEMETRY", classes="panel-title")
+                    yield Static(id="context-detail")
         with Vertical(id="conversation"):
             yield Static(
                 self._stream_title_text(),
@@ -541,12 +653,17 @@ class LiveCockpitApp(App[None]):
         self._sync_responsive_classes(self.size.width, self.size.height)
         self._subscription = self._event_bus.subscribe(self._bridge.observe)
         self._refresh_projection()
-        self.set_interval(0.25, self._refresh_metrics)
+        self._refresh_context_view()
+        self._metrics_timer = self.set_interval(0.25, self._refresh_metrics)
         self._cockpit_screen.query_one("#prompt", Input).focus()
 
     def on_unmount(self) -> None:
         self._closed = True
         self._cancel_requested.set()
+        metrics_timer = self._metrics_timer
+        self._metrics_timer = None
+        if metrics_timer is not None:
+            metrics_timer.stop()
         subscription = self._subscription
         self._subscription = None
         if subscription is not None:
@@ -555,8 +672,18 @@ class LiveCockpitApp(App[None]):
         self._reject_pending_approvals()
 
     def on_resize(self, event: events.Resize) -> None:
+        previous_density = (
+            self.has_class("narrow"),
+            self.has_class("short"),
+        )
         self._sync_responsive_classes(event.size.width, event.size.height)
         self._refresh_metrics()
+        current_density = (
+            self.has_class("narrow"),
+            self.has_class("short"),
+        )
+        if previous_density != current_density:
+            self._refresh_context_view()
 
     @on(Input.Submitted, "#prompt")
     def submit_prompt(self, event: Input.Submitted) -> None:
@@ -571,6 +698,8 @@ class LiveCockpitApp(App[None]):
         self._busy = True
         self._cancel_requested.clear()
         self._turn_done.clear()
+        self._context_snapshot = self._agent.context_tomography(prompt)
+        self._refresh_context_view()
         transcript = self._cockpit_screen.query_one("#transcript", Log)
         transcript.write_line(f"YOU  ›  {prompt}")
         transcript.write("NEIL ›  ")
@@ -614,6 +743,8 @@ class LiveCockpitApp(App[None]):
         prompt = self._cockpit_screen.query_one("#prompt", Input)
         prompt.disabled = False
         prompt.focus()
+        self._context_snapshot = self._agent.context_tomography()
+        self._refresh_context_view()
         self._turn_done.set()
         self._refresh_metrics()
 
@@ -669,6 +800,11 @@ class LiveCockpitApp(App[None]):
     async def action_quit(self) -> None:
         self.action_request_exit()
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action.startswith("filter_") and self._monitor_view != "execution":
+            return False
+        return super().check_action(action, parameters)
+
     def action_cancel_turn(self) -> None:
         if not self._busy:
             self.notify("当前没有正在执行的请求")
@@ -683,6 +819,21 @@ class LiveCockpitApp(App[None]):
             return
         self.set_class(not self.output_expanded, "output-expanded")
         self._refresh_stream_title()
+        self._cockpit_screen.query_one("#prompt", Input).focus()
+
+    def action_toggle_monitor(self) -> None:
+        if isinstance(self.screen, ToolApprovalScreen):
+            return
+        self._monitor_view = (
+            "context" if self._monitor_view == "execution" else "execution"
+        )
+        self._cockpit_screen.query_one(
+            "#workspace", ContentSwitcher
+        ).current = f"{self._monitor_view}-view"
+        if self._monitor_view == "context":
+            self._refresh_context_view()
+        self._refresh_stream_title()
+        self.refresh_bindings()
         self._cockpit_screen.query_one("#prompt", Input).focus()
 
     def action_filter_all(self) -> None:
@@ -754,12 +905,39 @@ class LiveCockpitApp(App[None]):
         self.set_class(height < SHORT_TERMINAL_HEIGHT, "short")
 
     def _stream_title_text(self) -> str:
-        action = "F2 返回执行树" if self.output_expanded else "F2 展开结果"
+        monitor_label = "上下文" if self._monitor_view == "context" else "执行树"
+        action = f"F2 返回{monitor_label}" if self.output_expanded else "F2 展开结果"
         return f"AGENT STREAM  ·  {action}  ·  最近 {MAX_LIVE_OUTPUT_LINES} 行"
 
     def _refresh_stream_title(self) -> None:
         self._cockpit_screen.query_one("#stream-title", Static).update(
             self._stream_title_text()
+        )
+
+    def _refresh_context_view(self) -> None:
+        compact = self.has_class("narrow") or self.has_class("short")
+        context_panel = self._cockpit_screen.query_one("#context-panel", Vertical)
+        context_panel.border_title = (
+            f" CONTEXT · LOCAL ESTIMATE · "
+            f"{self._context_snapshot.estimated_chars:,}c / "
+            f"~{self._context_snapshot.estimated_tokens:,}t "
+            if self.has_class("short")
+            else None
+        )
+        title = (
+            "CONTEXT  ·  LOCAL ESTIMATE"
+            if compact
+            else "CONTEXT LAYERS  ·  LOCAL ESTIMATE"
+        )
+        self._cockpit_screen.query_one("#context-title", Static).update(
+            f"{title}  ·  {self._context_snapshot.estimated_chars:,}c / "
+            f"~{self._context_snapshot.estimated_tokens:,}t"
+        )
+        self._cockpit_screen.query_one("#context-layers", Static).update(
+            format_context_layers(self._context_snapshot, compact=compact)
+        )
+        self._cockpit_screen.query_one("#context-detail", Static).update(
+            format_context_detail(self._context_snapshot)
         )
 
     def _refresh_projection(self) -> None:
@@ -846,7 +1024,13 @@ class LiveCockpitApp(App[None]):
         detail.update(format_node_detail(node))
 
     def _refresh_metrics(self) -> None:
-        metrics = self._cockpit_screen.query_one("#metrics", Static)
+        if self._closed:
+            return
+        try:
+            metrics = self._cockpit_screen.query_one("#metrics", Static)
+        except NoMatches:
+            # A final timer tick may overlap Textual's child-unmount phase.
+            return
         metrics.update(
             format_metrics(
                 self._metrics,
@@ -944,6 +1128,98 @@ def visible_node_ids(
             visible.add(parent)
             parent = nodes[parent].parent_correlation_id
     return frozenset(visible)
+
+
+def format_context_layers(
+    context: ContextTomography,
+    *,
+    compact: bool = False,
+) -> Text:
+    """Render five fixed, metadata-only context layers."""
+
+    output = Text()
+    total_chars = max(context.estimated_chars, 1)
+    for index, layer in enumerate(context.layers):
+        label = _CONTEXT_LAYER_LABELS[layer.kind]
+        style = _CONTEXT_LAYER_STYLES[layer.kind]
+        output.append("◆ ", style=style)
+        output.append(f"{label:<20}" if not compact else f"{label:<15}", style=style)
+        if not compact:
+            meter_width = 10
+            filled = round(layer.chars / total_chars * meter_width)
+            output.append("━" * filled, style=style)
+            output.append("─" * (meter_width - filled), style="dim")
+            output.append(
+                f"  {layer.chars:,} c · ~{layer.estimated_tokens:,} t"
+                f" · {layer.item_count} {_CONTEXT_LAYER_UNITS[layer.kind]}",
+                style="dim" if layer.item_count == 0 else "",
+            )
+        else:
+            output.append(
+                f" {layer.chars:>7,}c · ~{layer.estimated_tokens:>6,}t",
+                style="dim" if layer.item_count == 0 else "",
+            )
+        if index < len(context.layers) - 1:
+            output.append("\n")
+    return output
+
+
+def format_context_detail(context: ContextTomography) -> Text:
+    """Render local budget semantics without presenting estimates as usage."""
+
+    detail = Text()
+    detail.append("CHARACTER SOFT BUDGET\n", style="dim")
+    detail.append_text(
+        _context_meter(
+            context.estimated_chars,
+            context.budget_chars,
+            style="#91f5e9",
+        )
+    )
+    detail.append("\nTOKEN SOFT BUDGET\n", style="dim")
+    if context.budget_tokens is None:
+        detail.append(
+            f"~{context.estimated_tokens:,} · NO LIMIT CONFIGURED\n",
+            style="#d7b7ff",
+        )
+    else:
+        detail.append_text(
+            _context_meter(
+                context.estimated_tokens,
+                context.budget_tokens,
+                style="#d7b7ff",
+            )
+        )
+        detail.append("\n")
+    detail.append("HISTORY SELECTION\n", style="dim")
+    detail.append(
+        f"KEPT {context.selected_rounds}/{context.stored_rounds} ROUNDS"
+        f" · OMITTED {context.omitted_rounds}\n",
+        style="yellow" if context.omitted_rounds else "#9ee37d",
+    )
+    current = context.layer("current_chain")
+    detail.append("CURRENT CHAIN\n", style="dim")
+    detail.append(
+        (
+            f"{current.item_count} MESSAGE · SUBMIT SNAPSHOT\n"
+            if current.item_count
+            else "IDLE · NO CURRENT MESSAGE\n"
+        ),
+        style="#68b5ff" if current.item_count else "dim",
+    )
+    detail.append("PRIVACY BOUNDARY\n", style="dim")
+    detail.append("COUNTS ONLY · NO CONTEXT TEXT", style="green")
+    return detail
+
+
+def _context_meter(value: int, total: int, *, style: str) -> Text:
+    ratio = value / max(total, 1)
+    filled = round(min(max(ratio, 0.0), 1.0) * 12)
+    meter = Text()
+    meter.append("━" * filled, style=style)
+    meter.append("─" * (12 - filled), style="dim")
+    meter.append(f" {value:,}/{total:,} · {ratio * 100:4.1f}%", style="dim")
+    return meter
 
 
 def format_node_label(node: ExecutionNode) -> Text:

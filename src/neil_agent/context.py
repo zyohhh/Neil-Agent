@@ -6,9 +6,24 @@ import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from .schemas import Message, ToolDefinition
+
+ContextLayerKind = Literal[
+    "system",
+    "tool_schemas",
+    "project_instructions",
+    "selected_history",
+    "current_chain",
+]
+CONTEXT_LAYER_ORDER: tuple[ContextLayerKind, ...] = (
+    "system",
+    "tool_schemas",
+    "project_instructions",
+    "selected_history",
+    "current_chain",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +54,62 @@ class ContextStats:
     fixed_tokens: int
     stored_message_tokens: int
     selected_message_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextLayerEstimate:
+    """One metadata-only layer in a local context estimate."""
+
+    kind: ContextLayerKind
+    chars: int
+    estimated_tokens: int
+    item_count: int
+
+    def __post_init__(self) -> None:
+        if self.kind not in CONTEXT_LAYER_ORDER:
+            raise ValueError(f"unknown context layer: {self.kind}")
+        if self.chars < 0:
+            raise ValueError("context layer chars cannot be negative")
+        if self.estimated_tokens < 0:
+            raise ValueError("context layer tokens cannot be negative")
+        if self.item_count < 0:
+            raise ValueError("context layer item count cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextTomography:
+    """Versioned local estimate containing counts but no context text."""
+
+    budget_chars: int
+    budget_tokens: int | None
+    stored_rounds: int
+    selected_rounds: int
+    omitted_rounds: int
+    layers: tuple[ContextLayerEstimate, ...]
+    schema_version: Literal[1] = field(default=1, init=False)
+
+    def __post_init__(self) -> None:
+        if self.budget_chars < 1:
+            raise ValueError("context character budget must be positive")
+        if self.budget_tokens is not None and self.budget_tokens < 1:
+            raise ValueError("context token budget must be positive")
+        if min(self.stored_rounds, self.selected_rounds, self.omitted_rounds) < 0:
+            raise ValueError("context round counts cannot be negative")
+        if self.selected_rounds + self.omitted_rounds != self.stored_rounds:
+            raise ValueError("selected and omitted rounds must equal stored rounds")
+        if tuple(layer.kind for layer in self.layers) != CONTEXT_LAYER_ORDER:
+            raise ValueError("context layers must use the canonical order exactly once")
+
+    @property
+    def estimated_chars(self) -> int:
+        return sum(layer.chars for layer in self.layers)
+
+    @property
+    def estimated_tokens(self) -> int:
+        return sum(layer.estimated_tokens for layer in self.layers)
+
+    def layer(self, kind: ContextLayerKind) -> ContextLayerEstimate:
+        return self.layers[CONTEXT_LAYER_ORDER.index(kind)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +174,69 @@ def estimate_fixed_tokens(
         "tools": [definition.to_api_dict() for definition in tools],
     }
     return estimate_text_tokens(_json_text(payload))
+
+
+def build_context_tomography(
+    *,
+    system_prompt_without_project: str,
+    system_prompt: str,
+    has_project_instructions: bool,
+    tools: Sequence[ToolDefinition],
+    selected_history: ContextSelection,
+    current_chain: Sequence[Message],
+    stored_rounds: int,
+    budget_chars: int,
+    budget_tokens: int | None,
+) -> ContextTomography:
+    """Split one local request estimate without retaining any source text."""
+
+    system_chars = estimate_fixed_chars(system_prompt_without_project, ())
+    prompt_chars = estimate_fixed_chars(system_prompt, ())
+    fixed_chars = estimate_fixed_chars(system_prompt, tools)
+    system_tokens = estimate_fixed_tokens(system_prompt_without_project, ())
+    prompt_tokens = estimate_fixed_tokens(system_prompt, ())
+    fixed_tokens = estimate_fixed_tokens(system_prompt, tools)
+    current_chars = estimate_messages_chars(current_chain)
+    current_tokens = estimate_messages_tokens(current_chain)
+    return ContextTomography(
+        budget_chars=budget_chars,
+        budget_tokens=budget_tokens,
+        stored_rounds=stored_rounds,
+        selected_rounds=selected_history.round_count,
+        omitted_rounds=selected_history.omitted_round_count,
+        layers=(
+            ContextLayerEstimate(
+                kind="system",
+                chars=system_chars,
+                estimated_tokens=system_tokens,
+                item_count=1,
+            ),
+            ContextLayerEstimate(
+                kind="tool_schemas",
+                chars=fixed_chars - prompt_chars,
+                estimated_tokens=fixed_tokens - prompt_tokens,
+                item_count=len(tools),
+            ),
+            ContextLayerEstimate(
+                kind="project_instructions",
+                chars=prompt_chars - system_chars,
+                estimated_tokens=prompt_tokens - system_tokens,
+                item_count=int(has_project_instructions),
+            ),
+            ContextLayerEstimate(
+                kind="selected_history",
+                chars=selected_history.message_chars,
+                estimated_tokens=selected_history.estimated_tokens,
+                item_count=len(selected_history.messages),
+            ),
+            ContextLayerEstimate(
+                kind="current_chain",
+                chars=current_chars,
+                estimated_tokens=current_tokens,
+                item_count=len(current_chain),
+            ),
+        ),
+    )
 
 
 def estimate_text_tokens(text: str) -> int:

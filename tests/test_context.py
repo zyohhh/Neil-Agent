@@ -2,8 +2,18 @@
 
 from collections.abc import Iterator, Sequence
 
+import pytest
+
 from neil_agent.agent import Agent
 from neil_agent.context import (
+    CONTEXT_LAYER_ORDER,
+    ContextLayerEstimate,
+    ContextTomography,
+    build_context_tomography,
+    estimate_fixed_chars,
+    estimate_fixed_tokens,
+    estimate_message_chars,
+    estimate_message_tokens,
     estimate_messages_chars,
     estimate_messages_tokens,
     estimate_text_tokens,
@@ -111,6 +121,7 @@ def test_agent_reports_and_applies_context_budget_to_previous_rounds() -> None:
     )
 
     stats = agent.context_stats()
+    tomography = agent.context_tomography("next")
     agent.chat("next")
 
     assert stats.stored_rounds == 2
@@ -121,14 +132,125 @@ def test_agent_reports_and_applies_context_budget_to_previous_rounds() -> None:
         "small",
         "next",
     ]
+    assert tomography.schema_version == 1
+    assert tomography.selected_rounds == 1
+    assert tomography.omitted_rounds == 1
+    assert tomography.layer("selected_history").item_count == 2
+    assert tomography.layer("current_chain").item_count == 1
 
 
 def test_empty_context_has_fixed_cost_but_no_history() -> None:
-    stats = Agent(ContextFakeModel(), system_prompt="short").context_stats()
+    agent = Agent(ContextFakeModel(), system_prompt="short")
+    stats = agent.context_stats()
+    tomography = agent.context_tomography()
 
     assert stats.fixed_chars > 0
     assert stats.stored_rounds == 0
     assert stats.selected_messages == 0
+    assert tomography.budget_tokens is None
+    assert tomography.layer("tool_schemas").chars == 0
+    assert tomography.layer("project_instructions").chars == 0
+    assert tomography.layer("current_chain").item_count == 0
+
+
+def test_context_tomography_is_additive_and_retains_no_source_text() -> None:
+    system = "SYSTEM-CANARY"
+    project = "PROJECT-CANARY"
+    full_system = f"{system}\n\n{project}"
+    tools = (
+        ToolDefinition(
+            name="inspect_value",
+            description="TOOL-CANARY",
+            input_schema={"type": "object", "properties": {}},
+        ),
+    )
+    history = (
+        Message(role="user", content="HISTORY-CANARY"),
+        Message(role="assistant", content="answer"),
+    )
+    selected = select_recent_rounds(
+        history,
+        max_rounds=1,
+        max_chars=10_000,
+    )
+    current = (Message(role="user", content="CURRENT-CANARY"),)
+
+    tomography = build_context_tomography(
+        system_prompt_without_project=system,
+        system_prompt=full_system,
+        has_project_instructions=True,
+        tools=tools,
+        selected_history=selected,
+        current_chain=current,
+        stored_rounds=1,
+        budget_chars=20_000,
+        budget_tokens=8_000,
+    )
+
+    assert tuple(layer.kind for layer in tomography.layers) == CONTEXT_LAYER_ORDER
+    assert tomography.estimated_chars == (
+        estimate_fixed_chars(full_system, tools)
+        + selected.message_chars
+        + estimate_message_chars(current[0])
+    )
+    assert tomography.estimated_tokens == (
+        estimate_fixed_tokens(full_system, tools)
+        + selected.estimated_tokens
+        + estimate_message_tokens(current[0])
+    )
+    assert tomography.layer("tool_schemas").item_count == 1
+    assert tomography.layer("project_instructions").item_count == 1
+    rendered_snapshot = repr(tomography)
+    for secret in (
+        "SYSTEM-CANARY",
+        "PROJECT-CANARY",
+        "TOOL-CANARY",
+        "HISTORY-CANARY",
+        "CURRENT-CANARY",
+    ):
+        assert secret not in rendered_snapshot
+
+
+def test_context_tomography_rejects_invalid_rounds_and_layer_order() -> None:
+    layers = tuple(ContextLayerEstimate(kind, 0, 0, 0) for kind in CONTEXT_LAYER_ORDER)
+
+    with pytest.raises(ValueError, match="equal stored rounds"):
+        ContextTomography(
+            budget_chars=1,
+            budget_tokens=None,
+            stored_rounds=2,
+            selected_rounds=1,
+            omitted_rounds=0,
+            layers=layers,
+        )
+
+    with pytest.raises(ValueError, match="canonical order"):
+        ContextTomography(
+            budget_chars=1,
+            budget_tokens=None,
+            stored_rounds=0,
+            selected_rounds=0,
+            omitted_rounds=0,
+            layers=tuple(reversed(layers)),
+        )
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        ContextLayerEstimate("system", -1, 0, 0)
+
+
+def test_context_tomography_normalizes_base_prompt_before_project_delta() -> None:
+    agent = Agent(
+        ContextFakeModel(),
+        system_prompt="system" + " " * 100,
+        project_instructions="project rule",
+    )
+
+    tomography = agent.context_tomography()
+
+    assert tomography.layer("project_instructions").chars > 0
+    assert tomography.layer("project_instructions").estimated_tokens > 0
+    assert tomography.estimated_chars == agent.context_stats().fixed_chars
+    assert tomography.estimated_tokens == agent.context_stats().fixed_tokens
 
 
 def test_optional_token_budget_can_be_stricter_than_character_budget() -> None:
