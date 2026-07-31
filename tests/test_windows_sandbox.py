@@ -7,6 +7,7 @@ import io
 import json
 import subprocess
 from collections.abc import Mapping
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
@@ -17,6 +18,7 @@ from xml.etree import ElementTree
 import pytest
 
 from neil_agent.sandbox import CancellationSignal
+from neil_agent.sandbox_approval import RunCommandApprovalBinding
 from neil_agent.sandbox_guest import (
     GUEST_PROTOCOL_VERSION,
     GUEST_RUNNER_SECURITY_ASSURANCE,
@@ -24,6 +26,7 @@ from neil_agent.sandbox_guest import (
     SandboxGuestRequest,
     SandboxGuestResult,
 )
+from neil_agent.sandbox_snapshot import inspect_prepared_snapshot
 from neil_agent.windows_sandbox import (
     MAX_CLI_STDERR_BYTES,
     MAX_CLI_STDOUT_BYTES,
@@ -42,6 +45,7 @@ from neil_agent.windows_sandbox import (
     WsbExecutionPlan,
     WsbHostExecutionError,
     WsbHostExecutor,
+    WsbRawObservation,
 )
 
 
@@ -56,6 +60,8 @@ class _FakeCliRunner:
         raw_result: bytes | None = None,
         interfere_before_share: bool = False,
         mutate_control_after_start: bool = False,
+        mutate_snapshot_stage: str | None = None,
+        write_result_stage: str = "exporter",
         stage_statuses: Mapping[str, str] | None = None,
     ) -> None:
         self.plan = plan
@@ -65,6 +71,8 @@ class _FakeCliRunner:
         self.raw_result = raw_result
         self.interfere_before_share = interfere_before_share
         self.mutate_control_after_start = mutate_control_after_start
+        self.mutate_snapshot_stage = mutate_snapshot_stage
+        self.write_result_stage = write_result_stage
         self.stage_statuses = dict(stage_statuses or {})
         self.calls: list[
             tuple[
@@ -115,18 +123,32 @@ class _FakeCliRunner:
         if stage == "runner" and self.interfere_before_share:
             export = self.plan.temporary_root / "export"
             (export / "external.txt").write_text("race", encoding="utf-8")
-        if stage == "exporter":
+        if stage == self.mutate_snapshot_stage:
+            snapshot_file = self.plan.snapshot_directory / "tool.exe"
+            snapshot_file.write_bytes(snapshot_file.read_bytes() + b"changed")
+        if stage == self.write_result_stage:
             export = self.plan.temporary_root / "export"
             raw = self.raw_result
             if raw is None:
                 raw = _result_bytes(self.plan, self.result_updates)
             (export / WSB_RESULT_FILENAME).write_bytes(raw)
+        if stage == "list_after_stop":
+            return WsbCliCompleted(returncode=0, stdout=b"[]")
 
-        payload: dict[str, object] = {"Id": str(self.plan.instance_id)}
+        default_statuses = {
+            "start": "Running",
+            "runner": "Succeeded",
+            "share": "Shared",
+            "exporter": "Succeeded",
+            "stop": "Stopped",
+        }
+        payload: dict[str, object] = {
+            "Id": str(self.plan.instance_id),
+            "Success": True,
+            "Status": self.stage_statuses.get(stage, default_statuses[stage]),
+        }
         if stage in {"runner", "exporter"}:
             payload["ExitCode"] = 0
-        if stage in self.stage_statuses:
-            payload["Status"] = self.stage_statuses[stage]
         return WsbCliCompleted(
             returncode=0,
             stdout=_canonical_json(payload),
@@ -135,6 +157,8 @@ class _FakeCliRunner:
 
 def _stage(argv: tuple[str, ...]) -> str:
     command = argv[1]
+    if command == "list":
+        return "list_after_stop"
     if command != "exec":
         return command
     guest_command = argv[argv.index("--command") + 1]
@@ -157,13 +181,30 @@ def _make_plan(
     control.mkdir()
     temporary_root.mkdir()
     (snapshot / "tool.exe").write_bytes(b"fixed test executable")
+    snapshot_manifest = inspect_prepared_snapshot(snapshot.resolve())
     runner = control / WSB_RUNNER_FILENAME
     runner.write_bytes(b"trusted guest runner")
+    runner_sha256 = sha256(runner.read_bytes()).hexdigest()
     instance_id = uuid4()
     run_id = uuid4()
+    approval_binding = RunCommandApprovalBinding(
+        executable="tool.exe",
+        argv=("--version",),
+        snapshot_manifest_sha256=snapshot_manifest.digest,
+        runner_source_sha256="d" * 64,
+        runner_binary_sha256=runner_sha256,
+        timeout_ms=30_000,
+        max_output_bytes=128_000,
+        active_process_limit=4,
+        process_memory_bytes=64 * 1024 * 1024,
+        job_memory_bytes=128 * 1024 * 1024,
+    )
     request = SandboxGuestRequest.create(
         run_id=run_id.hex,
         instance_id=instance_id.hex,
+        snapshot_manifest_sha256=snapshot_manifest.digest,
+        runner_source_sha256="d" * 64,
+        approval_binding_sha256=approval_binding.digest,
         executable="tool.exe",
         argv=("--version",),
         timeout_ms=30_000,
@@ -180,7 +221,11 @@ def _make_plan(
         snapshot_directory=snapshot.resolve(),
         control_directory=control.resolve(),
         temporary_root=temporary_root.resolve(),
-        runner_sha256=sha256(runner.read_bytes()).hexdigest(),
+        snapshot_manifest_sha256=snapshot_manifest.digest,
+        runner_source_sha256=request.runner_source_sha256,
+        runner_sha256=runner_sha256,
+        approval_binding_version=request.approval_binding_version,
+        approval_binding_sha256=approval_binding.digest,
         timeout_seconds=30,
     )
     return wsb, plan, request
@@ -246,10 +291,14 @@ def test_executor_uses_safe_two_phase_share_and_always_stops(
         "share",
         "exporter",
         "stop",
+        "list_after_stop",
     ]
     for argv, _, stdout_limit, stderr_limit, environment, _ in runner.calls:
         assert argv[0] == str(wsb.resolve())
-        assert argv[argv.index("--id") + 1] == str(plan.instance_id)
+        if _stage(argv) == "list_after_stop":
+            assert argv == (str(wsb.resolve()), "list", "--raw")
+        else:
+            assert argv[argv.index("--id") + 1] == str(plan.instance_id)
         assert argv[-1] == "--raw"
         assert stdout_limit == MAX_CLI_STDOUT_BYTES
         assert stderr_limit == MAX_CLI_STDERR_BYTES
@@ -306,7 +355,7 @@ def test_every_host_stage_failure_still_stops(
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
     stages = [_stage(call[0]) for call in runner.calls]
-    assert stages[-1] == "stop"
+    assert stages[-2:] == ["stop", "list_after_stop"]
     assert stages.count("stop") == 1
 
 
@@ -325,6 +374,7 @@ def test_runner_termination_is_fail_closed_and_stops(
         "start",
         "runner",
         "stop",
+        "list_after_stop",
     ]
     assert runner.calls[-1][-1] is None
 
@@ -349,6 +399,159 @@ def test_stop_failure_rejects_an_otherwise_valid_result(tmp_path: Path) -> None:
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
 
+def test_result_is_not_read_until_explicit_stop_succeeds(tmp_path: Path) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+    runner = _FakeCliRunner(plan, write_result_stage="stop")
+
+    result = WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
+
+    assert result.status == "exited"
+    assert [_stage(call[0]) for call in runner.calls][-3:] == [
+        "exporter",
+        "stop",
+        "list_after_stop",
+    ]
+
+
+def test_stop_confirmation_polls_until_instance_is_absent(tmp_path: Path) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+
+    class DelayedListRunner(_FakeCliRunner):
+        list_calls = 0
+
+        def run(self, *args: Any, **kwargs: Any) -> WsbCliCompleted:
+            completed = super().run(*args, **kwargs)
+            if _stage(args[0]) != "list_after_stop":
+                return completed
+            self.list_calls += 1
+            if self.list_calls == 1:
+                return WsbCliCompleted(
+                    returncode=0,
+                    stdout=_canonical_json(
+                        [{"Id": str(plan.instance_id), "Status": "Stopped"}]
+                    ),
+                )
+            return completed
+
+    runner = DelayedListRunner(plan)
+    result = WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
+
+    assert result.status == "exited"
+    assert runner.list_calls == 2
+
+
+def test_list_after_stop_requires_an_audited_collection_schema(
+    tmp_path: Path,
+) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+
+    class AmbiguousListRunner(_FakeCliRunner):
+        def run(self, *args: Any, **kwargs: Any) -> WsbCliCompleted:
+            completed = super().run(*args, **kwargs)
+            if _stage(args[0]) == "list_after_stop":
+                return WsbCliCompleted(
+                    returncode=0,
+                    stdout=_canonical_json({"Success": True}),
+                )
+            return completed
+
+    with pytest.raises(WsbHostExecutionError, match="stop"):
+        WsbHostExecutor(wsb, cli_runner=AmbiguousListRunner(plan)).execute(plan)
+
+
+def test_list_after_stop_rejects_ambiguous_or_nonterminal_wrapper(
+    tmp_path: Path,
+) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+
+    class ContradictoryListRunner(_FakeCliRunner):
+        def run(self, *args: Any, **kwargs: Any) -> WsbCliCompleted:
+            completed = super().run(*args, **kwargs)
+            if _stage(args[0]) == "list_after_stop":
+                return WsbCliCompleted(
+                    returncode=0,
+                    stdout=_canonical_json(
+                        {
+                            "WindowsSandboxEnvironments": [],
+                            "Success": True,
+                            "Status": "Running",
+                            "State": "Failed",
+                        }
+                    ),
+                )
+            return completed
+
+    with pytest.raises(WsbHostExecutionError, match="stop"):
+        WsbHostExecutor(wsb, cli_runner=ContradictoryListRunner(plan)).execute(plan)
+
+
+def test_raw_observer_receives_every_bounded_response_before_parsing(
+    tmp_path: Path,
+) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+    runner = _FakeCliRunner(plan)
+    observations: list[WsbRawObservation] = []
+
+    result = WsbHostExecutor(
+        wsb,
+        cli_runner=runner,
+        raw_observer=observations.append,
+    ).execute(plan)
+
+    assert result.status == "exited"
+    assert [observation.stage for observation in observations] == [
+        "start",
+        "runner",
+        "share",
+        "exporter",
+        "stop",
+        "list_after_stop",
+    ]
+    assert [observation.argv for observation in observations] == [
+        call[0] for call in runner.calls
+    ]
+    assert {observation.instance_id for observation in observations} == {
+        plan.instance_id
+    }
+    assert {observation.run_id for observation in observations} == {plan.run_id}
+    assert {observation.request_hash for observation in observations} == {
+        plan.request_hash
+    }
+    assert all(observation.completed.stdout for observation in observations[:-1])
+    assert observations[-1].completed.stdout == b"[]"
+
+
+@pytest.mark.parametrize("missing_field", ["Success", "Status"])
+def test_raw_schema_requires_explicit_success_and_state(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+
+    class MissingFieldRunner(_FakeCliRunner):
+        def run(self, *args: Any, **kwargs: Any) -> WsbCliCompleted:
+            completed = super().run(*args, **kwargs)
+            if _stage(args[0]) != "start":
+                return completed
+            payload = {
+                "Id": str(plan.instance_id),
+                "Success": True,
+                "Status": "Running",
+            }
+            del payload[missing_field]
+            return WsbCliCompleted(returncode=0, stdout=_canonical_json(payload))
+
+    runner = MissingFieldRunner(plan)
+    with pytest.raises(WsbHostExecutionError, match="schema"):
+        WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
+
+    assert [_stage(call[0]) for call in runner.calls] == [
+        "start",
+        "stop",
+        "list_after_stop",
+    ]
+
+
 def test_stage_specific_raw_statuses_accept_consistent_states(tmp_path: Path) -> None:
     wsb, plan, _ = _make_plan(tmp_path)
     runner = _FakeCliRunner(
@@ -371,6 +574,7 @@ def test_stage_specific_raw_statuses_accept_consistent_states(tmp_path: Path) ->
         "share",
         "exporter",
         "stop",
+        "list_after_stop",
     ]
 
 
@@ -401,7 +605,10 @@ def test_explicitly_contradictory_raw_status_fails_closed(
     else:
         assert "矛盾" in str(caught.value)
     stages = [_stage(call[0]) for call in runner.calls]
-    assert stages[-1] == "stop"
+    if stage == "stop":
+        assert stages[-1] == "stop"
+    else:
+        assert stages[-2:] == ["stop", "list_after_stop"]
     assert stages.count("stop") == 1
 
 
@@ -425,7 +632,10 @@ def test_exported_result_must_match_every_binding(
     with pytest.raises(WsbHostExecutionError):
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
-    assert _stage(runner.calls[-1][0]) == "stop"
+    assert [_stage(call[0]) for call in runner.calls][-2:] == [
+        "stop",
+        "list_after_stop",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -452,7 +662,10 @@ def test_invalid_or_oversized_guest_json_is_rejected_and_stopped(
     with pytest.raises(WsbHostExecutionError):
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
-    assert _stage(runner.calls[-1][0]) == "stop"
+    assert [_stage(call[0]) for call in runner.calls][-2:] == [
+        "stop",
+        "list_after_stop",
+    ]
 
 
 def test_writable_export_is_not_shared_if_runner_did_not_leave_it_empty(
@@ -468,6 +681,7 @@ def test_writable_export_is_not_shared_if_runner_did_not_leave_it_empty(
         "start",
         "runner",
         "stop",
+        "list_after_stop",
     ]
 
 
@@ -493,6 +707,87 @@ def test_changed_runner_is_rejected_before_start(tmp_path: Path) -> None:
     assert runner.calls == []
 
 
+def test_execution_plan_rejects_boolean_approval_versions(tmp_path: Path) -> None:
+    _, plan, _ = _make_plan(tmp_path)
+
+    with pytest.raises(ValueError, match="approval binding version"):
+        replace(plan, approval_binding_version=True)  # type: ignore[arg-type]
+
+
+def test_approval_digest_is_recomputed_from_actual_guest_semantics(
+    tmp_path: Path,
+) -> None:
+    wsb, plan, request = _make_plan(tmp_path)
+    forged = SandboxGuestRequest.create(
+        run_id=request.run_id,
+        instance_id=request.instance_id,
+        snapshot_manifest_sha256=request.snapshot_manifest_sha256,
+        runner_source_sha256=request.runner_source_sha256,
+        approval_binding_sha256=request.approval_binding_sha256,
+        executable=request.executable,
+        argv=("--different-command",),
+        cwd=request.cwd,
+        environment=request.environment,
+        timeout_ms=request.timeout_ms,
+        max_output_bytes=request.max_output_bytes,
+        active_process_limit=request.active_process_limit,
+        process_memory_bytes=request.process_memory_bytes,
+        job_memory_bytes=request.job_memory_bytes,
+    )
+    (plan.control_directory / WSB_REQUEST_FILENAME).write_bytes(
+        forged.canonical_bytes()
+    )
+    forged_plan = replace(plan, request_hash=forged.request_hash)
+    runner = _FakeCliRunner(forged_plan)
+
+    with pytest.raises(WsbHostExecutionError, match="binding"):
+        WsbHostExecutor(wsb, cli_runner=runner).execute(forged_plan)
+
+    assert runner.calls == []
+
+
+def test_changed_snapshot_manifest_is_rejected_before_start(tmp_path: Path) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+    (plan.snapshot_directory / "tool.exe").write_bytes(b"replaced")
+    runner = _FakeCliRunner(plan)
+
+    with pytest.raises(WsbHostExecutionError, match="manifest"):
+        WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_stages"),
+    [
+        ("runner", ["start", "runner", "stop", "list_after_stop"]),
+        (
+            "stop",
+            [
+                "start",
+                "runner",
+                "share",
+                "exporter",
+                "stop",
+                "list_after_stop",
+            ],
+        ),
+    ],
+)
+def test_snapshot_mutation_during_execution_is_rejected(
+    tmp_path: Path,
+    stage: str,
+    expected_stages: list[str],
+) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+    runner = _FakeCliRunner(plan, mutate_snapshot_stage=stage)
+
+    with pytest.raises(WsbHostExecutionError, match="manifest"):
+        WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
+
+    assert [_stage(call[0]) for call in runner.calls] == expected_stages
+
+
 def test_noncanonical_or_changed_request_is_rejected_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -502,7 +797,11 @@ def test_noncanonical_or_changed_request_is_rejected_fail_closed(
     with pytest.raises(WsbHostExecutionError, match="request"):
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
-    assert [_stage(call[0]) for call in runner.calls] == ["start", "stop"]
+    assert [_stage(call[0]) for call in runner.calls] == [
+        "start",
+        "stop",
+        "list_after_stop",
+    ]
 
 
 def test_snapshot_symlink_is_rejected_before_start(tmp_path: Path) -> None:
@@ -533,7 +832,13 @@ def test_cli_response_must_be_bounded_json_bound_to_explicit_instance(
             if _stage(args[0]) == "start":
                 return WsbCliCompleted(
                     returncode=0,
-                    stdout=_canonical_json({"Id": str(uuid4())}),
+                    stdout=_canonical_json(
+                        {
+                            "Id": str(uuid4()),
+                            "Success": True,
+                            "Status": "Running",
+                        }
+                    ),
                 )
             return completed
 
@@ -541,7 +846,11 @@ def test_cli_response_must_be_bounded_json_bound_to_explicit_instance(
     with pytest.raises(WsbHostExecutionError, match="实例绑定"):
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
-    assert [_stage(call[0]) for call in runner.calls] == ["start", "stop"]
+    assert [_stage(call[0]) for call in runner.calls] == [
+        "start",
+        "stop",
+        "list_after_stop",
+    ]
 
 
 def test_gui_executable_is_never_accepted_as_the_wsb_cli(tmp_path: Path) -> None:

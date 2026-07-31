@@ -34,6 +34,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       SANDBOX_REQUIRED: "1"
+      SANDBOX_EVIDENCE_REQUIRED: "1"
     steps:
       - name: Check out the reviewed revision
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -47,28 +48,180 @@ jobs:
           version: "0.11.16"
           enable-cache: false
 
-      - name: Synchronize locked dependencies
-        run: uv sync --frozen --dev
-
-      - name: Run the mandatory Windows Sandbox security suite
+      - name: Run and collect three mandatory evidence repeats
+        id: collect
         shell: pwsh
         run: |
-          $report = Join-Path $env:RUNNER_TEMP "windows-sandbox-security.junit.xml"
-          uv run --frozen pytest -q --junitxml="$report" `
-            tests/test_windows_sandbox_security.py `
-            tests/test_sandbox_guest.py::test_real_runner_reclassifies_fast_flood_after_child_exit `
-            tests/test_sandbox_snapshot.py::test_windows_directory_guard_blocks_real_junction_replacement
-          $pytestExitCode = $LASTEXITCODE
-          if ($pytestExitCode -ne 0) {
-            exit $pytestExitCode
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          $bundleNonce = [Guid]::NewGuid().ToString("N").ToLowerInvariant()
+          $bundleName = (
+            "windows-sandbox-evidence-" +
+            "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$bundleNonce"
+          )
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP $bundleName
+          $buildRoot = Join-Path $evidenceRoot "build"
+          $venvRoot = Join-Path $env:RUNNER_TEMP "neil-agent-venv-$bundleNonce"
+          New-Item -ItemType Directory -Path $evidenceRoot -ErrorAction Stop |
+            Out-Null
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 `
+            -Value "evidence_root=$evidenceRoot"
+          New-Item -ItemType Directory -Path $buildRoot -ErrorAction Stop |
+            Out-Null
+          if (Test-Path -LiteralPath $venvRoot) {
+            throw "The evidence virtual environment must be new."
+          }
+          $env:UV_PROJECT_ENVIRONMENT = $venvRoot
+          uv sync --frozen --dev --no-install-project
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
           }
 
-          [xml]$junit = Get-Content -LiteralPath $report -Raw
-          $skipped = @($junit.SelectNodes("//testcase/skipped"))
-          if ($skipped.Count -ne 0) {
-            Write-Error (
-              "Mandatory Windows Sandbox security suite skipped " +
-              "$($skipped.Count) selected test(s)."
-            )
+          $env:SANDBOX_EVIDENCE_ROOT = $evidenceRoot
+          $env:SANDBOX_EVIDENCE_BUILD_ROOT = $buildRoot
+          $env:SANDBOX_EVIDENCE_PLATFORM_JSON = Join-Path $evidenceRoot "platform.json"
+          $env:SANDBOX_EVIDENCE_SUBJECT_JSON = Join-Path $evidenceRoot "subject.json"
+
+          $wheelRoot = Join-Path $buildRoot "wheel"
+          New-Item -ItemType Directory -Path $wheelRoot | Out-Null
+          uv build --wheel --offline --out-dir $wheelRoot
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $wheels = @(Get-ChildItem -LiteralPath $wheelRoot -Filter "*.whl" -File)
+          if ($wheels.Count -ne 1) {
+            Write-Error "Exactly one reviewed wheel must be built for evidence."
             exit 1
           }
+          $env:SANDBOX_EVIDENCE_WHEEL = $wheels[0].FullName
+          $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+          uv pip install --python $venvPython --offline --no-deps `
+            $env:SANDBOX_EVIDENCE_WHEEL
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $installedModule = (
+            & $venvPython -I -c (
+              "import neil_agent; " +
+              "print(neil_agent.__file__)"
+            )
+          )
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $sitePackages = (
+            Resolve-Path -LiteralPath (Join-Path $venvRoot "Lib\site-packages")
+          ).Path.TrimEnd("\") + "\"
+          $installedModulePath = (
+            Resolve-Path -LiteralPath $installedModule.Trim()
+          ).Path
+          if (-not $installedModulePath.StartsWith(
+            $sitePackages,
+            [StringComparison]::OrdinalIgnoreCase
+          )) {
+            Write-Error "Security tests must import neil-agent from the built wheel."
+            exit 1
+          }
+
+          $manifest = Join-Path $evidenceRoot "required-tests.json"
+          & $venvPython -I -m neil_agent.sandbox_evidence manifest `
+            --output $manifest
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $overallFailure = $false
+          $runFiles = @()
+          foreach ($repeat in 1..3) {
+            $repeatId = "repeat-$repeat"
+            $repeatRoot = Join-Path $evidenceRoot $repeatId
+            New-Item -ItemType Directory -Path $repeatRoot | Out-Null
+            $junit = Join-Path $repeatRoot "junit.xml"
+            $schema = Join-Path $repeatRoot "cli-schema.json"
+            $raw = Join-Path $repeatRoot "cli-raw.jsonl"
+            $runEvidence = Join-Path $repeatRoot "evidence-run.json"
+            $nonce = [Guid]::NewGuid().ToString("N").ToLowerInvariant()
+            $startedAt = [DateTimeOffset]::UtcNow.ToString("o")
+
+            # The security fixture must use RawObservationRecorder to append
+            # exact bounded wsb.exe responses to this JSONL file. The evidence
+            # CLI derives the schema; tests must never synthesize schema JSON.
+            $env:SANDBOX_EVIDENCE_REPEAT_ID = $repeatId
+            $env:SANDBOX_EVIDENCE_EXECUTION_NONCE = $nonce
+            $env:SANDBOX_EVIDENCE_RAW_JSONL = $raw
+
+            & $venvPython -I -m pytest -q --strict-config --strict-markers `
+              --import-mode=importlib -o xfail_strict=true --junitxml="$junit" `
+              tests/test_windows_sandbox_security.py `
+              tests/test_sandbox_guest.py::test_real_runner_reclassifies_fast_flood_after_child_exit `
+              tests/test_sandbox_snapshot.py::test_windows_directory_guard_blocks_real_junction_replacement
+            $pytestExitCode = $LASTEXITCODE
+            $finishedAt = [DateTimeOffset]::UtcNow.ToString("o")
+            if ($pytestExitCode -ne 0) {
+              $overallFailure = $true
+            }
+
+            & $venvPython -I -m neil_agent.sandbox_evidence schema `
+              --raw-jsonl $raw `
+              --output $schema
+            if ($LASTEXITCODE -ne 0) {
+              $overallFailure = $true
+            }
+
+            & $venvPython -I -m neil_agent.sandbox_evidence collect `
+              --repeat-id $repeatId `
+              --execution-nonce $nonce `
+              --producer-id "github-actions:$env:GITHUB_REPOSITORY" `
+              --workflow-run-id $env:GITHUB_RUN_ID `
+              --workflow-attempt $env:GITHUB_RUN_ATTEMPT `
+              --started-at $startedAt `
+              --finished-at $finishedAt `
+              --platform $env:SANDBOX_EVIDENCE_PLATFORM_JSON `
+              --subject $env:SANDBOX_EVIDENCE_SUBJECT_JSON `
+              --schema $schema `
+              --junit $junit `
+              --pytest-exit-code $pytestExitCode `
+              --output $runEvidence
+            if ($LASTEXITCODE -ne 0) {
+              $overallFailure = $true
+            }
+            elseif (Test-Path -LiteralPath $runEvidence -PathType Leaf) {
+              $runFiles += $runEvidence
+            }
+          }
+
+          $aggregate = Join-Path $evidenceRoot "aggregate.json"
+          if ($runFiles.Count -eq 3) {
+            $verifyArguments = @(
+              "-I",
+              "-m",
+              "neil_agent.sandbox_evidence",
+              "verify"
+            )
+            foreach ($runFile in $runFiles) {
+              $verifyArguments += @("--run", $runFile)
+            }
+            $verifyArguments += @("--output", $aggregate)
+            & $venvPython @verifyArguments
+            if ($LASTEXITCODE -ne 0) {
+              $overallFailure = $true
+            }
+          }
+          else {
+            Write-Error "Exactly three canonical evidence runs are required."
+            $overallFailure = $true
+          }
+
+          if ($overallFailure) {
+            exit 1
+          }
+
+      - name: Upload the complete evidence bundle
+        if: always() && steps.collect.outputs.evidence_root != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-sandbox-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.collect.outputs.evidence_root }}
+          if-no-files-found: error
+          retention-days: 90

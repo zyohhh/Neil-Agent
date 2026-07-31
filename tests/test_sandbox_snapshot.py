@@ -14,6 +14,7 @@ from neil_agent import sandbox_snapshot as snapshot_module
 from neil_agent.errors import SandboxError
 from neil_agent.sandbox_snapshot import (
     SnapshotLimits,
+    inspect_prepared_snapshot,
     prepare_snapshot,
 )
 
@@ -100,6 +101,63 @@ def test_manifest_digest_is_stable_across_destinations_and_creation_order(
     finally:
         first.close()
         second.close()
+
+
+def test_prepared_snapshot_reinspection_reproduces_manifest(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "README.md").write_text("snapshot\n", encoding="utf-8")
+    (source / "src" / "app.py").write_text("print('safe')\n", encoding="utf-8")
+
+    prepared = prepare_snapshot(
+        source.resolve(),
+        (tmp_path / "snapshot").resolve(),
+    )
+    try:
+        inspected = inspect_prepared_snapshot(prepared.root)
+        assert inspected == prepared.manifest
+        assert inspected.canonical_json == prepared.manifest.canonical_json
+        assert inspected.digest == prepared.manifest.digest
+    finally:
+        prepared.close()
+
+
+def test_prepared_snapshot_reinspection_observes_content_change(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("before\n", encoding="utf-8")
+
+    prepared = prepare_snapshot(
+        source.resolve(),
+        (tmp_path / "snapshot").resolve(),
+    )
+    try:
+        (prepared.root / "app.py").write_text("after\n", encoding="utf-8")
+        inspected = inspect_prepared_snapshot(prepared.root)
+        assert inspected.digest != prepared.manifest.digest
+    finally:
+        prepared.close()
+
+
+def test_prepared_snapshot_reinspection_rejects_late_sensitive_file(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("safe\n", encoding="utf-8")
+
+    prepared = prepare_snapshot(
+        source.resolve(),
+        (tmp_path / "snapshot").resolve(),
+    )
+    try:
+        (prepared.root / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+        with pytest.raises(SandboxError, match="敏感"):
+            inspect_prepared_snapshot(prepared.root)
+    finally:
+        prepared.close()
 
 
 @pytest.mark.parametrize("directory_name", SENSITIVE_DIRECTORIES)

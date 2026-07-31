@@ -13,8 +13,8 @@ using Microsoft.Win32.SafeHandles;
 
 internal static class SandboxGuestRunner
 {
-    private const int ProtocolVersion = 1;
-    private const int RunnerVersion = 1;
+    private const int ProtocolVersion = 2;
+    private const int RunnerVersion = 2;
     private const string SecurityAssurance = "candidate-job-only-not-certified";
 
     private const string ControlRoot = @"C:\NeilAgent\Control";
@@ -1080,6 +1080,10 @@ internal static class SandboxGuestRunner
         internal string RunId;
         internal string RequestHash;
         internal string InstanceId;
+        internal string SnapshotManifestSha256;
+        internal string RunnerSourceSha256;
+        internal int ApprovalBindingVersion;
+        internal string ApprovalBindingSha256;
         internal string Executable;
         internal List<string> Arguments;
         internal string Cwd;
@@ -1105,6 +1109,10 @@ internal static class SandboxGuestRunner
                     "run_id",
                     "request_hash",
                     "instance_id",
+                    "snapshot_manifest_sha256",
+                    "runner_source_sha256",
+                    "approval_binding_version",
+                    "approval_binding_sha256",
                     "executable",
                     "argv",
                     "cwd",
@@ -1128,6 +1136,18 @@ internal static class SandboxGuestRunner
             request.RunId = RequireHex(root["run_id"], 32);
             request.RequestHash = RequireHex(root["request_hash"], 64);
             request.InstanceId = RequireHex(root["instance_id"], 32);
+            request.SnapshotManifestSha256 =
+                RequireHex(root["snapshot_manifest_sha256"], 64);
+            request.RunnerSourceSha256 =
+                RequireHex(root["runner_source_sha256"], 64);
+            request.ApprovalBindingVersion =
+                RequireInt(root["approval_binding_version"]);
+            if (request.ApprovalBindingVersion != 1)
+            {
+                throw new InvalidDataException("approval binding version rejected");
+            }
+            request.ApprovalBindingSha256 =
+                RequireHex(root["approval_binding_sha256"], 64);
             request.Executable = RequireString(root["executable"]);
             ValidateRelativePath(request.Executable, false);
             if (!request.Executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))

@@ -53,6 +53,9 @@ def _request(**updates: object) -> SandboxGuestRequest:
     values: dict[str, object] = {
         "run_id": RUN_ID,
         "instance_id": INSTANCE_ID,
+        "snapshot_manifest_sha256": "c" * 64,
+        "runner_source_sha256": "d" * 64,
+        "approval_binding_sha256": "e" * 64,
         "executable": r"bin\worker.exe",
         "argv": (r'quoted "value"', r"trailing\\"),
         "cwd": "workspace",

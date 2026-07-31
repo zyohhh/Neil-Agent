@@ -476,6 +476,161 @@ def prepare_snapshot(
         raise error
 
 
+def inspect_prepared_snapshot(
+    root: Path,
+    *,
+    limits: SnapshotLimits | None = None,
+) -> SnapshotManifest:
+    """Rebuild a manifest from an existing snapshot without following links.
+
+    This is intentionally stricter than the source filter: a sensitive name
+    appearing after preparation is rejected instead of silently omitted.
+    """
+
+    if not isinstance(root, Path) or not root.is_absolute():
+        raise ValueError("prepared snapshot root must be an absolute Path")
+    effective_limits = SnapshotLimits() if limits is None else limits
+    if not isinstance(effective_limits, SnapshotLimits):
+        raise ValueError("snapshot limits must be SnapshotLimits")
+    try:
+        resolved = root.resolve(strict=True)
+        metadata = resolved.lstat()
+    except OSError as error:
+        raise SandboxError("无法访问待复核的工作区快照。") from error
+    if (
+        resolved != root
+        or resolved.parent == resolved
+        or not stat.S_ISDIR(metadata.st_mode)
+        or _path_has_reparse_component(resolved)
+    ):
+        raise SandboxError("待复核快照必须是真实、无重解析点的绝对非根目录。")
+
+    state = _BuildState(limits=effective_limits, entries=[])
+    _inspect_snapshot_directory(resolved, PurePosixPath("."), state)
+    return _build_manifest(state)
+
+
+def _inspect_snapshot_directory(
+    directory: Path,
+    relative: PurePosixPath,
+    state: _BuildState,
+    *,
+    windows_api: _WindowsSnapshotApi | None = None,
+) -> None:
+    if os.name == "nt" or windows_api is not None:
+        with _WindowsDirectoryGuard(directory, api=windows_api):
+            _inspect_snapshot_directory_contents(
+                directory,
+                relative,
+                state,
+                windows_api=windows_api,
+            )
+        return
+    _inspect_snapshot_directory_contents(
+        directory,
+        relative,
+        state,
+        windows_api=None,
+    )
+
+
+def _inspect_snapshot_directory_contents(
+    directory: Path,
+    relative: PurePosixPath,
+    state: _BuildState,
+    *,
+    windows_api: _WindowsSnapshotApi | None,
+) -> None:
+    before_metadata = _safe_lstat(directory, "无法读取待复核快照目录元数据。")
+    if not stat.S_ISDIR(before_metadata.st_mode) or _is_reparse(directory):
+        raise SandboxError("待复核快照目录发生类型变化。")
+    before_names = _directory_names(directory)
+
+    for name in before_names:
+        path = directory / name
+        metadata = _safe_lstat(path, "待复核快照条目消失或不可读取。")
+        is_directory = stat.S_ISDIR(metadata.st_mode)
+        if (
+            _metadata_is_reparse(metadata)
+            or path.is_symlink()
+            or _is_filtered_name(name, is_directory=is_directory)
+        ):
+            raise SandboxError("待复核快照包含敏感名称、链接或重解析点。")
+        relative_path = (
+            PurePosixPath(name) if relative == PurePosixPath(".") else relative / name
+        )
+        relative_text = relative_path.as_posix()
+        if is_directory:
+            state.account_directory(relative_text)
+            _inspect_snapshot_directory(
+                path,
+                relative_path,
+                state,
+                windows_api=windows_api,
+            )
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SandboxError("待复核快照只接受普通文件和目录。")
+        state.validate_file_capacity(metadata.st_size)
+        size_bytes, digest = _inspect_snapshot_file(
+            path,
+            metadata,
+            state.limits,
+        )
+        state.account_file(relative_text, size_bytes, digest)
+
+    after_names = _directory_names(directory)
+    after_metadata = _safe_lstat(directory, "无法复核快照目录元数据。")
+    if before_names != after_names or not _same_metadata(
+        before_metadata,
+        after_metadata,
+    ):
+        raise SandboxError("待复核快照目录在扫描期间发生变化。")
+
+
+def _inspect_snapshot_file(
+    path: Path,
+    before_metadata: os.stat_result,
+    limits: SnapshotLimits,
+) -> tuple[int, str]:
+    descriptor = _open_source_no_follow(path)
+    try:
+        opened_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_metadata.st_mode)
+            or opened_metadata.st_nlink != 1
+            or not os.path.samestat(before_metadata, opened_metadata)
+            or not _same_metadata(before_metadata, opened_metadata)
+        ):
+            raise SandboxError("待复核快照文件在打开前发生替换或变化。")
+        digest = hashlib.sha256()
+        size_bytes = 0
+        while True:
+            chunk = os.read(descriptor, COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            size_bytes += len(chunk)
+            if (
+                size_bytes > opened_metadata.st_size
+                or size_bytes > limits.max_file_bytes
+            ):
+                raise SandboxError("待复核快照文件增长或超过上限。")
+            digest.update(chunk)
+        handle_after = os.fstat(descriptor)
+        path_after = _safe_lstat(path, "待复核快照文件在扫描后消失。")
+        if (
+            size_bytes != opened_metadata.st_size
+            or not os.path.samestat(opened_metadata, handle_after)
+            or not os.path.samestat(opened_metadata, path_after)
+            or not _same_metadata(opened_metadata, handle_after)
+            or not _same_metadata(opened_metadata, path_after)
+        ):
+            raise SandboxError("待复核快照文件在扫描期间发生变化。")
+        return size_bytes, digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
 def _validate_roots(source_root: Path, destination: Path) -> tuple[Path, Path]:
     if not isinstance(source_root, Path) or not isinstance(destination, Path):
         raise ValueError("snapshot source and destination must be Paths")

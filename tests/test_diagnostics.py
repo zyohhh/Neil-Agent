@@ -8,7 +8,11 @@ from neil_agent.audit import AUDIT_LOCK_FILENAME, JsonlAuditSink, _AuditFileLock
 from neil_agent.config import Settings
 from neil_agent.diagnostics import run_diagnostics
 from neil_agent.errors import ToolError
-from neil_agent.sandbox import SandboxCapabilities, WindowsSandboxBackend
+from neil_agent.sandbox import (
+    SandboxCapabilities,
+    SandboxCertification,
+    WindowsSandboxBackend,
+)
 from neil_agent.session import SessionStore
 from neil_agent.tools.shell import ShellTools
 
@@ -19,6 +23,21 @@ def _settings(tmp_path: Path, **updates: object) -> Settings:
         deepseek_api_key="top-secret-key",
         workspace_root=tmp_path,
         **updates,
+    )
+
+
+def _sandbox_certification() -> SandboxCertification:
+    return SandboxCertification(
+        backend="windows-sandbox",
+        git_commit_sha="1" * 40,
+        evidence_sha256="2" * 64,
+        independent_review_sha256="3" * 64,
+        executable_sha256="4" * 64,
+        runner_source_sha256="5" * 64,
+        runner_binary_sha256="6" * 64,
+        policy_version=1,
+        protocol_version=1,
+        required_gate_ids=("network-deny", "process-tree", "result-integrity"),
     )
 
 
@@ -82,7 +101,6 @@ def test_doctor_reports_an_unavailable_enabled_sandbox_as_an_error(
     capabilities = SandboxCapabilities(
         backend="windows-sandbox",
         available=False,
-        ready=False,
         reason_code="executable_not_found",
         summary="未找到 Windows Sandbox。",
     )
@@ -115,10 +133,9 @@ def test_doctor_rejects_incomplete_sandbox_capabilities_without_leaking_paths(
     capabilities = SandboxCapabilities(
         backend="windows-sandbox",
         available=True,
-        ready=False,
-        reason_code="execution_channel_unavailable",
-        summary=f"执行通道尚未完成：{secret}",
-        executable=tmp_path / secret / "WindowsSandbox.exe",
+        reason_code="certification_required",
+        summary=f"尚未获得认证证据：{secret}",
+        executable=tmp_path / secret / "wsb.exe",
         workspace_modes=("none", "read-only-snapshot"),
         network_modes=("deny",),
     )
@@ -139,6 +156,8 @@ def test_doctor_rejects_incomplete_sandbox_capabilities_without_leaking_paths(
     assert sandbox_check.status == "error"
     assert sandbox_check.summary == "Windows Sandbox 能力不完整"
     assert "取消=缺失" in repr(sandbox_check)
+    assert "认证证据：缺失" in repr(sandbox_check)
+    assert "certification_required" in repr(sandbox_check)
     assert secret not in repr(sandbox_check)
 
 
@@ -151,10 +170,10 @@ def test_doctor_accepts_only_a_complete_fail_closed_sandbox(
     capabilities = SandboxCapabilities(
         backend="windows-sandbox",
         available=True,
-        ready=True,
         reason_code="ready",
         summary="全部安全门禁可用。",
-        executable=tmp_path / "WindowsSandbox.exe",
+        executable=tmp_path / "wsb.exe",
+        certification=_sandbox_certification(),
         workspace_modes=("read-only-snapshot",),
         network_modes=("deny",),
         supports_cancellation=True,
@@ -180,6 +199,7 @@ def test_doctor_accepts_only_a_complete_fail_closed_sandbox(
     assert sandbox_check.status == "ok"
     assert sandbox_check.summary == "Windows Sandbox 已就绪"
     assert "网络模式：deny" in repr(sandbox_check)
+    assert "认证证据：已验证并绑定" in repr(sandbox_check)
 
 
 def test_doctor_warns_for_insecure_endpoint_corrupt_session_and_missing_git(

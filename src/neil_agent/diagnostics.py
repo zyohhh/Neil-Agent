@@ -18,6 +18,8 @@ DiagnosticStatus = Literal["ok", "warning", "error"]
 _SANDBOX_REASON_SUMMARIES = {
     "unsupported_platform": "当前平台不支持所选后端",
     "executable_not_found": "未找到 Windows Sandbox 可执行文件",
+    "cli_executable_required": "缺少可认证的 Windows Sandbox CLI",
+    "certification_required": "缺少匹配当前构建的安全认证证据",
     "execution_channel_unavailable": "受控执行与结果回传通道尚未就绪",
     "ready": "全部强制安全门禁已就绪",
 }
@@ -149,6 +151,8 @@ def _check_sandbox(settings: Settings) -> DiagnosticCheck:
             f"后端：{settings.sandbox_backend}",
             f"探测结果：{_SANDBOX_REASON_SUMMARIES.get(reason_code, '未知状态')}",
             f"原因代码：{reason_code}",
+            "认证证据："
+            f"{'已验证并绑定' if capabilities.certification is not None else '缺失'}",
             f"工作区模式：{workspace_modes}",
             f"网络模式：{network_modes}",
             "安全门禁："
@@ -166,18 +170,7 @@ def _sandbox_capabilities_complete(
     *,
     expected_backend: str,
 ) -> bool:
-    return (
-        capabilities.backend == expected_backend
-        and capabilities.available
-        and capabilities.ready
-        and "read-only-snapshot" in capabilities.workspace_modes
-        and "deny" in capabilities.network_modes
-        and capabilities.supports_cancellation
-        and capabilities.supports_timeout
-        and capabilities.supports_output_limit
-        and capabilities.supports_memory_limit
-        and capabilities.supports_process_limit
-    )
+    return capabilities.backend == expected_backend and capabilities.ready
 
 
 def _support_label(supported: bool) -> str:

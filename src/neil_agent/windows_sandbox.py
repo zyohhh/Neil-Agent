@@ -8,8 +8,8 @@ host-side sequence needed by a future audited guest runner:
 2. execute one fixed runner command and wait for its zero exit status;
 3. share a new, empty host output directory as writable;
 4. execute one fixed exporter command;
-5. parse one bounded result envelope bound to the request and instance;
-6. stop the explicit instance on every path.
+5. stop the explicit instance and revalidate every immutable input;
+6. only then parse one bounded result envelope bound to the request and instance.
 
 Windows Sandbox currently exposes no process I/O for ``wsb exec``.  The fixed
 runner's zero exit status is therefore the first assertion that its complete
@@ -35,6 +35,7 @@ from xml.etree import ElementTree
 
 from .errors import SandboxError
 from .sandbox import CancellationSignal
+from .sandbox_approval import RunCommandApprovalBinding
 from .sandbox_guest import (
     GUEST_BINARY_FILENAME,
     GUEST_CONTROL_DIRECTORY,
@@ -53,6 +54,7 @@ from .sandbox_guest import (
     parse_guest_request,
     parse_guest_result,
 )
+from .sandbox_snapshot import inspect_prepared_snapshot
 
 WSB_GUEST_SNAPSHOT = GUEST_SNAPSHOT_DIRECTORY
 WSB_GUEST_CONTROL = GUEST_CONTROL_DIRECTORY
@@ -138,7 +140,11 @@ class WsbExecutionPlan:
     snapshot_directory: Path
     control_directory: Path
     temporary_root: Path
+    snapshot_manifest_sha256: str
+    runner_source_sha256: str
     runner_sha256: str
+    approval_binding_version: Literal[1]
+    approval_binding_sha256: str
     timeout_seconds: float = 120.0
 
     def __post_init__(self) -> None:
@@ -147,7 +153,21 @@ class WsbExecutionPlan:
         if self.instance_id == self.run_id:
             raise ValueError("instance ID and run ID must be distinct")
         _validate_digest("request hash", self.request_hash)
+        _validate_digest(
+            "snapshot manifest SHA-256",
+            self.snapshot_manifest_sha256,
+        )
+        _validate_digest("runner source SHA-256", self.runner_source_sha256)
         _validate_digest("runner SHA-256", self.runner_sha256)
+        if (
+            type(self.approval_binding_version) is not int
+            or self.approval_binding_version != 1
+        ):
+            raise ValueError("approval binding version must be 1")
+        _validate_digest(
+            "approval binding SHA-256",
+            self.approval_binding_sha256,
+        )
         for name, value in (
             ("snapshot directory", self.snapshot_directory),
             ("control directory", self.control_directory),
@@ -228,6 +248,29 @@ class WsbCliRunner(Protocol):
         """Run exactly one host CLI argv without a command shell."""
 
 
+WsbRawStage = Literal[
+    "start",
+    "runner",
+    "share",
+    "exporter",
+    "stop",
+    "list_after_stop",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class WsbRawObservation:
+    """One bounded, pre-validation WSB CLI response for evidence collection."""
+
+    stage: WsbRawStage
+    argv: tuple[str, ...]
+    instance_id: UUID
+    run_id: UUID
+    request_hash: str
+    completed: WsbCliCompleted
+
+
+WsbRawObserver = Callable[[WsbRawObservation], None]
 PopenFactory = Callable[..., subprocess.Popen[bytes]]
 
 
@@ -397,13 +440,14 @@ class BoundedSubprocessCliRunner:
 class WsbHostExecutor:
     """Execute the candidate WSB host sequence without exposing a general tool."""
 
-    __slots__ = ("_environment", "_runner", "_wsb_executable")
+    __slots__ = ("_environment", "_raw_observer", "_runner", "_wsb_executable")
 
     def __init__(
         self,
         wsb_executable: Path,
         *,
         cli_runner: WsbCliRunner | None = None,
+        raw_observer: WsbRawObserver | None = None,
     ) -> None:
         if not isinstance(wsb_executable, Path) or not wsb_executable.is_absolute():
             raise ValueError("wsb executable must be an absolute Path")
@@ -411,6 +455,7 @@ class WsbHostExecutor:
             raise ValueError("wsb executable path is invalid")
         self._wsb_executable = _validate_wsb_executable(wsb_executable)
         self._runner = cli_runner or BoundedSubprocessCliRunner()
+        self._raw_observer = raw_observer
         self._environment = _minimal_environment()
 
     def execute(
@@ -429,7 +474,6 @@ class WsbHostExecutor:
         config = _build_start_config(paths.snapshot, paths.control)
         deadline = monotonic() + plan.timeout_seconds
         cleanup_required = False
-        result: WsbExecutionResult | None = None
         primary_error: BaseException | None = None
         try:
             cleanup_required = True
@@ -447,6 +491,7 @@ class WsbHostExecutor:
                 deadline,
                 cancel,
             )
+            _validate_snapshot_binding(plan, paths.snapshot)
             if _validate_control_bundle(plan, paths.control) != request:
                 raise WsbHostExecutionError(
                     "guest request changed after the sandbox was started."
@@ -462,6 +507,11 @@ class WsbHostExecutor:
 
             # The trusted runner exits zero only after its complete guest Job is
             # empty.  No writable host mapping exists before this point.
+            _validate_snapshot_binding(plan, paths.snapshot)
+            if _validate_control_bundle(plan, paths.control) != request:
+                raise WsbHostExecutionError(
+                    "guest request changed before writable result sharing."
+                )
             _require_empty_output(output)
             self._invoke(
                 "share",
@@ -492,13 +542,18 @@ class WsbHostExecutor:
                 cancel,
                 require_exit_code=True,
             )
-            result = _load_result(output, plan, request)
+            _validate_snapshot_binding(plan, paths.snapshot)
+            if _validate_control_bundle(plan, paths.control) != request:
+                raise WsbHostExecutionError(
+                    "guest request changed after result export."
+                )
         except BaseException as error:  # cleanup must also cover interrupts.
             primary_error = error
         finally:
             if cleanup_required:
                 try:
                     self._invoke_stop(plan)
+                    self._confirm_instance_absent(plan)
                 except BaseException as stop_error:
                     raise WsbHostExecutionError(
                         "Windows Sandbox stop 未被严格确认，执行结果已拒绝。"
@@ -510,13 +565,20 @@ class WsbHostExecutor:
             raise WsbHostExecutionError(
                 "Windows Sandbox 主机执行失败，未返回结果。"
             ) from primary_error
-        if result is None:
-            raise WsbHostExecutionError("Windows Sandbox 未生成可信结果。")
-        return result
+
+        # Result bytes are untrusted until the explicit instance has stopped.
+        # Revalidate every immutable input after stop before opening the
+        # writable export for the first time.
+        _validate_snapshot_binding(plan, paths.snapshot)
+        if _validate_control_bundle(plan, paths.control) != request:
+            raise WsbHostExecutionError(
+                "guest request changed before the stopped result was read."
+            )
+        return _load_result(output, plan, request)
 
     def _invoke(
         self,
-        stage: str,
+        stage: Literal["start", "runner", "share", "exporter"],
         arguments: tuple[str, ...],
         plan: WsbExecutionPlan,
         deadline: float,
@@ -527,14 +589,16 @@ class WsbHostExecutor:
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise WsbHostExecutionError(f"Windows Sandbox {stage} 阶段超过总超时。")
+        argv = (str(self._wsb_executable), *arguments)
         completed = self._runner.run(
-            (str(self._wsb_executable), *arguments),
+            argv,
             timeout_seconds=remaining,
             stdout_limit=MAX_CLI_STDOUT_BYTES,
             stderr_limit=MAX_CLI_STDERR_BYTES,
             environment=self._environment,
             cancel=cancel,
         )
+        self._observe_raw(stage, argv, plan, completed)
         return _validate_cli_completion(
             completed,
             stage=stage,
@@ -543,26 +607,76 @@ class WsbHostExecutor:
         )
 
     def _invoke_stop(self, plan: WsbExecutionPlan) -> None:
+        argv = (
+            str(self._wsb_executable),
+            "stop",
+            "--id",
+            str(plan.instance_id),
+            "--raw",
+        )
         completed = self._runner.run(
-            (
-                str(self._wsb_executable),
-                "stop",
-                "--id",
-                str(plan.instance_id),
-                "--raw",
-            ),
+            argv,
             timeout_seconds=STOP_TIMEOUT_SECONDS,
             stdout_limit=MAX_CLI_STDOUT_BYTES,
             stderr_limit=MAX_CLI_STDERR_BYTES,
             environment=self._environment,
             cancel=None,
         )
+        self._observe_raw("stop", argv, plan, completed)
         _validate_cli_completion(
             completed,
             stage="stop",
             instance_id=plan.instance_id,
             require_exit_code=False,
         )
+
+    def _confirm_instance_absent(self, plan: WsbExecutionPlan) -> None:
+        deadline = monotonic() + STOP_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise WsbHostExecutionError(
+                    "Windows Sandbox instance remained listed after stop."
+                )
+            argv = (str(self._wsb_executable), "list", "--raw")
+            completed = self._runner.run(
+                argv,
+                timeout_seconds=remaining,
+                stdout_limit=MAX_CLI_STDOUT_BYTES,
+                stderr_limit=MAX_CLI_STDERR_BYTES,
+                environment=self._environment,
+                cancel=None,
+            )
+            self._observe_raw("list_after_stop", argv, plan, completed)
+            instance_ids = _validate_list_completion(completed)
+            if plan.instance_id not in instance_ids:
+                return
+            Event().wait(PROCESS_POLL_SECONDS)
+
+    def _observe_raw(
+        self,
+        stage: WsbRawStage,
+        argv: tuple[str, ...],
+        plan: WsbExecutionPlan,
+        completed: WsbCliCompleted,
+    ) -> None:
+        if self._raw_observer is None:
+            return
+        try:
+            self._raw_observer(
+                WsbRawObservation(
+                    stage=stage,
+                    argv=argv,
+                    instance_id=plan.instance_id,
+                    run_id=plan.run_id,
+                    request_hash=plan.request_hash,
+                    completed=completed,
+                )
+            )
+        except Exception as error:
+            raise WsbHostExecutionError(
+                "Windows Sandbox raw evidence observer failed."
+            ) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,22 +727,25 @@ def _validate_cli_completion(
     allowed_keys = {"Id", "Success", "Status", "State"}
     if require_exit_code:
         allowed_keys.add("ExitCode")
-    if not set(payload) <= allowed_keys or "Id" not in payload:
+    required_keys = {"Id", "Success"}
+    if require_exit_code:
+        required_keys.add("ExitCode")
+    if (
+        not set(payload) <= allowed_keys
+        or not required_keys <= set(payload)
+        or ("Status" in payload) == ("State" in payload)
+    ):
         raise WsbHostExecutionError(
             f"Windows Sandbox {stage} 阶段返回了未审计的 raw JSON schema。"
         )
-    if "Status" in payload and "State" in payload:
-        raise WsbHostExecutionError(f"Windows Sandbox {stage} 阶段返回了歧义状态字段。")
     response_id = payload.get("Id")
     if response_id != str(instance_id):
         raise WsbHostExecutionError(f"Windows Sandbox {stage} 阶段实例绑定不匹配。")
     success = payload.get("Success")
-    if success is not None and (type(success) is not bool or success is not True):
+    if type(success) is not bool or success is not True:
         raise WsbHostExecutionError(f"Windows Sandbox {stage} 阶段报告失败。")
     status = payload.get("Status", payload.get("State"))
-    if status is not None and (
-        not isinstance(status, str) or status not in allowed_statuses
-    ):
+    if not isinstance(status, str) or status not in allowed_statuses:
         raise WsbHostExecutionError(
             f"Windows Sandbox {stage} 阶段返回了矛盾或未审计的状态。"
         )
@@ -640,6 +757,74 @@ def _validate_cli_completion(
             )
     _validate_json_shape(payload)
     return payload
+
+
+def _validate_list_completion(
+    completed: WsbCliCompleted,
+) -> frozenset[UUID]:
+    if completed.timed_out:
+        raise WsbHostExecutionError("Windows Sandbox list-after-stop stage timed out.")
+    if completed.cancelled:
+        raise WsbHostExecutionError(
+            "Windows Sandbox list-after-stop stage was cancelled."
+        )
+    if completed.output_limited:
+        raise WsbHostExecutionError(
+            "Windows Sandbox list-after-stop output exceeded its boundary."
+        )
+    if completed.returncode != 0 or completed.stderr.strip():
+        raise WsbHostExecutionError(
+            "Windows Sandbox list-after-stop could not confirm cleanup."
+        )
+    payload = _parse_bounded_json(completed.stdout, MAX_CLI_STDOUT_BYTES)
+    _validate_json_shape(payload)
+    if isinstance(payload, list):
+        records = payload
+    elif isinstance(payload, dict):
+        collection_key = "WindowsSandboxEnvironments"
+        if set(payload) != {collection_key, "Success", "Status"} or not isinstance(
+            payload[collection_key], list
+        ):
+            raise WsbHostExecutionError(
+                "Windows Sandbox list-after-stop returned an unaudited schema."
+            )
+        success = payload.get("Success", True)
+        if type(success) is not bool or success is not True:
+            raise WsbHostExecutionError(
+                "Windows Sandbox list-after-stop reported failure."
+            )
+        if payload["Status"] not in {"Stopped", "Succeeded"}:
+            raise WsbHostExecutionError(
+                "Windows Sandbox list-after-stop returned a nonterminal status."
+            )
+        records = payload[collection_key]
+    else:
+        raise WsbHostExecutionError(
+            "Windows Sandbox list-after-stop did not return an object or array."
+        )
+
+    instance_ids: set[UUID] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise WsbHostExecutionError(
+                "Windows Sandbox list-after-stop contained a non-object entry."
+            )
+        if "Id" not in record or not isinstance(record["Id"], str):
+            raise WsbHostExecutionError(
+                "Windows Sandbox list-after-stop entry has no unambiguous ID."
+            )
+        try:
+            instance_id = UUID(record["Id"])
+        except (ValueError, AttributeError) as error:
+            raise WsbHostExecutionError(
+                "Windows Sandbox list-after-stop entry has an invalid ID."
+            ) from error
+        if instance_id in instance_ids:
+            raise WsbHostExecutionError(
+                "Windows Sandbox list-after-stop returned a duplicate ID."
+            )
+        instance_ids.add(instance_id)
+    return frozenset(instance_ids)
 
 
 def _load_result(
@@ -686,9 +871,22 @@ def _validate_plan_paths(plan: WsbExecutionPlan) -> _ValidatedPaths:
         for right in paths[index + 1 :]:
             if _contains_path(left, right) or _contains_path(right, left):
                 raise WsbHostExecutionError("snapshot、control 与临时根必须彼此独立。")
-    _validate_snapshot_tree(snapshot)
+    _validate_snapshot_binding(plan, snapshot)
     _require_empty_directory(temporary_root, "temporary root")
     return _ValidatedPaths(snapshot, control, temporary_root)
+
+
+def _validate_snapshot_binding(plan: WsbExecutionPlan, snapshot: Path) -> None:
+    try:
+        manifest = inspect_prepared_snapshot(snapshot)
+    except SandboxError as error:
+        raise WsbHostExecutionError(
+            "workspace snapshot could not be safely revalidated."
+        ) from error
+    if manifest.digest != plan.snapshot_manifest_sha256:
+        raise WsbHostExecutionError(
+            "workspace snapshot manifest no longer matches the execution plan."
+        )
 
 
 def _validate_control_bundle(
@@ -712,10 +910,35 @@ def _validate_control_bundle(
         raise WsbHostExecutionError(
             "guest request is invalid or non-canonical."
         ) from error
+    try:
+        approval_binding = RunCommandApprovalBinding(
+            executable=request.executable,
+            argv=request.argv,
+            logical_cwd=request.cwd,
+            snapshot_manifest_sha256=plan.snapshot_manifest_sha256,
+            runner_source_sha256=plan.runner_source_sha256,
+            runner_binary_sha256=plan.runner_sha256,
+            timeout_ms=request.timeout_ms,
+            max_output_bytes=request.max_output_bytes,
+            active_process_limit=request.active_process_limit,
+            process_memory_bytes=request.process_memory_bytes,
+            job_memory_bytes=request.job_memory_bytes,
+        )
+    except ValueError as error:
+        raise WsbHostExecutionError(
+            "guest request cannot be represented by the audited approval policy."
+        ) from error
     if (
         request.instance_id != plan.instance_id.hex
         or request.run_id != plan.run_id.hex
         or request.request_hash != plan.request_hash
+        or request.environment
+        or request.snapshot_manifest_sha256 != plan.snapshot_manifest_sha256
+        or request.runner_source_sha256 != plan.runner_source_sha256
+        or request.approval_binding_version != plan.approval_binding_version
+        or request.approval_binding_sha256 != plan.approval_binding_sha256
+        or approval_binding.version != plan.approval_binding_version
+        or approval_binding.digest != plan.approval_binding_sha256
         or request.canonical_bytes() != request_bytes
     ):
         raise WsbHostExecutionError(

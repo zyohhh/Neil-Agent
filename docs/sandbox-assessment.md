@@ -114,16 +114,23 @@ Object 或 restricted token 单独只能管理生命周期/资源，不能提供
    超时、取消和洪泛终止完整 Job，并查询 `ActiveProcesses == 0` 后才写入
    `job_terminated=true`。
 4. `windows_sandbox.py` 只接受真实 `wsb.exe`、显式 UUID、固定 guest 命令和
-   有界 `--raw` JSON；按 start → execute → late share → export → stop 顺序
-   执行。任一阶段、结果绑定或 stop 确认失败都会拒绝结果，没有宿主
-   subprocess fallback。
+   有界 `--raw` JSON；按 start → execute → late share → export → stop →
+   list-confirm → parse-result 顺序执行。结果在实例停止前不会读取；stop 后还
+   必须从 `wsb list --raw` 确认目标 UUID 消失。任一阶段、结果绑定、输入
+   manifest 复核或清理确认失败都会拒绝结果，没有宿主 subprocess fallback。
 
 这些构件的安全保证字符串仍是
 `candidate-job-only-not-certified`。固定 runner 与不可信子进程目前处于同一
-guest 身份，真实 `wsb.exe --raw` schema、同身份篡改抵抗、网络隔离和资源
-终止语义尚未在目标平台执行；也没有目标平台独立安全审查记录。因此候选
-执行器没有接入 `WindowsSandboxBackend.run()`、工具注册表或审批面，
-`/doctor` 仍不会报告 ready。
+guest SYSTEM 身份，普通结果 SHA-256 不能阻止同身份进程写入或注入 runner；
+WMI、SCM、Task Scheduler 等 broker 路径也可能在 Job 之外创建进程。
+snapshot/control 的多次复扫能发现持续变化，但没有跨完整执行生命周期持有
+禁止 write/delete/rename 的句柄，因此仍不能排除临时替换后恢复的 ABA。
+这些是独立复核确认的接入前 P0，不会被 stop 后读取或更多单元测试降级。
+
+真实 `wsb.exe --raw` schema、网络隔离和资源终止语义也尚未在目标平台执行，
+没有可接受的独立安全审查记录。因此候选执行器没有接入
+`WindowsSandboxBackend.run()`、工具注册表或审批执行面，`/doctor` 仍不会
+报告 ready。
 
 目标机器没有可用 Windows Sandbox 组件时，普通平台验收会明确跳过，同时
 诊断报告 `unavailable`。这种跳过不能用于把后端标成 `ready`；设置
@@ -171,17 +178,28 @@ PID 和 network namespace 构造最小文件系统，并组合 seccomp。它是�
 仓库的 `.github/workflows/windows-sandbox-security.yml` 是这一强制任务：
 它只接受受保护的 `main` ref，面向带 `windows-sandbox-security` 标签、
 受 environment 保护的专用 Windows x64 自托管 runner，禁止并行 WSB 实例，
-并运行攻击型 guest probe、快速输出竞态和真实 junction 替换测试。选定
-用例写入独立 JUnit 报告，任何 skip 都会使任务失败。该 runner 应当是
+并运行攻击型 guest probe、快速输出竞态和真实 junction 替换测试。同一
+revision 与构建必须串行重复三轮；每轮保存平台、源码/产物、固定测试 manifest、
+pytest 退出码、JUnit 和绑定完整 argv/执行身份/完成状态的真实 raw CLI
+transcript，再由独立 verifier 检查 repeat、transcript 与执行身份彼此独立，
+并验证三轮 platform/subject/schema 一致性。workflow 在随机独占环境中实际
+安装并测试唯一 wheel，避免工作树源码覆盖被测产物。任何非零 pytest 退出码、
+skip、xfail、xpass、error 或 failure 都会使任务失败。该 runner 应当是
 一次性、无仓库外凭据的 Windows 11 Pro/Enterprise 24H2 或更高版本机器；
 不能把普通开发机上的 skip 结果当作发布证据。
+
+聚合证据仍不是认证。认证必须绑定独立 reviewer、零开放问题、显式 trust
+pins 和有效期；默认空 trust 配置必然拒绝。运行时 `ready` 也不能由布尔值
+打开，而必须同时满足本机能力与经验证认证。当前 probe 从不注入认证引用。
 
 ## 开放通用命令前的硬门槛
 
 1. 至少一个 Windows 或 Linux 执行后端在目标平台通过上述真实隔离测试，
    并有独立安全审查记录。
 2. 审批预览绑定真实可执行文件、argv、逻辑 cwd、后端/策略版本、网络与
-   文件权限、资源上限和确定性快照摘要；任一变化都要求重新批准。
+   文件权限、资源上限、runner 源码/二进制和确定性快照摘要；host 必须从
+   实际 guest request 重新计算 binding，而不是信任调用者提供的摘要。任一
+   变化都要求重新批准。
 3. 通用能力只接受 argv，不接受 shell 字符串；只在交互审批或非交互 v2
    request/approve 中暴露，v1 始终只读。
 4. 首版命令修改全部丢弃。若要导入生成结果，必须先扫描有界 diff，再经过

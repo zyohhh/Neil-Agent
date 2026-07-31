@@ -845,20 +845,105 @@ CLI 展示修改预览并等待用户输入 y/yes
   平台缺组件跳过。
 - 5 个内置离线评测场景全部通过；本阶段没有再次调用真实 DeepSeek API。
 
+## 2026-07-30：沙箱证据链、审批语义绑定与安全复核
+
+### 一次性审批与执行语义绑定
+
+- 审批记录升级为版本 2。每项记录除工作区、prompt、项目指令、工具参数和
+  预览外，还强制携带 `binding kind/version/SHA-256`；普通工具使用域分离的
+  `generic-tool/v1` 绑定。
+- approve 在读取和验证 pending 正文前先以 `O_EXCL` 写入 terminal claim。
+  并发调用只有一个获胜；记录损坏、临时篡改后恢复、prompt/指令/工具不匹配、
+  模型失败或进程中断都不能恢复同一 ID。版本 1 的遗留 pending 记录会安全
+  失效，不阻塞创建新审批。terminal marker 有 1000 项上限并保留 24 小时，
+  避免任意无效 ID 造成无界目录增长；pending 自身在 15 分钟后已不可执行。
+- 新增未接入工具注册表的 `RunCommandApprovalBinding`，确定性绑定 executable、
+  分离 argv、逻辑 cwd、snapshot manifest、runner 源码/二进制 hash、后端和
+  guest 协议版本、断网/只读/空环境/丢弃修改策略及全部资源上限。
+- guest 请求协议和固定 runner 升级为版本 2。请求同时携带 manifest、runner
+  source 和 approval digest；host 必须从实际请求语义与 runner binary 重新
+  计算审批 digest，不能只比较调用者提供的两个字符串。复用安全命令的 digest
+  构造另一条命令会在启动 WSB 前被拒绝。
+
+### 停止后取证与不可变输入复核
+
+- `WsbHostExecutor` 在 start 前、start 后、late writable share 前、export 后
+  以及 stop 后重新扫描 snapshot 并核对 canonical manifest；control 内的
+  runner、request 和全部绑定也在对应边界复核。
+- writable export 中的结果不再于 guest 存活时读取。host 必须先严格确认
+  `stop`，随后用有界 `wsb list --raw` 轮询目标 UUID 已消失，最后才首次打开
+  结果文件；stop/list/复核任一步失败都拒绝结果。
+- start/exec/share/export/stop 的 raw JSON 现在必须显式包含成功值和唯一状态
+  字段，不能用字段缺失表示成功。执行器提供 pre-validation raw observer，
+  使失败响应也能进入独立证据通道。
+- 现有复扫能发现持续篡改，但不能排除外部同权限进程在两次扫描之间临时替换
+  路径再恢复的 ABA。跨 start/share/stop 生命周期的 no-write/no-delete 句柄
+  租约仍是接入前硬门槛。
+
+### 可重复证据、认证门禁与审查结论
+
+- 新增严格的 evidence schema、CLI 和文档。强制任务必须在同一受保护 revision
+  上串行运行三轮，保存平台指纹、源码/锁文件/workflow、compiler/reference、
+  runner/probe 源码与二进制 hash、固定攻击测试 JUnit 和每个 `--raw` 响应。
+  workflow 为每次尝试创建随机化独占证据根和虚拟环境，只安装当前 revision
+  构建的唯一 wheel；isolated Python 与 import-origin 检查阻止工作树源码覆盖
+  被测产物。
+- raw recorder 独占创建有界 JSONL，并把真实响应 bytes/SHA-256 与 repeat、
+  nonce、完整固定 argv、instance/run/request 身份、返回码和终止状态一起写入
+  canonical transcript；schema 只能从该 transcript 推导。每个 execution
+  必须满足完整成功状态机或唯一允许的 host-cancel 状态机，stop 后最后一次
+  list 必须证明目标实例消失。
+- collect 强制 pytest 退出码为 0，并核对 JUnit tests/failures/errors/skipped
+  汇总与 testcase 明细。三轮的 repeat ID、nonce、transcript 和证据 digest
+  必须唯一，execution identity 集不能重叠；platform、subject、测试 manifest
+  和规范化 CLI schema 必须完全相同。缺阶段、任何 skip/xfail/xpass/error/
+  failure 或少于三轮都不能生成 aggregate。
+- aggregate 不是认证。认证还要求独立 reviewer、零开放问题、review 与
+  aggregate 精确绑定、显式 reviewer/digest trust pin 和有效期；默认空 trust
+  配置必然拒绝。aggregate 绑定三轮起止时间，review 不得早于证据完成。
+  workflow 只上传本次成功创建的动态证据根，并用固定 commit 的 upload action
+  保存成功或失败的诊断 bundle；只有通过 verify 的 aggregate 才是有效证据。
+- `SandboxCapabilities.ready` 不再接受裸布尔值，而由本地能力门禁和认证引用
+  共同派生；只发现 GUI 不再被当作 CLI 候选，发现 `wsb.exe` 但无认证时报告
+  `certification_required`。当前生产 probe 不注入认证。
+- 独立代码审查确认审批摘要重算与 claim 前置问题已经修复，同时确认三个
+  P0 尚未解决：runner 与不可信进程仍共享 guest SYSTEM 身份；WMI/SCM/
+  Task Scheduler 等 broker 路径可能绕过 Job；snapshot/control 尚无执行全程
+  句柄租约。普通 SHA-256 不是抵抗同身份写入者的认证机制，stop 后读取只能
+  缩小竞态窗口，不能替代身份隔离。
+- 本机为 Windows Home 且不存在 `wsb.exe`，无法生成目标平台证据。因此没有
+  伪造 aggregate、独立 review 或 ready 状态；`WindowsSandboxBackend.run()`、
+  `/doctor` ready 和 `run_command` 仍未接入，固定命令白名单保持不变。
+
+### 验证说明
+
+- Ruff lint 与全仓库格式检查通过；mypy 对 35 个源文件检查通过。
+- pytest 最终结果为 513 项通过、15 项平台条件跳过；证据链与宿主状态机最终
+  定向结果为 100 项通过、7 项跳过。真实 C# runner 编译测试已执行；WSB
+  攻击用例因本机注册表产品为 Home 且缺少 `wsb.exe` 按设计跳过，未被计作认证。
+- 最终 wheel 离线构建成功，并在全新虚拟环境中以 isolated import 从
+  `site-packages` 加载；wheel-backed 证据单测 58 项通过。工作流 PowerShell
+  脚本通过 AST 语法解析。
+- 5 个内置离线评测场景全部通过；本阶段未调用真实 DeepSeek API，也未生成
+  或伪造目标平台 aggregate、独立 review 或 ready 状态。
+
 ## 下一阶段计划
 
-1. 配置一次性、无敏感凭据的 Windows 11 Pro/Enterprise 24H2+ 专用 runner，
-   实际执行强制安全 workflow，保存 OS/WSB 版本、runner 源码/二进制 hash
-   和全部攻击用例证据；校准真实 `--raw` schema，并修复所有隔离或资源语义
-   差异，直到同一构建重复通过。
-2. 完成独立安全审查，重点验证同 guest 身份下的 runner/结果防篡改、Job
-   breakaway 与资源限制、late writable share、stop 确认和 snapshot TOCTOU；
-   审查问题修复并重新跑完整强制门禁后，才把候选接入
-   `WindowsSandboxBackend.run()` 并允许 `/doctor` 报告 ready。
-3. 扩展现有审批记录，把 executable、argv、逻辑 cwd、snapshot manifest
-   digest、runner/source/binary hash、后端/协议版本、网络策略、资源上限和
-   修改丢弃策略全部绑定进预览；任一字段或文件变化都使旧审批失效，并补齐
-   交互审批与非交互 v2 request/approve 的重放和竞态测试。
-4. 只有前述真实平台证据与审查均通过后，注册最小 `run_command`；它只接受
-   executable + argv，v1 始终不可见，首版丢弃 guest 的全部修改。若任一
-   门禁未通过，继续保持固定命令白名单，不开放 shell 字符串或结果回写。
+1. 重构 guest 权限边界：可信 runner 保持受保护身份，把不可信命令放入一次性
+   restricted token/低完整性或 AppContainer/LPAC；结果与 control 使用仅 runner
+   可写的 ACL。补充子进程 `OpenProcess`/注入/结果伪造，以及 WMI、SCM、
+   Task Scheduler 和其他 broker 逃逸攻击用例。
+2. 为 snapshot、control 和 export 建立有界的执行生命周期句柄租约，禁止写入、
+   delete 和 rename，并从持有句柄而不是可替换路径复核 identity；同时补齐
+   聚合 Job 内存、breakaway、取消前 guest tree ready、stop 后 list 消失和
+   清理失败测试。
+3. 在一次性、无敏感凭据的 Windows 11 Pro/Enterprise 24H2+ runner 上使用
+   同一构建执行三轮强制 workflow，校准真实 raw schema，保存并校验完整 artifact
+   bundle、Actions provenance/attestation 和自托管 runner 版本；定义 evidence
+   到 review 的最大新鲜度，并由独立 reviewer 关闭固定 gate 集后 pin review
+   digest。
+4. 让认证 verifier 重新校验完整 raw bundle，只把未过期且与当前 commit、
+   本机 OS/WSB/runner hash、协议和固定 gate 集完全一致的证据转换为不可伪造的
+   运行时能力；随后才接入 backend 与 `/doctor`。
+   以上门禁全部通过后再注册只接受 executable + argv、丢弃全部 guest 修改的
+   最小 `run_command`；否则继续保持固定命令白名单。

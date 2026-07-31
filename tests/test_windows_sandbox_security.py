@@ -10,19 +10,31 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import stat
 import subprocess
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from threading import Event, Thread
 from time import sleep
+from typing import cast
 from uuid import uuid4
 
 import pytest
 
 from neil_agent.sandbox import CancellationSignal
+from neil_agent.sandbox_approval import RunCommandApprovalBinding
+from neil_agent.sandbox_evidence import (
+    RawObservationRecorder,
+    SandboxEvidenceError,
+    collect_evidence_subject,
+    collect_windows_platform_fingerprint,
+    ensure_canonical_evidence_file,
+)
 from neil_agent.sandbox_guest import (
     GUEST_BINARY_FILENAME,
+    GUEST_SOURCE_FILENAME,
     GUEST_REQUEST_FILENAME,
     GuestRunnerBuild,
     SandboxGuestRequest,
@@ -39,13 +51,17 @@ from neil_agent.windows_sandbox import (
     WsbExecutionResult,
     WsbHostExecutionError,
     WsbHostExecutor,
+    WsbRawObservation,
+    WsbRawObserver,
 )
 
 pytestmark = pytest.mark.windows_sandbox_security
 
 _REQUIRED = os.environ.get("SANDBOX_REQUIRED") == "1"
+_EVIDENCE_REQUIRED = os.environ.get("SANDBOX_EVIDENCE_REQUIRED") == "1"
 _PROBE_SOURCE = Path(__file__).parent / "fixtures" / "sandbox_security_probe.cs"
 _MAX_COMPILER_OUTPUT_BYTES = 64 * 1024
+_MAX_BUILD_ARTIFACT_BYTES = 128 * 1024 * 1024
 
 
 def _missing_prerequisite(reason: str) -> None:
@@ -84,6 +100,94 @@ def _require_host_network_positive_controls() -> None:
         _missing_prerequisite("the host DNS positive control is unavailable")
 
 
+def _required_evidence_path(variable: str) -> Path:
+    value = os.environ.get(variable)
+    if not value:
+        pytest.fail(f"mandatory evidence path is missing: {variable}")
+    path = Path(value)
+    if not path.is_absolute():
+        pytest.fail(f"mandatory evidence path is not absolute: {variable}")
+    return path
+
+
+def _evidence_build_root() -> Path:
+    root = _required_evidence_path("SANDBOX_EVIDENCE_ROOT")
+    build_root = _required_evidence_path("SANDBOX_EVIDENCE_BUILD_ROOT")
+    try:
+        root_metadata = root.lstat()
+        build_metadata = build_root.lstat()
+        resolved_root = root.resolve(strict=True)
+        resolved_build = build_root.resolve(strict=True)
+        resolved_build.relative_to(resolved_root)
+    except (OSError, ValueError):
+        pytest.fail("mandatory evidence build root is invalid")
+    reparse = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
+    if (
+        root.is_symlink()
+        or build_root.is_symlink()
+        or int(getattr(root_metadata, "st_file_attributes", 0)) & reparse
+        or int(getattr(build_metadata, "st_file_attributes", 0)) & reparse
+        or not resolved_root.is_dir()
+        or not resolved_build.is_dir()
+    ):
+        pytest.fail("mandatory evidence roots must be existing directories")
+    return resolved_build
+
+
+def _require_safe_build_directory(path: Path, root: Path) -> None:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        pytest.fail("shared build directory is invalid")
+    reparse = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
+    if (
+        path.is_symlink()
+        or int(getattr(metadata, "st_file_attributes", 0)) & reparse
+        or not resolved.is_dir()
+    ):
+        pytest.fail("shared build directory is a reparse point or non-directory")
+
+
+def _artifact_sha256(path: Path) -> str:
+    try:
+        metadata = path.stat()
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or metadata.st_size <= 0
+            or metadata.st_size > _MAX_BUILD_ARTIFACT_BYTES
+        ):
+            pytest.fail(f"shared build artifact is invalid: {path.name}")
+        digest = sha256()
+        total = 0
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                total += len(chunk)
+                if total > _MAX_BUILD_ARTIFACT_BYTES:
+                    pytest.fail(f"shared build artifact is too large: {path.name}")
+                digest.update(chunk)
+        if total != metadata.st_size:
+            pytest.fail(f"shared build artifact changed while read: {path.name}")
+        return digest.hexdigest()
+    except OSError:
+        pytest.fail(f"shared build artifact is unavailable: {path.name}")
+
+
+def _copy_artifact_exclusively(source: Path, target: Path) -> None:
+    try:
+        payload = source.read_bytes()
+        if not payload or len(payload) > _MAX_BUILD_ARTIFACT_BYTES:
+            pytest.fail(f"built artifact has an invalid size: {source.name}")
+        with target.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        pytest.fail(f"built artifact could not be persisted: {target.name}")
+
+
 @pytest.fixture(scope="session")
 def wsb_cli() -> Path:
     if os.name != "nt":
@@ -100,10 +204,33 @@ def wsb_cli() -> Path:
 @pytest.fixture(scope="session")
 def guest_runner(wsb_cli: Path) -> Iterator[GuestRunnerBuild]:
     del wsb_cli
-    if find_dotnet_framework_csc() is None:
+    compiler = find_dotnet_framework_csc()
+    if compiler is None:
         _missing_prerequisite("the fixed .NET Framework C# compiler is unavailable")
-    with build_guest_runner() as build:
-        yield build
+    if not _EVIDENCE_REQUIRED:
+        with build_guest_runner() as build:
+            yield build
+        return
+
+    evidence_build_root = _evidence_build_root()
+    build_root = evidence_build_root / "guest-runner"
+    build_root.mkdir(parents=True, exist_ok=True)
+    _require_safe_build_directory(build_root, evidence_build_root)
+    source = build_root / GUEST_SOURCE_FILENAME
+    binary = build_root / GUEST_BINARY_FILENAME
+    if source.exists() != binary.exists():
+        pytest.fail("shared guest runner build is incomplete")
+    if not source.exists():
+        with build_guest_runner() as ephemeral:
+            _copy_artifact_exclusively(ephemeral.source_path, source)
+            _copy_artifact_exclusively(ephemeral.binary_path, binary)
+    yield GuestRunnerBuild(
+        compiler_path=compiler,
+        source_path=source,
+        binary_path=binary,
+        source_sha256=_artifact_sha256(source),
+        binary_sha256=_artifact_sha256(binary),
+    )
 
 
 @pytest.fixture(scope="session")
@@ -117,8 +244,17 @@ def security_probe(
         _missing_prerequisite("the fixed .NET Framework C# compiler is unavailable")
     if not _PROBE_SOURCE.is_file():
         pytest.fail("the fixed sandbox security probe source is missing")
-    build_root = tmp_path_factory.mktemp("sandbox-security-probe")
+    if _EVIDENCE_REQUIRED:
+        evidence_build_root = _evidence_build_root()
+        build_root = evidence_build_root / "security-probe"
+        build_root.mkdir(parents=True, exist_ok=True)
+        _require_safe_build_directory(build_root, evidence_build_root)
+    else:
+        build_root = tmp_path_factory.mktemp("sandbox-security-probe")
     binary = build_root / "sandbox-security-probe.exe"
+    if binary.exists():
+        _artifact_sha256(binary)
+        return binary
     environment = {
         "SystemRoot": r"C:\Windows",
         "WINDIR": r"C:\Windows",
@@ -157,6 +293,66 @@ def security_probe(
     return binary
 
 
+@pytest.fixture(scope="session")
+def evidence_raw_observer(
+    wsb_cli: Path,
+    guest_runner: GuestRunnerBuild,
+    security_probe: Path,
+) -> Iterator[WsbRawObserver | None]:
+    """Persist exact WSB stdout and bind it to one immutable run identity."""
+
+    if not _EVIDENCE_REQUIRED:
+        yield None
+        return
+    raw_path = _required_evidence_path("SANDBOX_EVIDENCE_RAW_JSONL")
+    platform_path = _required_evidence_path("SANDBOX_EVIDENCE_PLATFORM_JSON")
+    subject_path = _required_evidence_path("SANDBOX_EVIDENCE_SUBJECT_JSON")
+    wheel_path = _required_evidence_path("SANDBOX_EVIDENCE_WHEEL")
+    repeat_id = os.environ.get("SANDBOX_EVIDENCE_REPEAT_ID", "")
+    execution_nonce = os.environ.get("SANDBOX_EVIDENCE_EXECUTION_NONCE", "")
+    git_commit_sha = os.environ.get("GITHUB_SHA", "")
+    repository_root = Path(__file__).parents[1].resolve(strict=True)
+    try:
+        platform = collect_windows_platform_fingerprint(wsb_cli)
+        subject = collect_evidence_subject(
+            repository_root=repository_root,
+            git_commit_sha=git_commit_sha,
+            wheel_path=wheel_path,
+            runner_source_path=guest_runner.source_path,
+            runner_binary_path=guest_runner.binary_path,
+            compiler_path=guest_runner.compiler_path,
+            probe_binary_path=security_probe,
+        )
+        ensure_canonical_evidence_file(platform_path, platform)
+        ensure_canonical_evidence_file(subject_path, subject)
+    except SandboxEvidenceError as error:
+        pytest.fail(f"mandatory evidence identity failed: {error}")
+
+    with RawObservationRecorder(
+        raw_path,
+        repeat_id=repeat_id,
+        execution_nonce=execution_nonce,
+    ) as recorder:
+
+        def observe(observation: WsbRawObservation) -> None:
+            # Record every completion before the host parser sees it.
+            completed = observation.completed
+            recorder.record(
+                observation.stage,
+                completed.stdout,
+                argv=observation.argv,
+                instance_id=str(observation.instance_id),
+                run_id=str(observation.run_id),
+                request_hash=observation.request_hash,
+                returncode=completed.returncode,
+                timed_out=completed.timed_out,
+                cancelled=completed.cancelled,
+                output_limited=completed.output_limited,
+            )
+
+        yield cast(WsbRawObserver, observe)
+
+
 @dataclass(frozen=True, slots=True)
 class _RunArtifacts:
     result: WsbExecutionResult
@@ -177,6 +373,7 @@ def _execute_probe(
     process_memory_bytes: int = 128 * 1024 * 1024,
     job_memory_bytes: int = 256 * 1024 * 1024,
     executor_runner: WsbCliRunner | None = None,
+    raw_observer: WsbRawObserver | None = None,
     cancel: CancellationSignal | None = None,
 ) -> _RunArtifacts:
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -203,9 +400,24 @@ def _execute_probe(
         )
         instance_id = uuid4()
         run_id = uuid4()
+        approval_binding = RunCommandApprovalBinding(
+            executable="probe.exe",
+            argv=(mode, *arguments),
+            snapshot_manifest_sha256=snapshot.manifest.digest,
+            runner_source_sha256=guest_runner.source_sha256,
+            runner_binary_sha256=guest_runner.binary_sha256,
+            timeout_ms=timeout_ms,
+            max_output_bytes=max_output_bytes,
+            active_process_limit=active_process_limit,
+            process_memory_bytes=process_memory_bytes,
+            job_memory_bytes=job_memory_bytes,
+        )
         request = SandboxGuestRequest.create(
             run_id=run_id.hex,
             instance_id=instance_id.hex,
+            snapshot_manifest_sha256=snapshot.manifest.digest,
+            runner_source_sha256=guest_runner.source_sha256,
+            approval_binding_sha256=approval_binding.digest,
             executable="probe.exe",
             argv=(mode, *arguments),
             timeout_ms=timeout_ms,
@@ -222,10 +434,18 @@ def _execute_probe(
             snapshot_directory=snapshot.root,
             control_directory=control.resolve(),
             temporary_root=temporary_root.resolve(),
+            snapshot_manifest_sha256=snapshot.manifest.digest,
+            runner_source_sha256=guest_runner.source_sha256,
             runner_sha256=guest_runner.binary_sha256,
+            approval_binding_version=request.approval_binding_version,
+            approval_binding_sha256=approval_binding.digest,
             timeout_seconds=max(60.0, (timeout_ms / 1_000) + 30.0),
         )
-        executor = WsbHostExecutor(wsb_cli, cli_runner=executor_runner)
+        executor = WsbHostExecutor(
+            wsb_cli,
+            cli_runner=executor_runner,
+            raw_observer=raw_observer,
+        )
         result = executor.execute(plan, cancel=cancel)
     return _RunArtifacts(result=result, source=source)
 
@@ -235,6 +455,7 @@ def test_real_wsb_blocks_host_files_network_and_workspace_writeback(
     wsb_cli: Path,
     guest_runner: GuestRunnerBuild,
     security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
 ) -> None:
     _require_host_network_positive_controls()
     sentinel = tmp_path / "host-sentinel.txt"
@@ -246,6 +467,7 @@ def test_real_wsb_blocks_host_files_network_and_workspace_writeback(
         wsb_cli=wsb_cli,
         guest_runner=guest_runner,
         security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
         mode="isolation",
         arguments=(
             str(sentinel),
@@ -274,12 +496,14 @@ def test_real_wsb_kills_child_and_grandchild_on_timeout(
     wsb_cli: Path,
     guest_runner: GuestRunnerBuild,
     security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
 ) -> None:
     result = _execute_probe(
         tmp_path,
         wsb_cli=wsb_cli,
         guest_runner=guest_runner,
         security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
         mode="tree",
         timeout_ms=5_000,
         max_output_bytes=16 * 1024,
@@ -338,6 +562,7 @@ def test_real_wsb_host_cancellation_stops_the_explicit_instance(
     wsb_cli: Path,
     guest_runner: GuestRunnerBuild,
     security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
 ) -> None:
     cancel = Event()
     runner = _CancelDuringGuestExecution(cancel)
@@ -348,6 +573,7 @@ def test_real_wsb_host_cancellation_stops_the_explicit_instance(
             wsb_cli=wsb_cli,
             guest_runner=guest_runner,
             security_probe=security_probe,
+            raw_observer=evidence_raw_observer,
             mode="tree",
             timeout_ms=120_000,
             executor_runner=runner,
@@ -361,6 +587,7 @@ def test_real_wsb_bounds_output_while_it_is_read(
     wsb_cli: Path,
     guest_runner: GuestRunnerBuild,
     security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
 ) -> None:
     output_limit = 12 * 1024
     result = _execute_probe(
@@ -368,6 +595,7 @@ def test_real_wsb_bounds_output_while_it_is_read(
         wsb_cli=wsb_cli,
         guest_runner=guest_runner,
         security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
         mode="flood",
         timeout_ms=10_000,
         max_output_bytes=output_limit,
@@ -384,12 +612,14 @@ def test_real_wsb_enforces_process_memory_limit(
     wsb_cli: Path,
     guest_runner: GuestRunnerBuild,
     security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
 ) -> None:
     result = _execute_probe(
         tmp_path,
         wsb_cli=wsb_cli,
         guest_runner=guest_runner,
         security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
         mode="memory",
         timeout_ms=20_000,
         process_memory_bytes=64 * 1024 * 1024,
@@ -410,12 +640,14 @@ def test_real_wsb_enforces_active_process_limit(
     wsb_cli: Path,
     guest_runner: GuestRunnerBuild,
     security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
 ) -> None:
     result = _execute_probe(
         tmp_path,
         wsb_cli=wsb_cli,
         guest_runner=guest_runner,
         security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
         mode="process-limit",
         timeout_ms=10_000,
         active_process_limit=4,

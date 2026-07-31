@@ -36,8 +36,8 @@ from pydantic import (
     model_validator,
 )
 
-GUEST_PROTOCOL_VERSION: Literal[1] = 1
-GUEST_RUNNER_VERSION: Literal[1] = 1
+GUEST_PROTOCOL_VERSION: Literal[2] = 2
+GUEST_RUNNER_VERSION: Literal[2] = 2
 GUEST_RUNNER_SECURITY_ASSURANCE: Literal["candidate-job-only-not-certified"] = (
     "candidate-job-only-not-certified"
 )
@@ -117,10 +117,14 @@ class SandboxGuestRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    version: Literal[1] = GUEST_PROTOCOL_VERSION
+    version: Literal[2] = GUEST_PROTOCOL_VERSION
     run_id: StrictStr
     request_hash: StrictStr
     instance_id: StrictStr
+    snapshot_manifest_sha256: StrictStr
+    runner_source_sha256: StrictStr
+    approval_binding_version: Literal[1] = 1
+    approval_binding_sha256: StrictStr
     executable: StrictStr
     argv: tuple[StrictStr, ...] = Field(max_length=MAX_ARGUMENTS)
     cwd: StrictStr = "."
@@ -150,11 +154,16 @@ class SandboxGuestRequest(BaseModel):
             raise ValueError("guest identifiers must be 32 lowercase hex characters")
         return value
 
-    @field_validator("request_hash")
+    @field_validator(
+        "request_hash",
+        "snapshot_manifest_sha256",
+        "runner_source_sha256",
+        "approval_binding_sha256",
+    )
     @classmethod
-    def request_hash_is_canonical(cls, value: str) -> str:
+    def hashes_are_canonical(cls, value: str) -> str:
         if not _HEX_64.fullmatch(value):
-            raise ValueError("request hash must be 64 lowercase hex characters")
+            raise ValueError("guest hashes must be 64 lowercase hex characters")
         return value
 
     @field_validator("executable")
@@ -217,6 +226,9 @@ class SandboxGuestRequest(BaseModel):
         *,
         run_id: str,
         instance_id: str,
+        snapshot_manifest_sha256: str,
+        runner_source_sha256: str,
+        approval_binding_sha256: str,
         executable: str,
         argv: Sequence[str] = (),
         cwd: str = ".",
@@ -233,6 +245,10 @@ class SandboxGuestRequest(BaseModel):
             "version": GUEST_PROTOCOL_VERSION,
             "run_id": run_id,
             "instance_id": instance_id,
+            "snapshot_manifest_sha256": snapshot_manifest_sha256,
+            "runner_source_sha256": runner_source_sha256,
+            "approval_binding_version": 1,
+            "approval_binding_sha256": approval_binding_sha256,
             "executable": executable,
             "argv": list(argv),
             "cwd": cwd,
@@ -268,8 +284,8 @@ class SandboxGuestResult(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    version: Literal[1] = GUEST_PROTOCOL_VERSION
-    runner_version: Literal[1] = GUEST_RUNNER_VERSION
+    version: Literal[2] = GUEST_PROTOCOL_VERSION
+    runner_version: Literal[2] = GUEST_RUNNER_VERSION
     security_assurance: Literal["candidate-job-only-not-certified"] = (
         GUEST_RUNNER_SECURITY_ASSURANCE
     )

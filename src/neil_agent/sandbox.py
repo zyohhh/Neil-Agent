@@ -36,7 +36,8 @@ TerminationReason = Literal[
 ]
 
 WINDOWS_SANDBOX_BACKEND = "windows-sandbox"
-WINDOWS_SANDBOX_EXECUTABLES = ("WindowsSandbox.exe", "wsb.exe")
+WINDOWS_SANDBOX_GUI_EXECUTABLE = "WindowsSandbox.exe"
+WINDOWS_SANDBOX_CLI_EXECUTABLE = "wsb.exe"
 WINDOWS_SANDBOX_GUEST_WORKSPACE = r"C:\NeilAgent\Workspace"
 
 MIN_TIMEOUT_SECONDS = 0.1
@@ -75,6 +76,10 @@ _SECRET_ENVIRONMENT_FRAGMENTS = (
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _LOCALE_VALUE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 _TIME_ZONE_VALUE = re.compile(r"^[A-Za-z0-9_+./-]{1,128}$")
+_BACKEND_IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_GIT_COMMIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_CERTIFICATION_GATE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _BLOCKED_EXECUTABLE_SUFFIXES = frozenset(
     {".bat", ".cmd", ".js", ".jse", ".ps1", ".vbs", ".vbe", ".wsf", ".wsh"}
 )
@@ -379,15 +384,88 @@ class RunSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxCertification:
+    """Runtime reference to one externally verified sandbox evidence bundle.
+
+    This value validates shape only; constructing it is not evidence
+    verification.  Evidence expiry, review trust, provenance, current-host
+    identity, and source bindings must be checked by the future integration
+    layer before it creates this reference.  Production probing does not
+    currently create one.
+    """
+
+    backend: str
+    git_commit_sha: str
+    evidence_sha256: str
+    independent_review_sha256: str
+    executable_sha256: str
+    runner_source_sha256: str
+    runner_binary_sha256: str
+    policy_version: int
+    protocol_version: int
+    required_gate_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.backend, str) or not _BACKEND_IDENTIFIER.fullmatch(
+            self.backend
+        ):
+            raise ValueError("sandbox certification backend identifier is invalid")
+        if not isinstance(self.git_commit_sha, str) or not _GIT_COMMIT_SHA.fullmatch(
+            self.git_commit_sha
+        ):
+            raise ValueError("sandbox certification Git commit SHA is invalid")
+        for label, value in (
+            ("evidence", self.evidence_sha256),
+            ("independent review", self.independent_review_sha256),
+            ("executable", self.executable_sha256),
+            ("runner source", self.runner_source_sha256),
+            ("runner binary", self.runner_binary_sha256),
+        ):
+            if not isinstance(value, str) or not _SHA256_DIGEST.fullmatch(value):
+                raise ValueError(f"sandbox certification {label} SHA-256 is invalid")
+        _validate_bounded_integer(
+            "sandbox certification policy version",
+            self.policy_version,
+            minimum=1,
+            maximum=2_147_483_647,
+        )
+        _validate_bounded_integer(
+            "sandbox certification protocol version",
+            self.protocol_version,
+            minimum=1,
+            maximum=2_147_483_647,
+        )
+        if (
+            not isinstance(self.required_gate_ids, tuple)
+            or not self.required_gate_ids
+            or len(self.required_gate_ids) > 64
+        ):
+            raise ValueError(
+                "sandbox certification gate IDs must be a non-empty bounded tuple"
+            )
+        if any(
+            not isinstance(gate_id, str)
+            or len(gate_id) > 128
+            or not _CERTIFICATION_GATE_ID.fullmatch(gate_id)
+            for gate_id in self.required_gate_ids
+        ):
+            raise ValueError("sandbox certification contains an invalid gate ID")
+        if self.required_gate_ids != tuple(sorted(set(self.required_gate_ids))):
+            raise ValueError(
+                "sandbox certification gate IDs must be unique and canonical"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxCapabilities:
-    """Read-only capability report for one backend on the current host."""
+    """Read-only capability report whose readiness is evidence-derived."""
 
     backend: str
     available: bool
-    ready: bool
     reason_code: str
     summary: str
     executable: Path | None = None
+    certification: SandboxCertification | None = None
     workspace_modes: tuple[WorkspaceMode, ...] = ()
     network_modes: tuple[NetworkMode, ...] = ()
     supports_cancellation: bool = False
@@ -397,26 +475,116 @@ class SandboxCapabilities:
     supports_process_limit: bool = False
 
     def __post_init__(self) -> None:
-        if not self.backend.strip():
+        if not isinstance(self.backend, str) or not _BACKEND_IDENTIFIER.fullmatch(
+            self.backend
+        ):
             raise ValueError("sandbox backend identifier cannot be blank")
-        if self.ready and not self.available:
-            raise ValueError("an unavailable sandbox cannot be ready")
-        if not self.reason_code.strip() or not self.summary.strip():
+        if type(self.available) is not bool:
+            raise ValueError("sandbox availability must be a boolean")
+        if (
+            not isinstance(self.reason_code, str)
+            or not self.reason_code.strip()
+            or not isinstance(self.summary, str)
+            or not self.summary.strip()
+        ):
             raise ValueError("sandbox capability reason and summary cannot be blank")
         if self.executable is not None and not self.executable.is_absolute():
             raise ValueError("sandbox capability executable must be absolute")
         if not self.available and self.executable is not None:
             raise ValueError("an unavailable sandbox cannot expose an executable")
+        if (
+            self.backend == WINDOWS_SANDBOX_BACKEND
+            and self.executable is not None
+            and self.executable.name.casefold()
+            != WINDOWS_SANDBOX_CLI_EXECUTABLE.casefold()
+        ):
+            raise ValueError(
+                "Windows Sandbox execution candidates must be the wsb.exe CLI"
+            )
+        if self.certification is not None:
+            if not isinstance(self.certification, SandboxCertification):
+                raise ValueError("sandbox certification must be a SandboxCertification")
+            if not self.available:
+                raise ValueError("an unavailable sandbox cannot be certified")
+            if self.executable is None:
+                raise ValueError(
+                    "a certified sandbox must expose its executable candidate"
+                )
+            if self.certification.backend != self.backend:
+                raise ValueError(
+                    "sandbox certification backend does not match capabilities"
+                )
+        if not isinstance(self.workspace_modes, tuple):
+            raise ValueError("sandbox workspace modes must be an immutable tuple")
         if len(set(self.workspace_modes)) != len(self.workspace_modes):
             raise ValueError("sandbox workspace modes must be unique")
         if any(
             mode not in {"none", "read-only-snapshot"} for mode in self.workspace_modes
         ):
             raise ValueError("sandbox capability contains an unknown workspace mode")
+        if not isinstance(self.network_modes, tuple):
+            raise ValueError("sandbox network modes must be an immutable tuple")
         if len(set(self.network_modes)) != len(self.network_modes):
             raise ValueError("sandbox network modes must be unique")
         if any(mode != "deny" for mode in self.network_modes):
             raise ValueError("sandbox capability contains an unsafe network mode")
+        for label, value in (
+            ("cancellation", self.supports_cancellation),
+            ("timeout", self.supports_timeout),
+            ("output limit", self.supports_output_limit),
+            ("memory limit", self.supports_memory_limit),
+            ("process limit", self.supports_process_limit),
+        ):
+            if type(value) is not bool:
+                raise ValueError(f"sandbox {label} support must be a boolean")
+        if not self.available and (
+            self.workspace_modes
+            or self.network_modes
+            or self.supports_cancellation
+            or self.supports_timeout
+            or self.supports_output_limit
+            or self.supports_memory_limit
+            or self.supports_process_limit
+        ):
+            raise ValueError(
+                "an unavailable sandbox cannot expose enforcement capabilities"
+            )
+        if self.reason_code == "certification_required" and (
+            not self.available or self.certification is not None
+        ):
+            raise ValueError(
+                "certification_required contradicts sandbox certification state"
+            )
+        if self.reason_code == "ready" and not self.ready:
+            raise ValueError(
+                "ready reason requires availability, certification, and all gates"
+            )
+        if self.ready and self.reason_code != "ready":
+            raise ValueError("a ready sandbox must use the ready reason code")
+
+    @property
+    def capability_gates_complete(self) -> bool:
+        """Return whether every mandatory local enforcement gate is present."""
+
+        return (
+            "read-only-snapshot" in self.workspace_modes
+            and "deny" in self.network_modes
+            and self.supports_cancellation
+            and self.supports_timeout
+            and self.supports_output_limit
+            and self.supports_memory_limit
+            and self.supports_process_limit
+        )
+
+    @property
+    def ready(self) -> bool:
+        """Derive readiness; callers cannot supply or override this value."""
+
+        return (
+            self.available
+            and self.certification is not None
+            and self.capability_gates_complete
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,30 +687,34 @@ class WindowsSandboxBackend:
             return SandboxCapabilities(
                 backend=WINDOWS_SANDBOX_BACKEND,
                 available=False,
-                ready=False,
                 reason_code="unsupported_platform",
                 summary="当前平台不是 Windows，Windows Sandbox 不可用。",
             )
 
-        executable = self._find_executable()
-        if executable is None:
+        gui_executable = self._find_component(WINDOWS_SANDBOX_GUI_EXECUTABLE)
+        cli_executable = self._find_component(WINDOWS_SANDBOX_CLI_EXECUTABLE)
+        if gui_executable is None and cli_executable is None:
             return SandboxCapabilities(
                 backend=WINDOWS_SANDBOX_BACKEND,
                 available=False,
-                ready=False,
                 reason_code="executable_not_found",
                 summary="未找到 WindowsSandbox.exe 或 wsb.exe。",
+            )
+        if cli_executable is None:
+            return SandboxCapabilities(
+                backend=WINDOWS_SANDBOX_BACKEND,
+                available=True,
+                reason_code="cli_executable_required",
+                summary=("已检测到 Windows Sandbox GUI，但缺少可认证的 wsb.exe CLI。"),
+                workspace_modes=("none", "read-only-snapshot"),
+                network_modes=("deny",),
             )
         return SandboxCapabilities(
             backend=WINDOWS_SANDBOX_BACKEND,
             available=True,
-            ready=False,
-            reason_code="execution_channel_unavailable",
-            summary=(
-                "已检测到 Windows Sandbox，但受控输出、完整进程树取消和"
-                "结果回传尚未实现。"
-            ),
-            executable=executable,
+            reason_code="certification_required",
+            summary=("已检测到 Windows Sandbox CLI，但尚无匹配当前构建的认证证据。"),
+            executable=cli_executable,
             workspace_modes=("none", "read-only-snapshot"),
             network_modes=("deny",),
         )
@@ -604,26 +776,23 @@ class WindowsSandboxBackend:
             "Windows Sandbox 执行通道尚未完成，命令已拒绝；不会退化为普通宿主进程。"
         )
 
-    def _find_executable(self) -> Path | None:
-        for name in WINDOWS_SANDBOX_EXECUTABLES:
-            located = self._locator(name)
-            if not located:
-                continue
-            candidate = Path(located)
-            if not candidate.is_absolute():
-                continue
-            if _path_has_reparse_component(candidate):
-                continue
-            try:
-                resolved = candidate.resolve(strict=True)
-            except OSError:
-                continue
-            if (
-                resolved.is_file()
-                and not _is_reparse_point(resolved)
-                and resolved.name.casefold() == name.casefold()
-            ):
-                return resolved
+    def _find_component(self, name: str) -> Path | None:
+        located = self._locator(name)
+        if not located:
+            return None
+        candidate = Path(located)
+        if not candidate.is_absolute() or _path_has_reparse_component(candidate):
+            return None
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None
+        if (
+            resolved.is_file()
+            and not _is_reparse_point(resolved)
+            and resolved.name.casefold() == name.casefold()
+        ):
+            return resolved
         return None
 
     @staticmethod

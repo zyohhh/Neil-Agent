@@ -19,6 +19,8 @@ from neil_agent.sandbox import (
     MAX_SNAPSHOT_TOTAL_BYTES,
     WINDOWS_SANDBOX_GUEST_WORKSPACE,
     RunSpec,
+    SandboxCapabilities,
+    SandboxCertification,
     SandboxLimits,
     SandboxPolicy,
     SandboxResult,
@@ -30,6 +32,24 @@ from neil_agent.sandbox import (
 
 def _absolute_executable(tmp_path: Path) -> Path:
     return (tmp_path / "tool.exe").resolve()
+
+
+def _certification(
+    *,
+    backend: str = "windows-sandbox",
+) -> SandboxCertification:
+    return SandboxCertification(
+        backend=backend,
+        git_commit_sha="1" * 40,
+        evidence_sha256="2" * 64,
+        independent_review_sha256="3" * 64,
+        executable_sha256="4" * 64,
+        runner_source_sha256="5" * 64,
+        runner_binary_sha256="6" * 64,
+        policy_version=1,
+        protocol_version=1,
+        required_gate_ids=("network-deny", "process-tree", "result-integrity"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -163,6 +183,151 @@ def test_result_has_explicit_timeout_and_cancel_semantics() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("backend", ""),
+        ("git_commit_sha", "1" * 39),
+        ("evidence_sha256", "A" * 64),
+        ("independent_review_sha256", "2" * 63),
+        ("executable_sha256", "not-a-digest"),
+        ("runner_source_sha256", "3" * 65),
+        ("runner_binary_sha256", ""),
+        ("policy_version", 0),
+        ("protocol_version", True),
+        ("required_gate_ids", ()),
+        ("required_gate_ids", ("duplicate", "duplicate")),
+        ("required_gate_ids", ("not canonical",)),
+        ("required_gate_ids", ("z-last", "a-first")),
+    ],
+)
+def test_sandbox_certification_rejects_unbound_or_noncanonical_evidence(
+    field: str,
+    value: object,
+) -> None:
+    arguments = {
+        "backend": "windows-sandbox",
+        "git_commit_sha": "1" * 40,
+        "evidence_sha256": "2" * 64,
+        "independent_review_sha256": "3" * 64,
+        "executable_sha256": "4" * 64,
+        "runner_source_sha256": "5" * 64,
+        "runner_binary_sha256": "6" * 64,
+        "policy_version": 1,
+        "protocol_version": 1,
+        "required_gate_ids": ("network-deny",),
+    }
+    arguments[field] = value
+
+    with pytest.raises(ValueError):
+        SandboxCertification(**arguments)  # type: ignore[arg-type]
+
+
+def test_capability_readiness_is_derived_from_certification_and_all_gates(
+    tmp_path: Path,
+) -> None:
+    executable = (tmp_path / "wsb.exe").resolve()
+    certified = SandboxCapabilities(
+        backend="windows-sandbox",
+        available=True,
+        reason_code="ready",
+        summary="全部安全门禁可用。",
+        executable=executable,
+        certification=_certification(),
+        workspace_modes=("read-only-snapshot",),
+        network_modes=("deny",),
+        supports_cancellation=True,
+        supports_timeout=True,
+        supports_output_limit=True,
+        supports_memory_limit=True,
+        supports_process_limit=True,
+    )
+    incomplete = SandboxCapabilities(
+        backend="windows-sandbox",
+        available=True,
+        reason_code="capability_incomplete",
+        summary="缺少完整进程限制。",
+        executable=executable,
+        certification=_certification(),
+        workspace_modes=("read-only-snapshot",),
+        network_modes=("deny",),
+        supports_cancellation=True,
+        supports_timeout=True,
+        supports_output_limit=True,
+        supports_memory_limit=True,
+        supports_process_limit=False,
+    )
+
+    assert certified.ready is True
+    assert certified.capability_gates_complete is True
+    assert incomplete.ready is False
+    assert incomplete.capability_gates_complete is False
+    assert "ready" not in SandboxCapabilities.__dataclass_fields__
+    with pytest.raises(TypeError, match="ready"):
+        SandboxCapabilities(  # type: ignore[call-arg]
+            backend="windows-sandbox",
+            available=True,
+            ready=True,
+            reason_code="ready",
+            summary="不能手工设置 ready。",
+        )
+
+
+def test_capabilities_reject_ready_reason_or_certification_contradictions(
+    tmp_path: Path,
+) -> None:
+    executable = (tmp_path / "wsb.exe").resolve()
+    complete = {
+        "backend": "windows-sandbox",
+        "available": True,
+        "summary": "严格状态。",
+        "executable": executable,
+        "workspace_modes": ("read-only-snapshot",),
+        "network_modes": ("deny",),
+        "supports_cancellation": True,
+        "supports_timeout": True,
+        "supports_output_limit": True,
+        "supports_memory_limit": True,
+        "supports_process_limit": True,
+    }
+
+    with pytest.raises(ValueError, match="ready reason"):
+        SandboxCapabilities(reason_code="ready", **complete)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="ready reason code"):
+        SandboxCapabilities(
+            reason_code="certified_but_misreported",
+            certification=_certification(),
+            **complete,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="backend does not match"):
+        SandboxCapabilities(
+            reason_code="capability_incomplete",
+            certification=_certification(backend="other-backend"),
+            supports_process_limit=False,
+            **{
+                key: value
+                for key, value in complete.items()
+                if key != "supports_process_limit"
+            },  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="cannot be certified"):
+        SandboxCapabilities(
+            backend="windows-sandbox",
+            available=False,
+            reason_code="unsupported_platform",
+            summary="不可用。",
+            certification=_certification(),
+        )
+    with pytest.raises(ValueError, match="wsb.exe CLI"):
+        SandboxCapabilities(
+            backend="windows-sandbox",
+            available=True,
+            reason_code="certification_required",
+            summary="GUI 不能成为执行候选。",
+            executable=(tmp_path / "WindowsSandbox.exe").resolve(),
+        )
+
+
 def test_probe_reports_unsupported_or_missing_backend_without_side_effects() -> None:
     calls: list[str] = []
 
@@ -188,7 +353,7 @@ def test_probe_reports_unsupported_or_missing_backend_without_side_effects() -> 
     assert missing_windows.executable is None
 
 
-def test_probe_reports_detected_backend_as_incomplete(
+def test_probe_reports_gui_as_available_but_not_an_execution_candidate(
     tmp_path: Path,
 ) -> None:
     executable = tmp_path / "WindowsSandbox.exe"
@@ -204,11 +369,34 @@ def test_probe_reports_detected_backend_as_incomplete(
 
     assert capabilities.available is True
     assert capabilities.ready is False
-    assert capabilities.reason_code == "execution_channel_unavailable"
-    assert capabilities.executable == executable.resolve()
+    assert capabilities.reason_code == "cli_executable_required"
+    assert capabilities.executable is None
+    assert capabilities.certification is None
     assert capabilities.workspace_modes == ("none", "read-only-snapshot")
     assert capabilities.network_modes == ("deny",)
     assert capabilities.supports_cancellation is False
+
+
+def test_probe_exposes_only_wsb_cli_as_uncertified_execution_candidate(
+    tmp_path: Path,
+) -> None:
+    gui = tmp_path / "WindowsSandbox.exe"
+    cli = tmp_path / "wsb.exe"
+    gui.write_bytes(b"not executed")
+    cli.write_bytes(b"not executed")
+    backend = WindowsSandboxBackend(
+        platform_name="nt",
+        executable_locator=lambda name: str(tmp_path / name),
+    )
+
+    capabilities = backend.probe()
+
+    assert capabilities.available is True
+    assert capabilities.ready is False
+    assert capabilities.reason_code == "certification_required"
+    assert capabilities.executable == cli.resolve()
+    assert capabilities.executable != gui.resolve()
+    assert capabilities.certification is None
 
 
 def test_unavailable_run_fails_closed_without_spawning(

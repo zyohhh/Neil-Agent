@@ -51,7 +51,7 @@ uv run neil-agent -p "检查工作区状态" --output-format stream-json
 
 - 默认协议 v1 始终只读；不会接受审批 ID，也不提供写文件、质量检查、暂存或提交。
 - 显式协议 v2 提供两次运行的审批流程：`request` 只生成精确预览，`approve` 使用一个未过期请求 ID 执行完全匹配的单项操作。
-- v2 审批模式仅支持 `json` / `stream-json`，审批请求有效期为 15 分钟；工作区、prompt、项目指令、工具参数或当前预览变化都会拒绝旧请求。
+- v2 审批模式仅支持 `json` / `stream-json`，审批请求有效期为 15 分钟；工作区、prompt、项目指令、工具参数、当前预览或机器可读 binding 变化都会拒绝旧请求。approve 会在模型调用前原子领取 ID，因此失败、并发和篡改后恢复也不能重放。
 - `text`：标准输出只有最终文本流；错误写入标准错误。
 - `json`：标准输出只有一行最终 JSON，包含协议版本、结果、活动、服务端 `usage` 与退出状态。
 - `stream-json`：标准输出为 JSONL，依次发送 `session_start`、活动、文本增量和最终结果或错误。
@@ -77,8 +77,13 @@ uv run neil-agent -p "更新版本号" --protocol-version 2 --permission-mode ap
 仓库已包含过滤只读快照、固定 guest runner 和 `wsb.exe` 两阶段结果导出的
 候选实现，但它尚未接入 Agent 工具，也不代表后端已经通过真实平台认证。
 专用 Windows 安全任务使用 `SANDBOX_REQUIRED=1`，缺少组件或任何隔离用例
-未通过都会失败；普通开发机可以跳过真实平台用例。完整策略、候选边界和
-开放门禁见 [`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)。
+未通过都会失败；它还要求同一构建重复三轮，记录平台/产物/JUnit 与真实
+`--raw` 调用 transcript，并实际安装和测试唯一 wheel 后生成 canonical
+aggregate。aggregate 本身不是认证，默认空的独立审查 trust pins 不能使后端
+ready。普通开发机可以跳过真实平台用例。
+完整策略、候选边界和开放门禁见
+[`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)，证据格式与审查
+流程见 [`docs/sandbox-certification.md`](docs/sandbox-certification.md)。
 
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 
