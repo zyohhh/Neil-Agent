@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event, Lock
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from unicodedata import category
 
 from rich.text import Text
@@ -16,7 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Log, Static, Tree
 from textual.widgets.tree import TreeNode
 
@@ -37,6 +37,7 @@ MAX_LIVE_OUTPUT_LINES = 500
 MAX_LIVE_ERROR_CHARS = 500
 MAX_APPROVAL_PREVIEW_CHARS = 20_000
 NARROW_TERMINAL_WIDTH = 88
+SHORT_TERMINAL_HEIGHT = 36
 
 NodeFilter = Literal["all", "active", "failed", "tools"]
 
@@ -261,6 +262,14 @@ class LiveCockpitApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "request_exit", "退出"),
         Binding("ctrl+x", "cancel_turn", "取消请求"),
+        Binding(
+            "f2",
+            "toggle_output",
+            "切换结果",
+            priority=True,
+            tooltip="展开结果区或返回实时执行树",
+        ),
+        Binding("ctrl+o", "toggle_output", "", show=False, priority=True),
         Binding("1", "filter_all", "全部"),
         Binding("2", "filter_active", "进行中"),
         Binding("3", "filter_failed", "失败"),
@@ -291,6 +300,7 @@ class LiveCockpitApp(App[None]):
 
     #workspace {
         height: 1fr;
+        min-height: 14;
         padding: 0 1;
     }
 
@@ -337,9 +347,10 @@ class LiveCockpitApp(App[None]):
     }
 
     #conversation {
-        height: 12;
+        height: 1fr;
+        min-height: 14;
         margin: 0 1;
-        border-top: tall #223444;
+        border: round #29485c;
         background: #080d14;
     }
 
@@ -347,6 +358,7 @@ class LiveCockpitApp(App[None]):
         height: 2;
         padding: 0 1;
         color: #8fa9bd;
+        background: #0d1620;
         content-align: left middle;
     }
 
@@ -386,18 +398,46 @@ class LiveCockpitApp(App[None]):
         display: none;
     }
 
-    LiveCockpitApp.narrow #conversation {
-        height: 7;
-    }
-
-    LiveCockpitApp.narrow #stream-title {
-        display: none;
-    }
-
     LiveCockpitApp.narrow #brand {
         height: 3;
         padding: 0 1;
         content-align: left middle;
+    }
+
+    LiveCockpitApp.short #brand {
+        height: 3;
+        padding: 0 1;
+        content-align: left middle;
+    }
+
+    LiveCockpitApp.short #metrics {
+        height: 1;
+        padding: 0 1;
+        content-align: left middle;
+    }
+
+    LiveCockpitApp.short #workspace {
+        height: 2fr;
+        min-height: 6;
+    }
+
+    LiveCockpitApp.short #conversation {
+        height: 3fr;
+        min-height: 7;
+    }
+
+    LiveCockpitApp.short #stream-title {
+        display: none;
+    }
+
+    LiveCockpitApp.output-expanded #workspace {
+        display: none;
+    }
+
+    LiveCockpitApp.output-expanded #conversation {
+        height: 1fr;
+        min-height: 0;
+        border: round #00d4c7;
     }
     """
 
@@ -457,6 +497,14 @@ class LiveCockpitApp(App[None]):
     def busy(self) -> bool:
         return self._busy
 
+    @property
+    def output_expanded(self) -> bool:
+        return self.has_class("output-expanded")
+
+    @property
+    def _cockpit_screen(self) -> Screen[Any]:
+        return self.screen_stack[0]
+
     def compose(self) -> ComposeResult:
         yield Static(self._brand_text(), id="brand")
         yield Static(id="metrics")
@@ -475,7 +523,7 @@ class LiveCockpitApp(App[None]):
                 )
         with Vertical(id="conversation"):
             yield Static(
-                "AGENT STREAM  ·  输出仅保留在当前有界视图",
+                self._stream_title_text(),
                 id="stream-title",
             )
             yield Log(
@@ -490,11 +538,11 @@ class LiveCockpitApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.set_class(self.size.width < NARROW_TERMINAL_WIDTH, "narrow")
+        self._sync_responsive_classes(self.size.width, self.size.height)
         self._subscription = self._event_bus.subscribe(self._bridge.observe)
         self._refresh_projection()
         self.set_interval(0.25, self._refresh_metrics)
-        self.query_one("#prompt", Input).focus()
+        self._cockpit_screen.query_one("#prompt", Input).focus()
 
     def on_unmount(self) -> None:
         self._closed = True
@@ -507,7 +555,7 @@ class LiveCockpitApp(App[None]):
         self._reject_pending_approvals()
 
     def on_resize(self, event: events.Resize) -> None:
-        self.set_class(event.size.width < NARROW_TERMINAL_WIDTH, "narrow")
+        self._sync_responsive_classes(event.size.width, event.size.height)
         self._refresh_metrics()
 
     @on(Input.Submitted, "#prompt")
@@ -523,7 +571,7 @@ class LiveCockpitApp(App[None]):
         self._busy = True
         self._cancel_requested.clear()
         self._turn_done.clear()
-        transcript = self.query_one("#transcript", Log)
+        transcript = self._cockpit_screen.query_one("#transcript", Log)
         transcript.write_line(f"YOU  ›  {prompt}")
         transcript.write("NEIL ›  ")
         self.run_worker(
@@ -548,7 +596,9 @@ class LiveCockpitApp(App[None]):
         self._refresh_projection()
 
     def on_assistant_chunk(self, message: AssistantChunk) -> None:
-        self.query_one("#transcript", Log).write(_safe_multiline(message.chunk))
+        self._cockpit_screen.query_one("#transcript", Log).write(
+            _safe_multiline(message.chunk)
+        )
 
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
@@ -559,9 +609,9 @@ class LiveCockpitApp(App[None]):
             summary = Text("■ 请求已取消", style="yellow")
         else:
             summary = Text("▲ 请求失败", style="bold red")
-        transcript = self.query_one("#transcript", Log)
+        transcript = self._cockpit_screen.query_one("#transcript", Log)
         transcript.write_line(f"\n{summary.plain}")
-        prompt = self.query_one("#prompt", Input)
+        prompt = self._cockpit_screen.query_one("#prompt", Input)
         prompt.disabled = False
         prompt.focus()
         self._turn_done.set()
@@ -628,6 +678,13 @@ class LiveCockpitApp(App[None]):
         self.notify("已请求取消；正在等待当前操作返回", severity="warning")
         self._refresh_metrics()
 
+    def action_toggle_output(self) -> None:
+        if isinstance(self.screen, ToolApprovalScreen):
+            return
+        self.set_class(not self.output_expanded, "output-expanded")
+        self._refresh_stream_title()
+        self._cockpit_screen.query_one("#prompt", Input).focus()
+
     def action_filter_all(self) -> None:
         self._set_filter("all")
 
@@ -692,6 +749,19 @@ class LiveCockpitApp(App[None]):
         self._refresh_tree()
         self._refresh_metrics()
 
+    def _sync_responsive_classes(self, width: int, height: int) -> None:
+        self.set_class(width < NARROW_TERMINAL_WIDTH, "narrow")
+        self.set_class(height < SHORT_TERMINAL_HEIGHT, "short")
+
+    def _stream_title_text(self) -> str:
+        action = "F2 返回执行树" if self.output_expanded else "F2 展开结果"
+        return f"AGENT STREAM  ·  {action}  ·  最近 {MAX_LIVE_OUTPUT_LINES} 行"
+
+    def _refresh_stream_title(self) -> None:
+        self._cockpit_screen.query_one("#stream-title", Static).update(
+            self._stream_title_text()
+        )
+
     def _refresh_projection(self) -> None:
         self._graph = ExecutionGraphProjector().project(self._events)
         self._metrics = MetricsProjector().project(self._graph)
@@ -699,7 +769,7 @@ class LiveCockpitApp(App[None]):
         self._refresh_metrics()
 
     def _refresh_tree(self) -> None:
-        tree = self.query_one("#execution-tree", Tree)
+        tree = self._cockpit_screen.query_one("#execution-tree", Tree)
         visible = visible_node_ids(self._graph, self._filter)
         tree.reset(
             Text(
@@ -742,7 +812,7 @@ class LiveCockpitApp(App[None]):
                 for child in reversed(children.get(node.correlation_id, ()))
             )
 
-        title = self.query_one("#tree-title", Static)
+        title = self._cockpit_screen.query_one("#tree-title", Static)
         title.update(
             Text(
                 f"LIVE EXECUTION TREE  ·  FILTER {_FILTER_LABELS[self._filter]}",
@@ -752,7 +822,7 @@ class LiveCockpitApp(App[None]):
         if not nodes:
             tree.root.add_leaf(Text("没有匹配的执行节点", style="dim"))
             self._selected_correlation_id = None
-            self.query_one("#node-detail", Static).update(
+            self._cockpit_screen.query_one("#node-detail", Static).update(
                 Text("调整筛选条件或提交一个任务", style="dim")
             )
             return
@@ -765,7 +835,7 @@ class LiveCockpitApp(App[None]):
         self._refresh_detail()
 
     def _refresh_detail(self) -> None:
-        detail = self.query_one("#node-detail", Static)
+        detail = self._cockpit_screen.query_one("#node-detail", Static)
         if self._selected_correlation_id is None:
             detail.update(Text("选择节点以查看安全元数据", style="dim"))
             return
@@ -776,7 +846,7 @@ class LiveCockpitApp(App[None]):
         detail.update(format_node_detail(node))
 
     def _refresh_metrics(self) -> None:
-        metrics = self.query_one("#metrics", Static)
+        metrics = self._cockpit_screen.query_one("#metrics", Static)
         metrics.update(
             format_metrics(
                 self._metrics,
@@ -785,7 +855,7 @@ class LiveCockpitApp(App[None]):
                 view_dropped=(self._view_dropped_events + self._bridge.dropped_events),
                 busy=self._busy,
                 cancelling=self._cancel_requested.is_set() and self._busy,
-                compact=self.has_class("narrow"),
+                compact=self.has_class("narrow") or self.has_class("short"),
             )
         )
 

@@ -33,7 +33,8 @@ Phase 1 树状实时 DAG 也已完成：
 - 采用 [`textual>=8.2.8,<9.0.0`](https://pypi.org/project/textual/)；该版本要求 Python 3.9 以上，覆盖项目的 Python 3.13 基线，并用 lockfile 固定解析结果。
 - `/cockpit --live` 在全屏界面内运行 Agent 请求，按照 [Textual workers 线程边界](https://textual.textualize.io/guide/workers/) 使用有界批量桥把 EventBus 观察者线程安全地接入 Textual 主线程。
 - 执行树、节点状态和 token/耗时指标全部由 Phase 0B 投影生成；提供节点筛选、安全详情抽屉、流式回答和显式工具审批。
-- 宽/窄终端使用不同信息密度；非交互终端、Textual 不可用或启动失败时继续降级到原 `/cockpit` 快照。
+- 宽/窄、高/矮终端使用不同信息密度；DAG 与回答流自适应分配高度，回答流可一键展开且不丢失现有内容或输入焦点。
+- 非交互终端、Textual 不可用或启动失败时继续降级到原 `/cockpit` 快照。
 
 ## 架构原则
 
@@ -103,6 +104,7 @@ Agent / ToolRegistry / Context
 - [x] 实现全屏应用的启动、退出、终端 resize 和异常降级。
 - [x] 展示 Agent 回合 → 模型请求 → 工具调用 → 检查的实时 DAG。
 - [x] 增加节点筛选、详情抽屉和耗时/token 汇总；详情仍只显示安全元数据。
+- [x] 平衡 DAG 与回答流空间，适配短终端，并提供回答流展开/恢复快捷键。
 - [x] 保留现有 `/cockpit`，在非交互终端和 Textual 不可用时继续作为降级入口。
 
 ### Phase 2A：Context Tomography

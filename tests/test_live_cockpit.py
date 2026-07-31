@@ -221,12 +221,98 @@ async def test_live_app_filters_and_adapts_to_narrow_terminal() -> None:
     async with app.run_test(size=(60, 24)) as pilot:
         await pilot.pause()
         assert app.has_class("narrow")
+        assert app.has_class("short")
+        assert not app.query_one("#detail-panel").display
+        assert app.query_one("#transcript", Log).region.height >= 5
+        assert app.query_one("#prompt", Input).display
         app.action_filter_tools()
         await pilot.pause()
         tree = app.query_one("#execution-tree", Tree)
         assert app.node_filter == "tools"
         assert len(tree.root.children) == 1
         assert "FILTER TOOLS" in app.query_one("#tree-title").render().plain
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_balances_output_and_adapts_to_terminal_height() -> None:
+    bus = EventBus()
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        workspace = app.query_one("#workspace")
+        conversation = app.query_one("#conversation")
+        transcript = app.query_one("#transcript", Log)
+
+        assert not app.has_class("narrow")
+        assert not app.has_class("short")
+        assert abs(workspace.region.height - conversation.region.height) <= 1
+        assert conversation.region.height >= 14
+        assert transcript.region.height >= 7
+
+        await pilot.resize_terminal(120, 24)
+        await pilot.pause()
+
+        assert not app.has_class("narrow")
+        assert app.has_class("short")
+        assert conversation.region.height > workspace.region.height
+        assert transcript.region.height >= 5
+        assert app.query_one("#metrics").region.height == 1
+
+        await pilot.resize_terminal(120, 36)
+        await pilot.pause()
+
+        assert not app.has_class("short")
+        assert abs(workspace.region.height - conversation.region.height) <= 1
+        assert conversation.region.height >= 14
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_expands_output_and_restores_the_dag() -> None:
+    bus = EventBus()
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        workspace = app.query_one("#workspace")
+        transcript = app.query_one("#transcript", Log)
+        prompt = app.query_one("#prompt", Input)
+        transcript.write_line("preserved output")
+        baseline_height = transcript.region.height
+
+        await pilot.press("f2")
+        await pilot.pause()
+
+        assert app.output_expanded
+        assert not workspace.display
+        assert transcript.region.height > baseline_height
+        assert prompt.has_focus
+        assert "F2 返回执行树" in app.query_one("#stream-title").render().plain
+        assert "preserved output" in transcript.lines
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+
+        assert not app.output_expanded
+        assert workspace.display
+        assert transcript.region.height == baseline_height
+        assert prompt.has_focus
+        assert "F2 展开结果" in app.query_one("#stream-title").render().plain
+        assert "preserved output" in transcript.lines
 
     assert bus.close()
 
@@ -252,7 +338,10 @@ async def test_live_approval_modal_returns_explicit_decision() -> None:
             )
         )
         thread.start()
-        await pilot.pause(0.1)
+        await pilot.pause(0.3)
+        assert isinstance(app.screen, ToolApprovalScreen)
+        await pilot.press("f2")
+        assert not app.output_expanded
         assert isinstance(app.screen, ToolApprovalScreen)
         await pilot.press("y")
         await pilot.pause()
