@@ -22,7 +22,14 @@ from textual.timer import Timer
 from textual.widgets import Button, ContentSwitcher, Footer, Input, Log, Static, Tree
 from textual.widgets.tree import TreeNode
 
-from .context import ContextLayerKind, ContextTomography
+from .context import (
+    MAX_CONTEXT_WHAT_IF_CHARS,
+    ContextBudgetPressure,
+    ContextLayerKind,
+    ContextTomography,
+    ContextWhatIf,
+    context_budget_pressure,
+)
 from .errors import NeilAgentError
 from .events import EventBus, EventSubscription, RuntimeEvent
 from .projections import (
@@ -86,6 +93,24 @@ _CONTEXT_LAYER_UNITS: dict[ContextLayerKind, str] = {
     "selected_history": "MSGS",
     "current_chain": "MSGS",
 }
+_CONTEXT_PRESSURE_LABELS = {
+    "safe": "SAFE",
+    "warning": "WATCH",
+    "critical": "HIGH",
+    "exceeded": "OVER",
+}
+_CONTEXT_PRESSURE_STYLES = {
+    "safe": "bold #9ee37d",
+    "warning": "bold yellow",
+    "critical": "bold #ffb454",
+    "exceeded": "bold red",
+}
+_CONTEXT_PRESSURE_BORDER_COLORS = {
+    "safe": "#277c6f",
+    "warning": "#c49a24",
+    "critical": "#ffb454",
+    "exceeded": "#d72d5b",
+}
 
 
 class LiveAgent(Protocol):
@@ -94,6 +119,8 @@ class LiveAgent(Protocol):
     def stream_chat(self, user_input: str) -> Iterator[str]: ...
 
     def context_tomography(self, current_input: str = "") -> ContextTomography: ...
+
+    def context_what_if(self, additional_chars: int) -> ContextWhatIf: ...
 
 
 class RuntimeEventsReady(Message):
@@ -279,6 +306,136 @@ class ToolApprovalScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ContextWhatIfScreen(ModalScreen[int | None]):
+    """Collect a bounded character count for a local-only simulation."""
+
+    BINDINGS = [Binding("escape", "cancel", "取消", priority=True)]
+
+    DEFAULT_CSS = """
+    ContextWhatIfScreen {
+        align: center middle;
+        background: rgba(3, 8, 14, 0.82);
+    }
+
+    #what-if-dialog {
+        width: 88%;
+        max-width: 72;
+        height: auto;
+        max-height: 20;
+        padding: 1 2;
+        background: #0c1820;
+        border: heavy #ffb454;
+    }
+
+    #what-if-kicker {
+        height: 1;
+        color: #ffb454;
+        text-style: bold;
+    }
+
+    #what-if-title {
+        height: 2;
+        color: #f4f7fb;
+        text-style: bold;
+    }
+
+    #what-if-copy,
+    #what-if-hint {
+        height: auto;
+        margin-bottom: 1;
+        color: #8fa9bd;
+    }
+
+    #what-if-input {
+        height: 3;
+        margin-bottom: 1;
+        border: tall #1e6f78;
+        background: #09131a;
+    }
+
+    #what-if-input:focus {
+        border: tall #00d4c7;
+    }
+
+    #what-if-actions {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #what-if-apply,
+    #what-if-clear {
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, initial_chars: int = 10_000) -> None:
+        super().__init__()
+        self._initial_chars = min(max(initial_chars, 1), MAX_CONTEXT_WHAT_IF_CHARS)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="what-if-dialog"):
+            yield Static("LOCAL WHAT-IF · NO MODEL CALL", id="what-if-kicker")
+            yield Static("如果下一次输入增加 N 个字符", id="what-if-title")
+            yield Static(
+                "只重算本地预算与完整轮次裁剪；按 ASCII 约 0.3 token/字符估算。",
+                id="what-if-copy",
+            )
+            yield Input(
+                str(self._initial_chars),
+                placeholder=f"1–{MAX_CONTEXT_WHAT_IF_CHARS:,}",
+                type="integer",
+                max_length=len(str(MAX_CONTEXT_WHAT_IF_CHARS)),
+                id="what-if-input",
+            )
+            yield Static(
+                f"范围 1–{MAX_CONTEXT_WHAT_IF_CHARS:,}；输入 0 可清除当前模拟。",
+                id="what-if-hint",
+            )
+            with Horizontal(id="what-if-actions"):
+                yield Button("模拟  Enter", id="what-if-apply", variant="warning")
+                yield Button("清除", id="what-if-clear")
+                yield Button("取消  Esc", id="what-if-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#what-if-input", Input).focus()
+
+    @on(Input.Submitted, "#what-if-input")
+    def submit_value(self, event: Input.Submitted) -> None:
+        self._submit(event.value)
+
+    @on(Button.Pressed, "#what-if-apply")
+    def apply_button(self) -> None:
+        self._submit(self.query_one("#what-if-input", Input).value)
+
+    @on(Button.Pressed, "#what-if-clear")
+    def clear_button(self) -> None:
+        self.dismiss(0)
+
+    @on(Button.Pressed, "#what-if-cancel")
+    def cancel_button(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _submit(self, raw_value: str) -> None:
+        value = raw_value.strip()
+        if not value.isdecimal():
+            self.notify("请输入非负整数", severity="warning")
+            return
+        additional_chars = int(value)
+        if additional_chars == 0:
+            self.dismiss(0)
+            return
+        if additional_chars > MAX_CONTEXT_WHAT_IF_CHARS:
+            self.notify(
+                f"模拟上限为 {MAX_CONTEXT_WHAT_IF_CHARS:,} 字符",
+                severity="warning",
+            )
+            return
+        self.dismiss(additional_chars)
+
+
 class LiveCockpitApp(App[None]):
     """Interactive Agent shell with a metadata-only live execution tree."""
 
@@ -305,6 +462,13 @@ class LiveCockpitApp(App[None]):
             tooltip="切换实时执行树与上下文断层图",
         ),
         Binding("ctrl+t", "toggle_monitor", "", show=False, priority=True),
+        Binding(
+            "f4",
+            "context_what_if",
+            "上下文模拟",
+            priority=True,
+            tooltip="本地模拟下一次输入增加 N 个字符",
+        ),
         Binding("1", "filter_all", "全部"),
         Binding("2", "filter_active", "进行中"),
         Binding("3", "filter_failed", "失败"),
@@ -570,6 +734,7 @@ class LiveCockpitApp(App[None]):
         self._graph = ExecutionGraphProjector().project(self._events)
         self._metrics = MetricsProjector().project(self._graph)
         self._context_snapshot = agent.context_tomography()
+        self._context_simulation: ContextWhatIf | None = None
         self._monitor_view: MonitorView = "execution"
         self._filter: NodeFilter = "all"
         self._selected_correlation_id: str | None = None
@@ -613,6 +778,10 @@ class LiveCockpitApp(App[None]):
     @property
     def context_snapshot(self) -> ContextTomography:
         return self._context_snapshot
+
+    @property
+    def context_simulation(self) -> ContextWhatIf | None:
+        return self._context_simulation
 
     @property
     def _cockpit_screen(self) -> Screen[Any]:
@@ -710,8 +879,10 @@ class LiveCockpitApp(App[None]):
         event.input.value = ""
         event.input.disabled = True
         self._busy = True
+        self.refresh_bindings()
         self._cancel_requested.clear()
         self._turn_done.clear()
+        self._context_simulation = None
         self._context_snapshot = self._agent.context_tomography(prompt)
         self._refresh_context_view()
         transcript = self._cockpit_screen.query_one("#transcript", Log)
@@ -745,6 +916,7 @@ class LiveCockpitApp(App[None]):
 
     def on_turn_finished(self, message: TurnFinished) -> None:
         self._busy = False
+        self.refresh_bindings()
         if message.succeeded:
             self.completed_turns += 1
             summary = Text("✓ 请求完成", style="green")
@@ -757,6 +929,7 @@ class LiveCockpitApp(App[None]):
         prompt = self._cockpit_screen.query_one("#prompt", Input)
         prompt.disabled = False
         prompt.focus()
+        self._context_simulation = None
         self._context_snapshot = self._agent.context_tomography()
         self._refresh_context_view()
         self._turn_done.set()
@@ -817,6 +990,10 @@ class LiveCockpitApp(App[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action.startswith("filter_") and self._monitor_view != "execution":
             return False
+        if action == "context_what_if" and (
+            self._monitor_view != "context" or self._busy
+        ):
+            return False
         return super().check_action(action, parameters)
 
     def action_cancel_turn(self) -> None:
@@ -829,14 +1006,14 @@ class LiveCockpitApp(App[None]):
         self._refresh_metrics()
 
     def action_toggle_output(self) -> None:
-        if isinstance(self.screen, ToolApprovalScreen):
+        if isinstance(self.screen, ModalScreen):
             return
         self.set_class(not self.output_expanded, "output-expanded")
         self._refresh_stream_title()
         self._cockpit_screen.query_one("#prompt", Input).focus()
 
     def action_toggle_monitor(self) -> None:
-        if isinstance(self.screen, ToolApprovalScreen):
+        if isinstance(self.screen, ModalScreen):
             return
         self._monitor_view = (
             "context" if self._monitor_view == "execution" else "execution"
@@ -850,6 +1027,23 @@ class LiveCockpitApp(App[None]):
         self.refresh_bindings()
         self._cockpit_screen.query_one("#prompt", Input).focus()
 
+    def action_context_what_if(self) -> None:
+        if (
+            isinstance(self.screen, ModalScreen)
+            or self._monitor_view != "context"
+            or self._busy
+        ):
+            return
+        initial_chars = (
+            self._context_simulation.additional_chars
+            if self._context_simulation is not None
+            else 10_000
+        )
+        self.push_screen(
+            ContextWhatIfScreen(initial_chars),
+            self._apply_context_what_if,
+        )
+
     def action_filter_all(self) -> None:
         self._set_filter("all")
 
@@ -861,6 +1055,26 @@ class LiveCockpitApp(App[None]):
 
     def action_filter_tools(self) -> None:
         self._set_filter("tools")
+
+    def _apply_context_what_if(self, additional_chars: int | None) -> None:
+        if additional_chars is None:
+            return
+        if additional_chars == 0:
+            self._context_simulation = None
+            self.notify("已清除本地上下文模拟")
+        else:
+            try:
+                self._context_simulation = self._agent.context_what_if(additional_chars)
+            except ValueError as error:
+                self.notify(_safe_inline(str(error)), severity="warning")
+                return
+            self.notify(
+                f"已模拟增加 {additional_chars:,} 字符；未调用模型",
+                severity="information",
+            )
+        self._refresh_context_view()
+        self.refresh_bindings()
+        self._cockpit_screen.query_one("#prompt", Input).focus()
 
     def _run_agent_turn(self, prompt: str) -> None:
         cancelled = False
@@ -930,16 +1144,27 @@ class LiveCockpitApp(App[None]):
 
     def _refresh_context_view(self) -> None:
         compact = self.has_class("narrow") or self.has_class("short")
+        pressure = context_budget_pressure(self._context_snapshot)
+        pressure_label = _CONTEXT_PRESSURE_LABELS[pressure.level]
         context_panel = self._cockpit_screen.query_one("#context-panel", Vertical)
+        visible_pressure = (
+            self._context_simulation.projected_pressure
+            if self._context_simulation is not None
+            else pressure
+        )
+        context_panel.styles.border = (
+            "round",
+            _CONTEXT_PRESSURE_BORDER_COLORS[visible_pressure.level],
+        )
         context_panel.border_title = (
-            f" CONTEXT · LOCAL ESTIMATE · "
+            f" CONTEXT · BASE {pressure_label} {_pressure_percent(pressure):.1f}% · "
             f"{self._context_snapshot.estimated_chars:,}c / "
             f"~{self._context_snapshot.estimated_tokens:,}t "
             if self.has_class("short")
             else None
         )
         context_panel.border_subtitle = (
-            f" {_compact_context_signal(self._context_snapshot)} "
+            f" {_compact_context_signal(self._context_snapshot, self._context_simulation)} "
             if self.has_class("short")
             else None
         )
@@ -948,18 +1173,31 @@ class LiveCockpitApp(App[None]):
             if compact
             else "CONTEXT LAYERS  ·  LOCAL ESTIMATE  ·  METADATA ONLY"
         )
-        self._cockpit_screen.query_one("#context-title", Static).update(
-            f"{title}  ·  {self._context_snapshot.estimated_chars:,}c / "
+        title_text = Text(f"{title}  ·  ")
+        title_text.append(
+            f"{pressure_label} {_pressure_percent(pressure):.1f}%",
+            style=_CONTEXT_PRESSURE_STYLES[pressure.level],
+        )
+        title_text.append(
+            f"  ·  {self._context_snapshot.estimated_chars:,}c / "
             f"~{self._context_snapshot.estimated_tokens:,}t"
         )
+        self._cockpit_screen.query_one("#context-title", Static).update(title_text)
         self._cockpit_screen.query_one("#context-layers", Static).update(
             format_context_layers(self._context_snapshot, compact=compact)
         )
         self._cockpit_screen.query_one("#context-insights", Static).update(
-            format_context_insights(self._context_snapshot, compact=compact)
+            format_context_insights(
+                self._context_snapshot,
+                self._context_simulation,
+                compact=compact,
+            )
         )
         self._cockpit_screen.query_one("#context-detail", Static).update(
-            format_context_detail(self._context_snapshot)
+            format_context_detail(
+                self._context_snapshot,
+                self._context_simulation,
+            )
         )
 
     def _refresh_projection(self) -> None:
@@ -1190,6 +1428,7 @@ def format_context_layers(
 
 def format_context_insights(
     context: ContextTomography,
+    simulation: ContextWhatIf | None = None,
     *,
     compact: bool = False,
 ) -> Text:
@@ -1204,9 +1443,17 @@ def format_context_insights(
     checkpoint_label = context.checkpoint_state.upper()
     largest = context.tool_results.largest
     if compact:
+        pressure = context_budget_pressure(context)
+        insights.append("LOAD ", style="dim")
         insights.append(
-            f"CUT {context.omitted_rounds} · {context.omitted_history_chars:,}c"
-            f"/~{context.omitted_history_tokens:,}t · CP ",
+            f"{_CONTEXT_PRESSURE_LABELS[pressure.level]} "
+            f"{_pressure_percent(pressure):.1f}%",
+            style=_CONTEXT_PRESSURE_STYLES[pressure.level],
+        )
+        insights.append(
+            f" · CUT {context.omitted_rounds} "
+            f"{_compact_count(context.omitted_history_chars)}c/"
+            f"~{_compact_count(context.omitted_history_tokens)}t · CP ",
             style="yellow" if context.omitted_rounds else "#9ee37d",
         )
         insights.append(f"{checkpoint_label}\n", style=checkpoint_style)
@@ -1229,6 +1476,19 @@ def format_context_insights(
             insights.append(
                 f"IN {_reported_input_tokens(usage):,} · OUT {usage.output_tokens:,}",
                 style="#9bcdf5",
+            )
+        if simulation is not None:
+            projected = simulation.projected_pressure
+            insights.append("\nWHAT-IF ", style="dim")
+            insights.append(
+                f"+{_compact_count(simulation.additional_chars)}c → "
+                f"{_CONTEXT_PRESSURE_LABELS[projected.level]} "
+                f"{_pressure_percent(projected):.1f}%",
+                style=_CONTEXT_PRESSURE_STYLES[projected.level],
+            )
+            insights.append(
+                f" · CUT +{simulation.newly_omitted_rounds}",
+                style="yellow" if simulation.newly_omitted_rounds else "dim",
             )
         return insights
 
@@ -1261,12 +1521,26 @@ def format_context_insights(
     return insights
 
 
-def format_context_detail(context: ContextTomography) -> Text:
+def format_context_detail(
+    context: ContextTomography,
+    simulation: ContextWhatIf | None = None,
+) -> Text:
     """Separate the next-input estimate from historical server measurement."""
 
     detail = Text()
+    pressure = context_budget_pressure(context)
     detail.append("LOCAL NEXT INPUT · ESTIMATE\n", style="bold #91f5e9")
-    detail.append("CHARACTER SOFT BUDGET\n", style="dim")
+    detail.append("PRESSURE ", style="dim")
+    detail.append(
+        f"{_CONTEXT_PRESSURE_LABELS[pressure.level]} "
+        f"{_pressure_percent(pressure):.1f}%",
+        style=_CONTEXT_PRESSURE_STYLES[pressure.level],
+    )
+    detail.append(
+        f" · {_pressure_dimension_label(pressure)} LIMIT\n",
+        style="dim",
+    )
+    detail.append("CHAR  ", style="dim")
     detail.append_text(
         _context_meter(
             context.estimated_chars,
@@ -1274,10 +1548,10 @@ def format_context_detail(context: ContextTomography) -> Text:
             style="#91f5e9",
         )
     )
-    detail.append("\nTOKEN SOFT BUDGET\n", style="dim")
+    detail.append("\nTOKEN ", style="dim")
     if context.budget_tokens is None:
         detail.append(
-            f"~{context.estimated_tokens:,} · NO LIMIT CONFIGURED\n",
+            f"~{context.estimated_tokens:,} · NO LIMIT",
             style="#d7b7ff",
         )
     else:
@@ -1288,15 +1562,46 @@ def format_context_detail(context: ContextTomography) -> Text:
                 style="#d7b7ff",
             )
         )
-        detail.append("\n")
-    detail.append("\nLAST SERVER MEASUREMENT\n", style="bold #9bcdf5")
+    detail.append("\nLOCAL WHAT-IF · NO MODEL CALL\n", style="bold #ffb454")
+    if simulation is None:
+        detail.append("F4 TO SIMULATE +N INPUT CHARS\n", style="dim")
+        detail.append("ASCII ESTIMATE · HISTORY UNCHANGED\n", style="dim")
+    else:
+        projected = simulation.projected_pressure
+        detail.append(
+            f"+{simulation.additional_chars:,} INPUT CHARS · ASCII ESTIMATE\n",
+            style="#ffb454",
+        )
+        detail.append(
+            f"PROJECTED {simulation.projected_chars:,}c"
+            f" / ~{simulation.projected_tokens:,}t\n"
+        )
+        detail.append("PRESSURE ", style="dim")
+        detail.append(
+            f"{_CONTEXT_PRESSURE_LABELS[projected.level]} "
+            f"{_pressure_percent(projected):.1f}%",
+            style=_CONTEXT_PRESSURE_STYLES[projected.level],
+        )
+        detail.append(
+            f" · {_pressure_dimension_label(projected)} LIMIT\n",
+            style="dim",
+        )
+        detail.append(
+            f"HISTORY {simulation.selected_rounds_before}→"
+            f"{simulation.selected_rounds_after} KEPT"
+            f" · CUT +{simulation.newly_omitted_rounds}\n",
+            style="yellow" if simulation.newly_omitted_rounds else "dim",
+        )
+    detail.append("F4 EDIT · 0 CLEAR\n", style="dim")
+    detail.append("LAST SERVER MEASUREMENT\n", style="bold #9bcdf5")
     usage = context.last_server_usage
     if usage is None:
         detail.append("NO SUCCESSFUL TURN USAGE\n", style="dim")
+        detail.append("HISTORICAL · NOT A FORECAST", style="yellow")
     else:
-        detail.append("LAST SUCCESSFUL TURN · AGGREGATE\n", style="dim")
         detail.append(
-            f"IN {_reported_input_tokens(usage):,} · OUT {usage.output_tokens:,}\n",
+            f"LAST TURN · IN {_reported_input_tokens(usage):,}"
+            f" · OUT {usage.output_tokens:,}\n",
             style="#9bcdf5",
         )
         detail.append(
@@ -1304,8 +1609,8 @@ def format_context_detail(context: ContextTomography) -> Text:
             f" · READ {usage.cache_read_input_tokens:,}\n",
             style="dim",
         )
-        detail.append(f"TOTAL {usage.total_tokens:,}\n", style="#9bcdf5")
-    detail.append("HISTORICAL · NOT A FORECAST", style="yellow")
+        detail.append(f"TOTAL {usage.total_tokens:,} · ", style="#9bcdf5")
+        detail.append("HISTORICAL · NOT A FORECAST", style="yellow")
     return detail
 
 
@@ -1317,12 +1622,28 @@ def _reported_input_tokens(usage: TokenUsage) -> int:
     )
 
 
-def _compact_context_signal(context: ContextTomography) -> str:
+def _compact_context_signal(
+    context: ContextTomography,
+    simulation: ContextWhatIf | None = None,
+) -> str:
+    pressure = context_budget_pressure(context)
+    pressure_signal = (
+        f"{_CONTEXT_PRESSURE_LABELS[pressure.level]}{_pressure_percent(pressure):.0f}%"
+    )
     checkpoint = {
         "none": "CP—",
         "kept": "CP✓",
         "omitted": "CP×",
     }[context.checkpoint_state]
+    if simulation is not None:
+        projected = simulation.projected_pressure
+        return (
+            f"{pressure_signal} · CUT{context.omitted_rounds} · {checkpoint} · "
+            f"IF+{_compact_count(simulation.additional_chars)}→"
+            f"{_CONTEXT_PRESSURE_LABELS[projected.level]}"
+            f"{_pressure_percent(projected):.0f}% · "
+            f"+{simulation.newly_omitted_rounds}CUT"
+        )
     largest = context.tool_results.largest
     tool_signal = f"TOOL↑{_compact_count(largest[0].chars)}c" if largest else "TOOL—"
     usage = context.last_server_usage
@@ -1332,8 +1653,17 @@ def _compact_context_signal(context: ContextTomography) -> str:
         else "SRV—"
     )
     return (
-        f"CUT{context.omitted_rounds} · {checkpoint} · {tool_signal} · {server_signal}"
+        f"{pressure_signal} · CUT{context.omitted_rounds} · {checkpoint} · "
+        f"{tool_signal} · {server_signal}"
     )
+
+
+def _pressure_percent(pressure: ContextBudgetPressure) -> float:
+    return pressure.limiting_basis_points / 100
+
+
+def _pressure_dimension_label(pressure: ContextBudgetPressure) -> str:
+    return "TOKEN" if pressure.limiting_dimension == "tokens" else "CHAR"
 
 
 def _compact_count(value: int) -> str:

@@ -7,11 +7,13 @@ import pytest
 from neil_agent.agent import COMPACTION_CHECKPOINT_USER, Agent
 from neil_agent.context import (
     CONTEXT_LAYER_ORDER,
+    MAX_CONTEXT_WHAT_IF_CHARS,
     ContextLayerEstimate,
     ContextTomography,
     ContextToolResultFootprint,
     ContextToolResultInsights,
     build_context_tomography,
+    context_budget_pressure,
     estimate_fixed_chars,
     estimate_fixed_tokens,
     estimate_message_chars,
@@ -382,6 +384,108 @@ def test_context_tomography_marks_compaction_checkpoint_selection() -> None:
     assert kept.last_server_usage == TokenUsage(input_tokens=90, output_tokens=10)
     assert omitted.checkpoint_state == "omitted"
     assert omitted.selected_rounds == 0
+
+
+@pytest.mark.parametrize(
+    ("estimated_chars", "expected_level"),
+    (
+        (7_499, "safe"),
+        (7_500, "warning"),
+        (9_000, "critical"),
+        (10_000, "critical"),
+        (10_001, "exceeded"),
+    ),
+)
+def test_context_pressure_uses_deterministic_soft_budget_thresholds(
+    estimated_chars: int,
+    expected_level: str,
+) -> None:
+    layers = (
+        ContextLayerEstimate("system", estimated_chars, 100, 1),
+        ContextLayerEstimate("tool_schemas", 0, 0, 0),
+        ContextLayerEstimate("project_instructions", 0, 0, 0),
+        ContextLayerEstimate("selected_history", 0, 0, 0),
+        ContextLayerEstimate("current_chain", 0, 0, 0),
+    )
+    tomography = ContextTomography(
+        budget_chars=10_000,
+        budget_tokens=None,
+        stored_rounds=0,
+        selected_rounds=0,
+        omitted_rounds=0,
+        stored_history_chars=0,
+        stored_history_tokens=0,
+        layers=layers,
+    )
+
+    pressure = context_budget_pressure(tomography)
+
+    assert pressure.level == expected_level
+    assert pressure.limiting_dimension == "characters"
+    assert pressure.character_headroom == max(10_000 - estimated_chars, 0)
+
+
+def test_context_pressure_uses_optional_token_budget_when_more_constrained() -> None:
+    tomography = ContextTomography(
+        budget_chars=10_000,
+        budget_tokens=1_000,
+        stored_rounds=0,
+        selected_rounds=0,
+        omitted_rounds=0,
+        stored_history_chars=0,
+        stored_history_tokens=0,
+        layers=(
+            ContextLayerEstimate("system", 5_000, 950, 1),
+            ContextLayerEstimate("tool_schemas", 0, 0, 0),
+            ContextLayerEstimate("project_instructions", 0, 0, 0),
+            ContextLayerEstimate("selected_history", 0, 0, 0),
+            ContextLayerEstimate("current_chain", 0, 0, 0),
+        ),
+    )
+
+    pressure = context_budget_pressure(tomography)
+
+    assert pressure.level == "critical"
+    assert pressure.limiting_dimension == "tokens"
+    assert pressure.token_basis_points == 9_500
+    assert pressure.token_headroom == 50
+
+
+def test_agent_context_what_if_is_local_bounded_and_round_safe() -> None:
+    model = ContextFakeModel()
+    agent = Agent(
+        model,
+        system_prompt="s",
+        max_rounds=4,
+        max_context_chars=600,
+    )
+    agent.restore_messages(
+        (
+            Message(role="user", content="recent"),
+            Message(role="assistant", content="history" * 25),
+        ),
+        last_usage=TokenUsage(input_tokens=90, output_tokens=10),
+    )
+    original_messages = agent.messages
+    original_usage = agent.last_usage
+
+    simulation = agent.context_what_if(550)
+
+    assert simulation.schema_version == 1
+    assert simulation.additional_chars == 550
+    assert simulation.projected_pressure.level == "exceeded"
+    assert simulation.selected_rounds_before == 1
+    assert simulation.selected_rounds_after == 0
+    assert simulation.newly_omitted_rounds == 1
+    assert agent.messages == original_messages
+    assert agent.last_usage == original_usage
+    assert model.requests == []
+    assert "xxxxxxxxxxxxxxxxxxxx" not in repr(simulation)
+
+    with pytest.raises(ValueError, match="supported range"):
+        agent.context_what_if(0)
+    with pytest.raises(ValueError, match="supported range"):
+        agent.context_what_if(MAX_CONTEXT_WHAT_IF_CHARS + 1)
 
 
 def test_optional_token_budget_can_be_stricter_than_character_budget() -> None:

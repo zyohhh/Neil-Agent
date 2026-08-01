@@ -14,6 +14,8 @@ from neil_agent.context import (
     ContextTomography,
     ContextToolResultFootprint,
     ContextToolResultInsights,
+    ContextWhatIf,
+    build_context_what_if,
 )
 from neil_agent.events import (
     EventBus,
@@ -24,6 +26,7 @@ from neil_agent.events import (
     RuntimeStatus,
 )
 from neil_agent.live_cockpit import (
+    ContextWhatIfScreen,
     LiveCockpitApp,
     RuntimeEventBridge,
     ToolApprovalScreen,
@@ -151,10 +154,19 @@ class FakeLiveAgent:
         self._emitter = RuntimeEventEmitter(bus)
         self.prompts: list[str] = []
         self.tomography_inputs: list[str] = []
+        self.what_if_inputs: list[int] = []
 
     def context_tomography(self, current_input: str = "") -> ContextTomography:
         self.tomography_inputs.append(current_input)
         return _context_snapshot(current_input)
+
+    def context_what_if(self, additional_chars: int) -> ContextWhatIf:
+        self.what_if_inputs.append(additional_chars)
+        return build_context_what_if(
+            _context_snapshot(),
+            _context_snapshot("x" * additional_chars),
+            additional_chars=additional_chars,
+        )
 
     def stream_chat(self, user_input: str) -> Iterator[str]:
         self.prompts.append(user_input)
@@ -235,19 +247,34 @@ def test_tree_filters_keep_ancestors_and_details_treat_markup_as_text() -> None:
 
 def test_context_tomography_formatters_are_metadata_only() -> None:
     context = _context_snapshot("current")
+    simulation = build_context_what_if(
+        _context_snapshot(),
+        _context_snapshot("x" * 110_000),
+        additional_chars=110_000,
+    )
 
     layers = format_context_layers(context)
     compact_layers = format_context_layers(context, compact=True)
     insights = format_context_insights(context)
     compact_insights = format_context_insights(context, compact=True)
-    detail = format_context_detail(context)
+    simulated_insights = format_context_insights(
+        _context_snapshot(),
+        simulation,
+        compact=True,
+    )
+    detail = format_context_detail(context, simulation)
 
     assert "SYSTEM FIXED" in layers.plain
     assert "CURRENT CHAIN" in compact_layers.plain
     assert "LARGEST TOOL RESULTS · BODY HIDDEN" in insights.plain
     assert "#01" in insights.plain
     assert "SERVER HIST" in compact_insights.plain
-    assert "CHARACTER SOFT BUDGET" in detail.plain
+    assert "4.0kc/~1.2kt" in compact_insights.plain
+    assert "WHAT-IF" in simulated_insights.plain
+    assert "OVER" in simulated_insights.plain
+    assert "CHAR" in detail.plain
+    assert "LOCAL WHAT-IF · NO MODEL CALL" in detail.plain
+    assert "+110,000 INPUT CHARS" in detail.plain
     assert "LAST SERVER MEASUREMENT" in detail.plain
     assert "HISTORICAL · NOT A FORECAST" in detail.plain
 
@@ -277,6 +304,55 @@ async def test_live_app_streams_agent_events_and_output() -> None:
         assert app.graph.nodes[0].stage == "agent_turn"
         transcript = app.query_one("#transcript", Log)
         assert "hello world" in "\n".join(transcript.lines)
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_runs_and_clears_context_what_if_without_agent_turn() -> None:
+    bus = EventBus()
+    agent = FakeLiveAgent(bus)
+    app = LiveCockpitApp(
+        agent,
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app.check_action("context_what_if", ()) is False
+
+        await pilot.press("f3")
+        await pilot.press("f4")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ContextWhatIfScreen)
+        what_if_input = app.screen.query_one("#what-if-input", Input)
+        assert what_if_input.has_focus
+        what_if_input.value = "110000"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.context_simulation is not None
+        assert app.context_simulation.additional_chars == 110_000
+        assert app.context_simulation.projected_pressure.level == "exceeded"
+        assert agent.what_if_inputs == [110_000]
+        assert agent.prompts == []
+        detail = app.query_one("#context-detail").render().plain
+        assert "LOCAL WHAT-IF · NO MODEL CALL" in detail
+        assert "+110,000 INPUT CHARS" in detail
+
+        await pilot.press("f4")
+        await pilot.pause()
+        clear_input = app.screen.query_one("#what-if-input", Input)
+        clear_input.value = "0"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.context_simulation is None
+        assert agent.what_if_inputs == [110_000]
+        assert app.query_one("#prompt", Input).has_focus
 
     assert bus.close()
 

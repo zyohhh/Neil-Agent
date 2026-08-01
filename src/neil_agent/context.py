@@ -26,7 +26,13 @@ CONTEXT_LAYER_ORDER: tuple[ContextLayerKind, ...] = (
 )
 ContextCheckpointState = Literal["none", "kept", "omitted"]
 ContextToolResultState = Literal["kept", "omitted"]
+ContextPressureLevel = Literal["safe", "warning", "critical", "exceeded"]
+ContextPressureDimension = Literal["characters", "tokens"]
 MAX_CONTEXT_TOOL_FOOTPRINTS = 3
+MAX_CONTEXT_WHAT_IF_CHARS = 1_000_000
+CONTEXT_PRESSURE_WARNING_BASIS_POINTS = 7_500
+CONTEXT_PRESSURE_CRITICAL_BASIS_POINTS = 9_000
+CONTEXT_PRESSURE_LIMIT_BASIS_POINTS = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +131,92 @@ class ContextToolResultInsights:
         )
         if self.largest != canonical:
             raise ValueError("tool result footprints must use canonical size order")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextBudgetPressure:
+    """Deterministic pressure against local character and token budgets."""
+
+    character_basis_points: int
+    token_basis_points: int | None
+    character_headroom: int
+    token_headroom: int | None
+    limiting_dimension: ContextPressureDimension
+    level: ContextPressureLevel
+
+    def __post_init__(self) -> None:
+        if self.character_basis_points < 0:
+            raise ValueError("character pressure cannot be negative")
+        if self.token_basis_points is not None and self.token_basis_points < 0:
+            raise ValueError("token pressure cannot be negative")
+        if self.character_headroom < 0:
+            raise ValueError("character headroom cannot be negative")
+        if self.token_headroom is not None and self.token_headroom < 0:
+            raise ValueError("token headroom cannot be negative")
+        if self.limiting_dimension not in {"characters", "tokens"}:
+            raise ValueError(f"unknown pressure dimension: {self.limiting_dimension}")
+        if (self.token_basis_points is None) != (self.token_headroom is None):
+            raise ValueError("token pressure and headroom must be configured together")
+        if self.limiting_dimension == "tokens" and self.token_basis_points is None:
+            raise ValueError("token pressure is required for a token limit")
+        if self.level not in {"safe", "warning", "critical", "exceeded"}:
+            raise ValueError(f"unknown context pressure level: {self.level}")
+
+    @property
+    def limiting_basis_points(self) -> int:
+        if self.limiting_dimension == "tokens":
+            assert self.token_basis_points is not None
+            return self.token_basis_points
+        return self.character_basis_points
+
+
+@dataclass(frozen=True, slots=True)
+class ContextWhatIf:
+    """Metadata-only projection for one synthetic next-input size."""
+
+    additional_chars: int
+    baseline_chars: int
+    baseline_tokens: int
+    projected_chars: int
+    projected_tokens: int
+    selected_rounds_before: int
+    selected_rounds_after: int
+    omitted_rounds_before: int
+    omitted_rounds_after: int
+    baseline_pressure: ContextBudgetPressure
+    projected_pressure: ContextBudgetPressure
+    schema_version: Literal[1] = field(default=1, init=False)
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.additional_chars <= MAX_CONTEXT_WHAT_IF_CHARS:
+            raise ValueError("what-if characters are outside the supported range")
+        if (
+            min(
+                self.baseline_chars,
+                self.baseline_tokens,
+                self.projected_chars,
+                self.projected_tokens,
+                self.selected_rounds_before,
+                self.selected_rounds_after,
+                self.omitted_rounds_before,
+                self.omitted_rounds_after,
+            )
+            < 0
+        ):
+            raise ValueError("what-if projection values cannot be negative")
+        if self.selected_rounds_after > self.selected_rounds_before:
+            raise ValueError("what-if selection cannot add stored history")
+        if self.omitted_rounds_after < self.omitted_rounds_before:
+            raise ValueError("what-if projection cannot restore omitted history")
+        if (
+            self.selected_rounds_before + self.omitted_rounds_before
+            != self.selected_rounds_after + self.omitted_rounds_after
+        ):
+            raise ValueError("what-if projection must preserve stored round count")
+
+    @property
+    def newly_omitted_rounds(self) -> int:
+        return self.omitted_rounds_after - self.omitted_rounds_before
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +433,85 @@ def build_context_tomography(
     )
 
 
+def context_budget_pressure(context: ContextTomography) -> ContextBudgetPressure:
+    """Classify local soft-budget pressure without using server usage."""
+
+    character_basis_points = _budget_basis_points(
+        context.estimated_chars,
+        context.budget_chars,
+    )
+    token_basis_points = (
+        None
+        if context.budget_tokens is None
+        else _budget_basis_points(context.estimated_tokens, context.budget_tokens)
+    )
+    limiting_dimension: ContextPressureDimension = "characters"
+    limiting_basis_points = character_basis_points
+    if token_basis_points is not None and token_basis_points > character_basis_points:
+        limiting_dimension = "tokens"
+        limiting_basis_points = token_basis_points
+    if limiting_basis_points > CONTEXT_PRESSURE_LIMIT_BASIS_POINTS:
+        level: ContextPressureLevel = "exceeded"
+    elif limiting_basis_points >= CONTEXT_PRESSURE_CRITICAL_BASIS_POINTS:
+        level = "critical"
+    elif limiting_basis_points >= CONTEXT_PRESSURE_WARNING_BASIS_POINTS:
+        level = "warning"
+    else:
+        level = "safe"
+    return ContextBudgetPressure(
+        character_basis_points=character_basis_points,
+        token_basis_points=token_basis_points,
+        character_headroom=max(context.budget_chars - context.estimated_chars, 0),
+        token_headroom=(
+            None
+            if context.budget_tokens is None
+            else max(context.budget_tokens - context.estimated_tokens, 0)
+        ),
+        limiting_dimension=limiting_dimension,
+        level=level,
+    )
+
+
+def build_context_what_if(
+    baseline: ContextTomography,
+    projected: ContextTomography,
+    *,
+    additional_chars: int,
+) -> ContextWhatIf:
+    """Compare an idle snapshot with a synthetic ASCII next input."""
+
+    if not 1 <= additional_chars <= MAX_CONTEXT_WHAT_IF_CHARS:
+        raise ValueError("what-if characters are outside the supported range")
+    if baseline.layer("current_chain").item_count:
+        raise ValueError("what-if baseline must not contain a current input")
+    if projected.layer("current_chain").item_count != 1:
+        raise ValueError("what-if projection must contain one synthetic input")
+    if (
+        baseline.budget_chars != projected.budget_chars
+        or baseline.budget_tokens != projected.budget_tokens
+    ):
+        raise ValueError("what-if projection must use the same budgets")
+    if (
+        baseline.stored_rounds != projected.stored_rounds
+        or baseline.stored_history_chars != projected.stored_history_chars
+        or baseline.stored_history_tokens != projected.stored_history_tokens
+    ):
+        raise ValueError("what-if projection must use the same stored history")
+    return ContextWhatIf(
+        additional_chars=additional_chars,
+        baseline_chars=baseline.estimated_chars,
+        baseline_tokens=baseline.estimated_tokens,
+        projected_chars=projected.estimated_chars,
+        projected_tokens=projected.estimated_tokens,
+        selected_rounds_before=baseline.selected_rounds,
+        selected_rounds_after=projected.selected_rounds,
+        omitted_rounds_before=baseline.omitted_rounds,
+        omitted_rounds_after=projected.omitted_rounds,
+        baseline_pressure=context_budget_pressure(baseline),
+        projected_pressure=context_budget_pressure(projected),
+    )
+
+
 def _build_tool_result_insights(
     stored_history: Sequence[Message],
     selected_history: Sequence[Message],
@@ -490,6 +661,10 @@ def split_rounds(messages: Sequence[Message]) -> tuple[tuple[Message, ...], ...]
 
 def _json_chars(value: Any) -> int:
     return len(_json_text(value))
+
+
+def _budget_basis_points(value: int, budget: int) -> int:
+    return (value * CONTEXT_PRESSURE_LIMIT_BASIS_POINTS + budget - 1) // budget
 
 
 def _json_text(value: Any) -> str:

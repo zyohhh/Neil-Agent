@@ -20,7 +20,10 @@ from .context import (
     ContextSelection,
     ContextStats,
     ContextTomography,
+    ContextWhatIf,
+    MAX_CONTEXT_WHAT_IF_CHARS,
     PreparedCompaction,
+    build_context_what_if,
     build_context_tomography,
     count_rounds,
     estimate_fixed_chars,
@@ -302,6 +305,19 @@ class Agent:
             budget_tokens=self._max_context_tokens,
             last_server_usage=self._last_usage,
             checkpoint_state=self._context_checkpoint_state(selection),
+        )
+
+    def context_what_if(self, additional_chars: int) -> ContextWhatIf:
+        """Simulate one ASCII-sized next input without calling the model."""
+
+        if not 1 <= additional_chars <= MAX_CONTEXT_WHAT_IF_CHARS:
+            raise ValueError("what-if characters are outside the supported range")
+        baseline = self.context_tomography()
+        projected = self.context_tomography("x" * additional_chars)
+        return build_context_what_if(
+            baseline,
+            projected,
+            additional_chars=additional_chars,
         )
 
     def restore_messages(
