@@ -9,7 +9,12 @@ from threading import Thread
 import pytest
 from textual.widgets import ContentSwitcher, Input, Log, Tree
 
-from neil_agent.context import ContextLayerEstimate, ContextTomography
+from neil_agent.context import (
+    ContextLayerEstimate,
+    ContextTomography,
+    ContextToolResultFootprint,
+    ContextToolResultInsights,
+)
 from neil_agent.events import (
     EventBus,
     RuntimeEvent,
@@ -23,13 +28,14 @@ from neil_agent.live_cockpit import (
     RuntimeEventBridge,
     ToolApprovalScreen,
     format_context_detail,
+    format_context_insights,
     format_context_layers,
     format_node_detail,
     run_live_cockpit,
     visible_node_ids,
 )
 from neil_agent.projections import ExecutionGraphProjector
-from neil_agent.schemas import ToolCall
+from neil_agent.schemas import TokenUsage, ToolCall
 
 NOW = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
 
@@ -42,6 +48,8 @@ def _context_snapshot(current_input: str = "") -> ContextTomography:
         stored_rounds=3,
         selected_rounds=2,
         omitted_rounds=1,
+        stored_history_chars=12_000,
+        stored_history_tokens=3_600,
         layers=(
             ContextLayerEstimate("system", 6_000, 1_800, 1),
             ContextLayerEstimate("tool_schemas", 4_000, 1_200, 12),
@@ -52,6 +60,21 @@ def _context_snapshot(current_input: str = "") -> ContextTomography:
                 current_chars,
                 current_chars // 3,
                 int(bool(current_input)),
+            ),
+        ),
+        last_server_usage=TokenUsage(
+            input_tokens=1_200,
+            output_tokens=120,
+            cache_creation_input_tokens=300,
+            cache_read_input_tokens=700,
+        ),
+        checkpoint_state="kept",
+        tool_results=ContextToolResultInsights(
+            stored_count=2,
+            selected_count=1,
+            largest=(
+                ContextToolResultFootprint(1, 3_200, 960, "omitted"),
+                ContextToolResultFootprint(2, 1_800, 540, "kept"),
             ),
         ),
     )
@@ -215,12 +238,18 @@ def test_context_tomography_formatters_are_metadata_only() -> None:
 
     layers = format_context_layers(context)
     compact_layers = format_context_layers(context, compact=True)
+    insights = format_context_insights(context)
+    compact_insights = format_context_insights(context, compact=True)
     detail = format_context_detail(context)
 
     assert "SYSTEM FIXED" in layers.plain
     assert "CURRENT CHAIN" in compact_layers.plain
+    assert "LARGEST TOOL RESULTS · BODY HIDDEN" in insights.plain
+    assert "#01" in insights.plain
+    assert "SERVER HIST" in compact_insights.plain
     assert "CHARACTER SOFT BUDGET" in detail.plain
-    assert "COUNTS ONLY · NO CONTEXT TEXT" in detail.plain
+    assert "LAST SERVER MEASUREMENT" in detail.plain
+    assert "HISTORICAL · NOT A FORECAST" in detail.plain
 
 
 @pytest.mark.asyncio
@@ -280,6 +309,10 @@ async def test_live_app_switches_between_execution_and_context_views() -> None:
         assert app.query_one("#conversation").region == conversation
         assert "SYSTEM FIXED" in app.query_one("#context-layers").render().plain
         assert "LOCAL ESTIMATE" in app.query_one("#context-title").render().plain
+        assert "BODY HIDDEN" in app.query_one("#context-insights").render().plain
+        assert (
+            "LAST SERVER MEASUREMENT" in app.query_one("#context-detail").render().plain
+        )
         assert app.check_action("filter_tools", ()) is False
         assert app.query_one("#prompt", Input).has_focus
 
@@ -324,8 +357,10 @@ async def test_live_app_filters_and_adapts_to_narrow_terminal() -> None:
         assert app.monitor_view == "context"
         assert app.query_one("#context-panel").display
         assert not app.query_one("#context-detail-panel").display
+        assert not app.query_one("#context-insights").display
         assert "CURRENT CHAIN" in app.query_one("#context-layers").render().plain
         assert app.query_one("#context-layers").region.height >= 5
+        assert "SRV" in str(app.query_one("#context-panel").border_subtitle)
         assert app.query_one("#transcript", Log).region.height >= 5
 
         await pilot.resize_terminal(60, 40)
@@ -335,6 +370,11 @@ async def test_live_app_filters_and_adapts_to_narrow_terminal() -> None:
         assert not app.has_class("short")
         assert app.query_one("#context-title").display
         assert app.query_one("#context-panel").border_title is None
+        assert app.query_one("#context-insights").display
+        compact_insights = app.query_one("#context-insights").render().plain
+        assert "TOOL↑" in compact_insights
+        assert "SERVER HIST" in compact_insights
+        assert app.query_one("#context-insights").region.height >= 3
 
     assert bus.close()
 

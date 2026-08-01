@@ -16,6 +16,7 @@ from .activity import (
 from .checkpoint import FileCheckpointHistory
 from .config import DEFAULT_SYSTEM_PROMPT
 from .context import (
+    ContextCheckpointState,
     ContextSelection,
     ContextStats,
     ContextTomography,
@@ -295,9 +296,12 @@ class Agent:
             tools=self._tool_definitions(),
             selected_history=selection,
             current_chain=current_chain,
+            stored_history=self._messages,
             stored_rounds=count_rounds(self._messages),
             budget_chars=self._max_context_chars,
             budget_tokens=self._max_context_tokens,
+            last_server_usage=self._last_usage,
+            checkpoint_state=self._context_checkpoint_state(selection),
         )
 
     def restore_messages(
@@ -868,6 +872,20 @@ class Agent:
             and messages[0].content == COMPACTION_CHECKPOINT_USER
             and messages[1].role == "assistant"
             and messages[1].content.startswith("[Compressed conversation summary]\n")
+        )
+
+    def _context_checkpoint_state(
+        self,
+        selection: ContextSelection,
+    ) -> ContextCheckpointState:
+        rounds = split_rounds(self._messages)
+        if not rounds or not self._is_compaction_checkpoint(rounds[0]):
+            return "none"
+        checkpoint = rounds[0]
+        return (
+            "kept"
+            if tuple(selection.messages[: len(checkpoint)]) == checkpoint
+            else "omitted"
         )
 
     def _tool_definitions(self) -> tuple[ToolDefinition, ...]:

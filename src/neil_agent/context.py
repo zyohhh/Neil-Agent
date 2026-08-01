@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .schemas import Message, ToolDefinition
+from .schemas import Message, TokenUsage, ToolDefinition, ToolResult
 
 ContextLayerKind = Literal[
     "system",
@@ -24,6 +24,9 @@ CONTEXT_LAYER_ORDER: tuple[ContextLayerKind, ...] = (
     "selected_history",
     "current_chain",
 )
+ContextCheckpointState = Literal["none", "kept", "omitted"]
+ContextToolResultState = Literal["kept", "omitted"]
+MAX_CONTEXT_TOOL_FOOTPRINTS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +80,54 @@ class ContextLayerEstimate:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextToolResultFootprint:
+    """One large stored tool result represented without its ID or body."""
+
+    ordinal: int
+    chars: int
+    estimated_tokens: int
+    state: ContextToolResultState
+
+    def __post_init__(self) -> None:
+        if self.ordinal < 1:
+            raise ValueError("tool result ordinal must be positive")
+        if self.chars < 0 or self.estimated_tokens < 0:
+            raise ValueError("tool result footprint cannot be negative")
+        if self.state not in {"kept", "omitted"}:
+            raise ValueError(f"unknown tool result state: {self.state}")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextToolResultInsights:
+    """Bounded aggregate and largest tool-result footprints."""
+
+    stored_count: int = 0
+    selected_count: int = 0
+    largest: tuple[ContextToolResultFootprint, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.stored_count < 0 or self.selected_count < 0:
+            raise ValueError("tool result counts cannot be negative")
+        if self.selected_count > self.stored_count:
+            raise ValueError("selected tool results cannot exceed stored results")
+        if len(self.largest) > MAX_CONTEXT_TOOL_FOOTPRINTS:
+            raise ValueError("too many tool result footprints")
+        ordinals = tuple(item.ordinal for item in self.largest)
+        if len(set(ordinals)) != len(ordinals):
+            raise ValueError("tool result footprint ordinals must be unique")
+        if any(ordinal > self.stored_count for ordinal in ordinals):
+            raise ValueError("tool result footprint ordinal exceeds stored results")
+        canonical = tuple(
+            sorted(
+                self.largest,
+                key=lambda item: (-item.chars, -item.estimated_tokens, item.ordinal),
+            )
+        )
+        if self.largest != canonical:
+            raise ValueError("tool result footprints must use canonical size order")
+
+
+@dataclass(frozen=True, slots=True)
 class ContextTomography:
     """Versioned local estimate containing counts but no context text."""
 
@@ -85,8 +136,15 @@ class ContextTomography:
     stored_rounds: int
     selected_rounds: int
     omitted_rounds: int
+    stored_history_chars: int
+    stored_history_tokens: int
     layers: tuple[ContextLayerEstimate, ...]
-    schema_version: Literal[1] = field(default=1, init=False)
+    last_server_usage: TokenUsage | None = None
+    checkpoint_state: ContextCheckpointState = "none"
+    tool_results: ContextToolResultInsights = field(
+        default_factory=ContextToolResultInsights
+    )
+    schema_version: Literal[2] = field(default=2, init=False)
 
     def __post_init__(self) -> None:
         if self.budget_chars < 1:
@@ -95,10 +153,19 @@ class ContextTomography:
             raise ValueError("context token budget must be positive")
         if min(self.stored_rounds, self.selected_rounds, self.omitted_rounds) < 0:
             raise ValueError("context round counts cannot be negative")
+        if self.stored_history_chars < 0 or self.stored_history_tokens < 0:
+            raise ValueError("stored history footprint cannot be negative")
         if self.selected_rounds + self.omitted_rounds != self.stored_rounds:
             raise ValueError("selected and omitted rounds must equal stored rounds")
         if tuple(layer.kind for layer in self.layers) != CONTEXT_LAYER_ORDER:
             raise ValueError("context layers must use the canonical order exactly once")
+        selected_history = self.layer("selected_history")
+        if selected_history.chars > self.stored_history_chars:
+            raise ValueError("selected history chars cannot exceed stored history")
+        if selected_history.estimated_tokens > self.stored_history_tokens:
+            raise ValueError("selected history tokens cannot exceed stored history")
+        if self.checkpoint_state not in {"none", "kept", "omitted"}:
+            raise ValueError(f"unknown checkpoint state: {self.checkpoint_state}")
 
     @property
     def estimated_chars(self) -> int:
@@ -107,6 +174,16 @@ class ContextTomography:
     @property
     def estimated_tokens(self) -> int:
         return sum(layer.estimated_tokens for layer in self.layers)
+
+    @property
+    def omitted_history_chars(self) -> int:
+        return self.stored_history_chars - self.layer("selected_history").chars
+
+    @property
+    def omitted_history_tokens(self) -> int:
+        return (
+            self.stored_history_tokens - self.layer("selected_history").estimated_tokens
+        )
 
     def layer(self, kind: ContextLayerKind) -> ContextLayerEstimate:
         return self.layers[CONTEXT_LAYER_ORDER.index(kind)]
@@ -150,6 +227,18 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
     return sum(estimate_message_tokens(message) for message in messages)
 
 
+def estimate_tool_result_chars(result: ToolResult) -> int:
+    """Estimate one tool-result block without retaining its body."""
+
+    return _json_chars(result.to_api_dict())
+
+
+def estimate_tool_result_tokens(result: ToolResult) -> int:
+    """Estimate tokens in one tool-result block without retaining its body."""
+
+    return estimate_text_tokens(_json_text(result.to_api_dict()))
+
+
 def estimate_fixed_chars(
     system_prompt: str,
     tools: Sequence[ToolDefinition],
@@ -184,12 +273,17 @@ def build_context_tomography(
     tools: Sequence[ToolDefinition],
     selected_history: ContextSelection,
     current_chain: Sequence[Message],
+    stored_history: Sequence[Message],
     stored_rounds: int,
     budget_chars: int,
     budget_tokens: int | None,
+    last_server_usage: TokenUsage | None,
+    checkpoint_state: ContextCheckpointState,
 ) -> ContextTomography:
     """Split one local request estimate without retaining any source text."""
 
+    if count_rounds(stored_history) != stored_rounds:
+        raise ValueError("stored round count does not match stored history")
     system_chars = estimate_fixed_chars(system_prompt_without_project, ())
     prompt_chars = estimate_fixed_chars(system_prompt, ())
     fixed_chars = estimate_fixed_chars(system_prompt, tools)
@@ -204,6 +298,8 @@ def build_context_tomography(
         stored_rounds=stored_rounds,
         selected_rounds=selected_history.round_count,
         omitted_rounds=selected_history.omitted_round_count,
+        stored_history_chars=estimate_messages_chars(stored_history),
+        stored_history_tokens=estimate_messages_tokens(stored_history),
         layers=(
             ContextLayerEstimate(
                 kind="system",
@@ -236,6 +332,49 @@ def build_context_tomography(
                 item_count=len(current_chain),
             ),
         ),
+        last_server_usage=last_server_usage,
+        checkpoint_state=checkpoint_state,
+        tool_results=_build_tool_result_insights(
+            stored_history,
+            selected_history.messages,
+        ),
+    )
+
+
+def _build_tool_result_insights(
+    stored_history: Sequence[Message],
+    selected_history: Sequence[Message],
+) -> ContextToolResultInsights:
+    selected_results = {
+        id(result) for message in selected_history for result in message.tool_results
+    }
+    selected_count = sum(len(message.tool_results) for message in selected_history)
+    footprints: list[ContextToolResultFootprint] = []
+    ordinal = 0
+    for message in stored_history:
+        for result in message.tool_results:
+            ordinal += 1
+            footprints.append(
+                ContextToolResultFootprint(
+                    ordinal=ordinal,
+                    chars=estimate_tool_result_chars(result),
+                    estimated_tokens=estimate_tool_result_tokens(result),
+                    state="kept" if id(result) in selected_results else "omitted",
+                )
+            )
+    kept_count = sum(footprint.state == "kept" for footprint in footprints)
+    if kept_count != selected_count:
+        raise ValueError("selected history must reference stored history")
+    largest = tuple(
+        sorted(
+            footprints,
+            key=lambda item: (-item.chars, -item.estimated_tokens, item.ordinal),
+        )[:MAX_CONTEXT_TOOL_FOOTPRINTS]
+    )
+    return ContextToolResultInsights(
+        stored_count=ordinal,
+        selected_count=selected_count,
+        largest=largest,
     )
 
 

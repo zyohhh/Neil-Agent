@@ -32,7 +32,7 @@ from .projections import (
     MetricsProjector,
     RuntimeMetrics,
 )
-from .schemas import ToolCall
+from .schemas import TokenUsage, ToolCall
 
 MAX_LIVE_EVENTS = 10_000
 MAX_BRIDGE_EVENTS = 1_024
@@ -411,12 +411,20 @@ class LiveCockpitApp(App[None]):
         overflow-y: auto;
     }
 
-    #context-layers,
+    #context-layers {
+        height: auto;
+        padding: 1 2 0 2;
+        color: #c6d4df;
+    }
+
+    #context-insights,
     #context-detail {
         height: 1fr;
         padding: 1 2;
         color: #c6d4df;
         overflow-y: auto;
+        scrollbar-color: #277c6f;
+        scrollbar-background: #09131a;
     }
 
     #conversation {
@@ -516,7 +524,12 @@ class LiveCockpitApp(App[None]):
     }
 
     LiveCockpitApp.short #context-layers {
+        height: 1fr;
         padding: 0 1;
+    }
+
+    LiveCockpitApp.short #context-insights {
+        display: none;
     }
 
     LiveCockpitApp.output-expanded #workspace {
@@ -630,8 +643,9 @@ class LiveCockpitApp(App[None]):
                         classes="panel-title",
                     )
                     yield Static(id="context-layers")
+                    yield Static(id="context-insights")
                 with Vertical(id="context-detail-panel"):
-                    yield Static("BUDGET TELEMETRY", classes="panel-title")
+                    yield Static("LOCAL / SERVER TELEMETRY", classes="panel-title")
                     yield Static(id="context-detail")
         with Vertical(id="conversation"):
             yield Static(
@@ -924,10 +938,15 @@ class LiveCockpitApp(App[None]):
             if self.has_class("short")
             else None
         )
+        context_panel.border_subtitle = (
+            f" {_compact_context_signal(self._context_snapshot)} "
+            if self.has_class("short")
+            else None
+        )
         title = (
             "CONTEXT  ·  LOCAL ESTIMATE"
             if compact
-            else "CONTEXT LAYERS  ·  LOCAL ESTIMATE"
+            else "CONTEXT LAYERS  ·  LOCAL ESTIMATE  ·  METADATA ONLY"
         )
         self._cockpit_screen.query_one("#context-title", Static).update(
             f"{title}  ·  {self._context_snapshot.estimated_chars:,}c / "
@@ -935,6 +954,9 @@ class LiveCockpitApp(App[None]):
         )
         self._cockpit_screen.query_one("#context-layers", Static).update(
             format_context_layers(self._context_snapshot, compact=compact)
+        )
+        self._cockpit_screen.query_one("#context-insights", Static).update(
+            format_context_insights(self._context_snapshot, compact=compact)
         )
         self._cockpit_screen.query_one("#context-detail", Static).update(
             format_context_detail(self._context_snapshot)
@@ -1159,15 +1181,91 @@ def format_context_layers(
                 f" {layer.chars:>7,}c · ~{layer.estimated_tokens:>6,}t",
                 style="dim" if layer.item_count == 0 else "",
             )
+            if layer.kind == "current_chain" and layer.item_count:
+                output.append(" · SUBMIT", style="#68b5ff")
         if index < len(context.layers) - 1:
             output.append("\n")
     return output
 
 
+def format_context_insights(
+    context: ContextTomography,
+    *,
+    compact: bool = False,
+) -> Text:
+    """Render bounded history insights without result bodies or identifiers."""
+
+    insights = Text()
+    checkpoint_style = {
+        "none": "dim",
+        "kept": "#9ee37d",
+        "omitted": "yellow",
+    }[context.checkpoint_state]
+    checkpoint_label = context.checkpoint_state.upper()
+    largest = context.tool_results.largest
+    if compact:
+        insights.append(
+            f"CUT {context.omitted_rounds} · {context.omitted_history_chars:,}c"
+            f"/~{context.omitted_history_tokens:,}t · CP ",
+            style="yellow" if context.omitted_rounds else "#9ee37d",
+        )
+        insights.append(f"{checkpoint_label}\n", style=checkpoint_style)
+        if largest:
+            footprint = largest[0]
+            state_style = "#9ee37d" if footprint.state == "kept" else "yellow"
+            insights.append(
+                f"TOOL↑ #{footprint.ordinal:02d} {footprint.chars:,}c"
+                f"/~{footprint.estimated_tokens:,}t · "
+            )
+            insights.append(footprint.state.upper(), style=state_style)
+            insights.append(" · NO BODY\n", style="dim")
+        else:
+            insights.append("TOOL RESULTS · NONE\n", style="dim")
+        usage = context.last_server_usage
+        insights.append("SERVER HIST · ", style="dim")
+        if usage is None:
+            insights.append("NO MEASUREMENT", style="dim")
+        else:
+            insights.append(
+                f"IN {_reported_input_tokens(usage):,} · OUT {usage.output_tokens:,}",
+                style="#9bcdf5",
+            )
+        return insights
+
+    insights.append("HISTORY / COMPACTION\n", style="dim")
+    insights.append(
+        f"KEPT {context.selected_rounds}/{context.stored_rounds} ROUNDS"
+        f" · CUT {context.omitted_rounds}"
+        f" · {context.omitted_history_chars:,}c / "
+        f"~{context.omitted_history_tokens:,}t\n",
+        style="yellow" if context.omitted_rounds else "#9ee37d",
+    )
+    current = context.layer("current_chain")
+    current_label = "SUBMIT SNAPSHOT" if current.item_count else "IDLE"
+    insights.append("CHECKPOINT ", style="dim")
+    insights.append(checkpoint_label, style=checkpoint_style)
+    insights.append(f" · CURRENT {current_label}\n", style="#68b5ff")
+    insights.append("LARGEST TOOL RESULTS · BODY HIDDEN\n", style="dim")
+    if not largest:
+        insights.append("NONE IN STORED HISTORY", style="dim")
+    else:
+        for index, footprint in enumerate(largest):
+            state_style = "#9ee37d" if footprint.state == "kept" else "yellow"
+            insights.append(f"#{footprint.ordinal:02d}  ", style="#8fa9bd")
+            insights.append(
+                f"{footprint.chars:,}c · ~{footprint.estimated_tokens:,}t · "
+            )
+            insights.append(footprint.state.upper(), style=state_style)
+            if index < len(largest) - 1:
+                insights.append("\n")
+    return insights
+
+
 def format_context_detail(context: ContextTomography) -> Text:
-    """Render local budget semantics without presenting estimates as usage."""
+    """Separate the next-input estimate from historical server measurement."""
 
     detail = Text()
+    detail.append("LOCAL NEXT INPUT · ESTIMATE\n", style="bold #91f5e9")
     detail.append("CHARACTER SOFT BUDGET\n", style="dim")
     detail.append_text(
         _context_meter(
@@ -1191,25 +1289,59 @@ def format_context_detail(context: ContextTomography) -> Text:
             )
         )
         detail.append("\n")
-    detail.append("HISTORY SELECTION\n", style="dim")
-    detail.append(
-        f"KEPT {context.selected_rounds}/{context.stored_rounds} ROUNDS"
-        f" · OMITTED {context.omitted_rounds}\n",
-        style="yellow" if context.omitted_rounds else "#9ee37d",
-    )
-    current = context.layer("current_chain")
-    detail.append("CURRENT CHAIN\n", style="dim")
-    detail.append(
-        (
-            f"{current.item_count} MESSAGE · SUBMIT SNAPSHOT\n"
-            if current.item_count
-            else "IDLE · NO CURRENT MESSAGE\n"
-        ),
-        style="#68b5ff" if current.item_count else "dim",
-    )
-    detail.append("PRIVACY BOUNDARY\n", style="dim")
-    detail.append("COUNTS ONLY · NO CONTEXT TEXT", style="green")
+    detail.append("\nLAST SERVER MEASUREMENT\n", style="bold #9bcdf5")
+    usage = context.last_server_usage
+    if usage is None:
+        detail.append("NO SUCCESSFUL TURN USAGE\n", style="dim")
+    else:
+        detail.append("LAST SUCCESSFUL TURN · AGGREGATE\n", style="dim")
+        detail.append(
+            f"IN {_reported_input_tokens(usage):,} · OUT {usage.output_tokens:,}\n",
+            style="#9bcdf5",
+        )
+        detail.append(
+            f"CACHE CREATE {usage.cache_creation_input_tokens:,}"
+            f" · READ {usage.cache_read_input_tokens:,}\n",
+            style="dim",
+        )
+        detail.append(f"TOTAL {usage.total_tokens:,}\n", style="#9bcdf5")
+    detail.append("HISTORICAL · NOT A FORECAST", style="yellow")
     return detail
+
+
+def _reported_input_tokens(usage: TokenUsage) -> int:
+    return (
+        usage.input_tokens
+        + usage.cache_creation_input_tokens
+        + usage.cache_read_input_tokens
+    )
+
+
+def _compact_context_signal(context: ContextTomography) -> str:
+    checkpoint = {
+        "none": "CP—",
+        "kept": "CP✓",
+        "omitted": "CP×",
+    }[context.checkpoint_state]
+    largest = context.tool_results.largest
+    tool_signal = f"TOOL↑{_compact_count(largest[0].chars)}c" if largest else "TOOL—"
+    usage = context.last_server_usage
+    server_signal = (
+        f"SRV{_compact_count(_reported_input_tokens(usage))}t HIST"
+        if usage is not None
+        else "SRV—"
+    )
+    return (
+        f"CUT{context.omitted_rounds} · {checkpoint} · {tool_signal} · {server_signal}"
+    )
+
+
+def _compact_count(value: int) -> str:
+    if value < 1_000:
+        return str(value)
+    if value < 1_000_000:
+        return f"{value / 1_000:.1f}k"
+    return f"{value / 1_000_000:.1f}m"
 
 
 def _context_meter(value: int, total: int, *, style: str) -> Text:

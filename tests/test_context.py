@@ -4,11 +4,13 @@ from collections.abc import Iterator, Sequence
 
 import pytest
 
-from neil_agent.agent import Agent
+from neil_agent.agent import COMPACTION_CHECKPOINT_USER, Agent
 from neil_agent.context import (
     CONTEXT_LAYER_ORDER,
     ContextLayerEstimate,
     ContextTomography,
+    ContextToolResultFootprint,
+    ContextToolResultInsights,
     build_context_tomography,
     estimate_fixed_chars,
     estimate_fixed_tokens,
@@ -25,6 +27,7 @@ from neil_agent.schemas import (
     ToolCall,
     ToolDefinition,
     ToolResult,
+    TokenUsage,
 )
 
 
@@ -132,7 +135,7 @@ def test_agent_reports_and_applies_context_budget_to_previous_rounds() -> None:
         "small",
         "next",
     ]
-    assert tomography.schema_version == 1
+    assert tomography.schema_version == 2
     assert tomography.selected_rounds == 1
     assert tomography.omitted_rounds == 1
     assert tomography.layer("selected_history").item_count == 2
@@ -182,9 +185,12 @@ def test_context_tomography_is_additive_and_retains_no_source_text() -> None:
         tools=tools,
         selected_history=selected,
         current_chain=current,
+        stored_history=history,
         stored_rounds=1,
         budget_chars=20_000,
         budget_tokens=8_000,
+        last_server_usage=None,
+        checkpoint_state="none",
     )
 
     assert tuple(layer.kind for layer in tomography.layers) == CONTEXT_LAYER_ORDER
@@ -221,6 +227,8 @@ def test_context_tomography_rejects_invalid_rounds_and_layer_order() -> None:
             stored_rounds=2,
             selected_rounds=1,
             omitted_rounds=0,
+            stored_history_chars=0,
+            stored_history_tokens=0,
             layers=layers,
         )
 
@@ -231,11 +239,26 @@ def test_context_tomography_rejects_invalid_rounds_and_layer_order() -> None:
             stored_rounds=0,
             selected_rounds=0,
             omitted_rounds=0,
+            stored_history_chars=0,
+            stored_history_tokens=0,
             layers=tuple(reversed(layers)),
         )
 
     with pytest.raises(ValueError, match="cannot be negative"):
         ContextLayerEstimate("system", -1, 0, 0)
+
+    with pytest.raises(ValueError, match="cannot exceed stored"):
+        ContextToolResultInsights(stored_count=1, selected_count=2)
+
+    with pytest.raises(ValueError, match="canonical size order"):
+        ContextToolResultInsights(
+            stored_count=2,
+            selected_count=1,
+            largest=(
+                ContextToolResultFootprint(1, 10, 3, "kept"),
+                ContextToolResultFootprint(2, 20, 6, "omitted"),
+            ),
+        )
 
 
 def test_context_tomography_normalizes_base_prompt_before_project_delta() -> None:
@@ -251,6 +274,114 @@ def test_context_tomography_normalizes_base_prompt_before_project_delta() -> Non
     assert tomography.layer("project_instructions").estimated_tokens > 0
     assert tomography.estimated_chars == agent.context_stats().fixed_chars
     assert tomography.estimated_tokens == agent.context_stats().fixed_tokens
+
+
+def test_context_tomography_reports_historical_usage_and_tool_footprints() -> None:
+    stored_history = (
+        Message(role="user", content="old"),
+        Message(
+            role="assistant",
+            tool_calls=(ToolCall(id="old-secret-id", name="read_file"),),
+        ),
+        Message(
+            role="user",
+            tool_results=(
+                ToolResult(
+                    tool_call_id="old-secret-id",
+                    content="OMITTED-RESULT-CANARY" * 200,
+                ),
+            ),
+        ),
+        Message(role="assistant", content="old done"),
+        Message(role="user", content="recent"),
+        Message(
+            role="assistant",
+            tool_calls=(ToolCall(id="recent-secret-id", name="read_file"),),
+        ),
+        Message(
+            role="user",
+            tool_results=(
+                ToolResult(
+                    tool_call_id="recent-secret-id",
+                    content="KEPT-RESULT-CANARY" * 20,
+                ),
+            ),
+        ),
+        Message(role="assistant", content="recent done"),
+    )
+    selected = select_recent_rounds(
+        stored_history,
+        max_rounds=1,
+        max_chars=100_000,
+    )
+    usage = TokenUsage(
+        input_tokens=1_200,
+        output_tokens=80,
+        cache_creation_input_tokens=300,
+        cache_read_input_tokens=700,
+    )
+
+    tomography = build_context_tomography(
+        system_prompt_without_project="system",
+        system_prompt="system",
+        has_project_instructions=False,
+        tools=(),
+        selected_history=selected,
+        current_chain=(),
+        stored_history=stored_history,
+        stored_rounds=2,
+        budget_chars=100_000,
+        budget_tokens=50_000,
+        last_server_usage=usage,
+        checkpoint_state="none",
+    )
+
+    assert tomography.last_server_usage == usage
+    assert tomography.omitted_rounds == 1
+    assert tomography.omitted_history_chars > 0
+    assert tomography.omitted_history_tokens > 0
+    assert tomography.tool_results.stored_count == 2
+    assert tomography.tool_results.selected_count == 1
+    assert [item.ordinal for item in tomography.tool_results.largest] == [1, 2]
+    assert [item.state for item in tomography.tool_results.largest] == [
+        "omitted",
+        "kept",
+    ]
+    snapshot_text = repr(tomography)
+    for canary in (
+        "OMITTED-RESULT-CANARY",
+        "KEPT-RESULT-CANARY",
+        "old-secret-id",
+        "recent-secret-id",
+    ):
+        assert canary not in snapshot_text
+
+
+def test_context_tomography_marks_compaction_checkpoint_selection() -> None:
+    agent = Agent(
+        ContextFakeModel(),
+        max_context_chars=20_000,
+    )
+    agent.restore_messages(
+        (
+            Message(role="user", content=COMPACTION_CHECKPOINT_USER),
+            Message(
+                role="assistant",
+                content="[Compressed conversation summary]\ndurable facts",
+            ),
+            Message(role="user", content="recent"),
+            Message(role="assistant", content="reply"),
+        ),
+        last_usage=TokenUsage(input_tokens=90, output_tokens=10),
+    )
+
+    kept = agent.context_tomography()
+    omitted = agent.context_tomography("x" * 30_000)
+
+    assert kept.checkpoint_state == "kept"
+    assert kept.last_server_usage == TokenUsage(input_tokens=90, output_tokens=10)
+    assert omitted.checkpoint_state == "omitted"
+    assert omitted.selected_rounds == 0
 
 
 def test_optional_token_budget_can_be_stricter_than_character_budget() -> None:
