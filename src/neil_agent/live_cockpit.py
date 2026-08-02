@@ -40,6 +40,12 @@ from .projections import (
     RuntimeMetrics,
 )
 from .schemas import TokenUsage, ToolCall
+from .security import (
+    CapabilityState,
+    SecurityBoundary,
+    SecurityShield,
+    project_security_shield,
+)
 
 MAX_LIVE_EVENTS = 10_000
 MAX_BRIDGE_EVENTS = 1_024
@@ -50,7 +56,8 @@ NARROW_TERMINAL_WIDTH = 88
 SHORT_TERMINAL_HEIGHT = 36
 
 NodeFilter = Literal["all", "active", "failed", "tools"]
-MonitorView = Literal["execution", "context"]
+PrimaryMonitorView = Literal["execution", "context"]
+MonitorView = Literal["execution", "context", "security"]
 
 _FILTER_LABELS: dict[NodeFilter, str] = {
     "all": "ALL",
@@ -110,6 +117,24 @@ _CONTEXT_PRESSURE_BORDER_COLORS = {
     "warning": "#c49a24",
     "critical": "#ffb454",
     "exceeded": "#d72d5b",
+}
+_SECURITY_STATE_LABELS: dict[CapabilityState, str] = {
+    "direct": "DIRECT",
+    "approval": "APPROVAL",
+    "forbidden": "FORBIDDEN",
+    "unavailable": "UNAVAILABLE",
+}
+_SECURITY_STATE_STYLES: dict[CapabilityState, str] = {
+    "direct": "bold #9ee37d",
+    "approval": "bold #ffb454",
+    "forbidden": "bold #ff4f7d",
+    "unavailable": "dim",
+}
+_SECURITY_STATE_MARKERS: dict[CapabilityState, str] = {
+    "direct": "●",
+    "approval": "◆",
+    "forbidden": "■",
+    "unavailable": "○",
 }
 
 
@@ -469,6 +494,13 @@ class LiveCockpitApp(App[None]):
             priority=True,
             tooltip="本地模拟下一次输入增加 N 个字符",
         ),
+        Binding(
+            "f5",
+            "toggle_security",
+            "安全盾",
+            priority=True,
+            tooltip="查看应用权限色带与独立 OS 沙箱边界",
+        ),
         Binding("1", "filter_all", "全部"),
         Binding("2", "filter_active", "进行中"),
         Binding("3", "filter_failed", "失败"),
@@ -538,6 +570,21 @@ class LiveCockpitApp(App[None]):
         background: #0b111c;
     }
 
+    #security-panel {
+        width: 2fr;
+        min-width: 40;
+        margin-right: 1;
+        border: round #7d5b24;
+        background: #11130f;
+    }
+
+    #security-detail-panel {
+        width: 1fr;
+        min-width: 28;
+        border: round #74405b;
+        background: #130f17;
+    }
+
     .panel-title {
         height: 2;
         padding: 0 1;
@@ -559,6 +606,16 @@ class LiveCockpitApp(App[None]):
     #context-detail-panel .panel-title {
         color: #9bcdf5;
         background: #111d2b;
+    }
+
+    #security-panel .panel-title {
+        color: #ffd08a;
+        background: #211b10;
+    }
+
+    #security-detail-panel .panel-title {
+        color: #ff9fba;
+        background: #241421;
     }
 
     #execution-tree {
@@ -589,6 +646,16 @@ class LiveCockpitApp(App[None]):
         overflow-y: auto;
         scrollbar-color: #277c6f;
         scrollbar-background: #09131a;
+    }
+
+    #security-capabilities,
+    #security-detail {
+        height: 1fr;
+        padding: 1 2;
+        color: #c6d4df;
+        overflow-y: auto;
+        scrollbar-color: #7d5b24;
+        scrollbar-background: #11130f;
     }
 
     #conversation {
@@ -630,14 +697,16 @@ class LiveCockpitApp(App[None]):
     }
 
     LiveCockpitApp.narrow #dag-panel,
-    LiveCockpitApp.narrow #context-panel {
+    LiveCockpitApp.narrow #context-panel,
+    LiveCockpitApp.narrow #security-panel {
         width: 1fr;
         min-width: 0;
         margin-right: 0;
     }
 
     LiveCockpitApp.narrow #detail-panel,
-    LiveCockpitApp.narrow #context-detail-panel {
+    LiveCockpitApp.narrow #context-detail-panel,
+    LiveCockpitApp.narrow #security-detail-panel {
         display: none;
     }
 
@@ -679,7 +748,17 @@ class LiveCockpitApp(App[None]):
         margin-right: 0;
     }
 
+    LiveCockpitApp.short #security-panel {
+        width: 1fr;
+        min-width: 0;
+        margin-right: 0;
+    }
+
     LiveCockpitApp.short #context-detail-panel {
+        display: none;
+    }
+
+    LiveCockpitApp.short #security-detail-panel {
         display: none;
     }
 
@@ -687,7 +766,16 @@ class LiveCockpitApp(App[None]):
         display: none;
     }
 
+    LiveCockpitApp.short #security-title {
+        display: none;
+    }
+
     LiveCockpitApp.short #context-layers {
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    LiveCockpitApp.short #security-capabilities {
         height: 1fr;
         padding: 0 1;
     }
@@ -714,6 +802,7 @@ class LiveCockpitApp(App[None]):
         *,
         model: str,
         workspace: str,
+        security: SecurityShield | None = None,
         initial_events: Iterable[RuntimeEvent] = (),
         max_events: int = MAX_LIVE_EVENTS,
     ) -> None:
@@ -724,6 +813,11 @@ class LiveCockpitApp(App[None]):
         self._event_bus = event_bus
         self._model = _safe_inline(model)
         self._workspace = _safe_inline(workspace)
+        self._security = security or project_security_shield(
+            {},
+            sandbox_backend="disabled",
+            audit_enabled=False,
+        )
         materialized_events = tuple(initial_events)
         self._events = list(materialized_events[-max_events:])
         self._max_events = max_events
@@ -736,6 +830,7 @@ class LiveCockpitApp(App[None]):
         self._context_snapshot = agent.context_tomography()
         self._context_simulation: ContextWhatIf | None = None
         self._monitor_view: MonitorView = "execution"
+        self._primary_monitor_view: PrimaryMonitorView = "execution"
         self._filter: NodeFilter = "all"
         self._selected_correlation_id: str | None = None
         self._subscription: EventSubscription | None = None
@@ -784,6 +879,10 @@ class LiveCockpitApp(App[None]):
         return self._context_simulation
 
     @property
+    def security_snapshot(self) -> SecurityShield:
+        return self._security
+
+    @property
     def _cockpit_screen(self) -> Screen[Any]:
         return self.screen_stack[0]
 
@@ -816,6 +915,17 @@ class LiveCockpitApp(App[None]):
                 with Vertical(id="context-detail-panel"):
                     yield Static("LOCAL / SERVER TELEMETRY", classes="panel-title")
                     yield Static(id="context-detail")
+            with Horizontal(id="security-view", classes="workspace-view"):
+                with Vertical(id="security-panel"):
+                    yield Static(
+                        "CAPABILITY BANDS  ·  APPLICATION + OS",
+                        id="security-title",
+                        classes="panel-title",
+                    )
+                    yield Static(id="security-capabilities")
+                with Vertical(id="security-detail-panel"):
+                    yield Static("ENFORCEMENT LAYERS", classes="panel-title")
+                    yield Static(id="security-detail")
         with Vertical(id="conversation"):
             yield Static(
                 self._stream_title_text(),
@@ -837,6 +947,7 @@ class LiveCockpitApp(App[None]):
         self._subscription = self._event_bus.subscribe(self._bridge.observe)
         self._refresh_projection()
         self._refresh_context_view()
+        self._refresh_security_view()
         self._metrics_timer = self.set_interval(0.25, self._refresh_metrics)
         self._cockpit_screen.query_one("#prompt", Input).focus()
 
@@ -867,6 +978,7 @@ class LiveCockpitApp(App[None]):
         )
         if previous_density != current_density:
             self._refresh_context_view()
+            self._refresh_security_view()
 
     @on(Input.Submitted, "#prompt")
     def submit_prompt(self, event: Input.Submitted) -> None:
@@ -1015,17 +1127,20 @@ class LiveCockpitApp(App[None]):
     def action_toggle_monitor(self) -> None:
         if isinstance(self.screen, ModalScreen):
             return
-        self._monitor_view = (
-            "context" if self._monitor_view == "execution" else "execution"
+        self._primary_monitor_view = (
+            "context" if self._primary_monitor_view == "execution" else "execution"
         )
-        self._cockpit_screen.query_one(
-            "#workspace", ContentSwitcher
-        ).current = f"{self._monitor_view}-view"
-        if self._monitor_view == "context":
-            self._refresh_context_view()
-        self._refresh_stream_title()
-        self.refresh_bindings()
-        self._cockpit_screen.query_one("#prompt", Input).focus()
+        self._set_monitor_view(self._primary_monitor_view)
+
+    def action_toggle_security(self) -> None:
+        if isinstance(self.screen, ModalScreen):
+            return
+        target: MonitorView = (
+            self._primary_monitor_view
+            if self._monitor_view == "security"
+            else "security"
+        )
+        self._set_monitor_view(target)
 
     def action_context_what_if(self) -> None:
         if (
@@ -1128,12 +1243,29 @@ class LiveCockpitApp(App[None]):
         self._refresh_tree()
         self._refresh_metrics()
 
+    def _set_monitor_view(self, monitor_view: MonitorView) -> None:
+        self._monitor_view = monitor_view
+        self._cockpit_screen.query_one(
+            "#workspace", ContentSwitcher
+        ).current = f"{monitor_view}-view"
+        if monitor_view == "context":
+            self._refresh_context_view()
+        elif monitor_view == "security":
+            self._refresh_security_view()
+        self._refresh_stream_title()
+        self.refresh_bindings()
+        self._cockpit_screen.query_one("#prompt", Input).focus()
+
     def _sync_responsive_classes(self, width: int, height: int) -> None:
         self.set_class(width < NARROW_TERMINAL_WIDTH, "narrow")
         self.set_class(height < SHORT_TERMINAL_HEIGHT, "short")
 
     def _stream_title_text(self) -> str:
-        monitor_label = "上下文" if self._monitor_view == "context" else "执行树"
+        monitor_label = {
+            "execution": "执行树",
+            "context": "上下文",
+            "security": "安全盾",
+        }[self._monitor_view]
         action = f"F2 返回{monitor_label}" if self.output_expanded else "F2 展开结果"
         return f"AGENT STREAM  ·  {action}  ·  最近 {MAX_LIVE_OUTPUT_LINES} 行"
 
@@ -1198,6 +1330,42 @@ class LiveCockpitApp(App[None]):
                 self._context_snapshot,
                 self._context_simulation,
             )
+        )
+
+    def _refresh_security_view(self) -> None:
+        compact = self.has_class("narrow") or self.has_class("short")
+        panel = self._cockpit_screen.query_one("#security-panel", Vertical)
+        os_boundary = self._security.os_sandbox
+        panel.styles.border = (
+            "round",
+            "#277c6f"
+            if os_boundary.status == "ready"
+            else "#d72d5b"
+            if os_boundary.status in {"incomplete", "unavailable"}
+            else "#7d5b24",
+        )
+        panel.border_title = (
+            f" APP POLICY · {self._security.application.status.upper()} "
+            if self.has_class("short")
+            else None
+        )
+        panel.border_subtitle = (
+            f" OS SANDBOX · {os_boundary.status.upper()} · SEPARATE LAYER "
+            if self.has_class("short")
+            else None
+        )
+        self._cockpit_screen.query_one("#security-title", Static).update(
+            format_security_title(self._security, compact=compact)
+        )
+        self._cockpit_screen.query_one("#security-capabilities", Static).update(
+            format_security_capabilities(
+                self._security,
+                compact=compact,
+                short=self.has_class("short"),
+            )
+        )
+        self._cockpit_screen.query_one("#security-detail", Static).update(
+            format_security_boundaries(self._security)
         )
 
     def _refresh_projection(self) -> None:
@@ -1334,6 +1502,7 @@ def run_live_cockpit(
     *,
     model: str,
     workspace: str,
+    security: SecurityShield | None = None,
     approval_handler_owner: object | None = None,
 ) -> int:
     """Run the app and return the number of successful turns it completed."""
@@ -1343,6 +1512,7 @@ def run_live_cockpit(
         event_bus,
         model=model,
         workspace=workspace,
+        security=security,
     )
     previous_handler: object | None = None
     replace_handler = getattr(
@@ -1359,6 +1529,106 @@ def run_live_cockpit(
     finally:
         if callable(replace_handler):
             replace_handler(previous_handler)
+
+
+def format_security_title(
+    security: SecurityShield,
+    *,
+    compact: bool = False,
+) -> Text:
+    """Render the shared four-state legend without relying on color alone."""
+
+    output = Text("SECURITY SHIELD  ·  " if compact else "CAPABILITY BANDS  ·  ")
+    for index, state in enumerate(_SECURITY_STATE_LABELS):
+        if index:
+            output.append("  ·  ", style="dim")
+        output.append(
+            f"{_SECURITY_STATE_LABELS[state]} {security.capability_count(state)}",
+            style=_SECURITY_STATE_STYLES[state],
+        )
+    return output
+
+
+def format_security_capabilities(
+    security: SecurityShield,
+    *,
+    compact: bool = False,
+    short: bool = False,
+) -> Text:
+    """Render deterministic bands; capability details never include runtime values."""
+
+    output = Text()
+    capabilities = security.capabilities
+    if short:
+        capabilities = tuple(
+            capability
+            for capability in capabilities
+            if capability.state not in {"forbidden", "unavailable"}
+        )
+    for index, capability in enumerate(capabilities):
+        if index:
+            output.append("\n")
+        style = _SECURITY_STATE_STYLES[capability.state]
+        output.append(
+            f"{_SECURITY_STATE_MARKERS[capability.state]} "
+            f"{_SECURITY_STATE_LABELS[capability.state]:<11}",
+            style=style,
+        )
+        output.append(f" {capability.label}", style="bold #f4f7fb")
+        if capability.tool_count:
+            output.append(f"  ×{capability.tool_count}", style="dim")
+        if not compact:
+            output.append(f"  ·  {capability.summary}", style="dim")
+    if short:
+        if capabilities:
+            output.append("\n")
+        output.append("■ FORBIDDEN", style=_SECURITY_STATE_STYLES["forbidden"])
+        output.append(" HOST SHELL", style="bold #f4f7fb")
+        output.append("  ·  ", style="dim")
+        output.append("○ UNAVAILABLE", style=_SECURITY_STATE_STYLES["unavailable"])
+        output.append(" OS CMD", style="bold #f4f7fb")
+    return output
+
+
+def format_security_boundaries(security: SecurityShield) -> Text:
+    """Explain the application/OS split and prevent false sandbox claims."""
+
+    output = Text()
+    _append_security_boundary(output, "APPLICATION POLICY", security.application)
+    output.append("\n")
+    _append_security_boundary(output, "OS SANDBOX", security.os_sandbox)
+    output.append("\nAUDIT SIGNAL\n", style="bold #ff9fba")
+    output.append(
+        "● METADATA RECORDING" if security.audit_enabled else "○ DISABLED",
+        style="green" if security.audit_enabled else "dim",
+    )
+    output.append(
+        "\nAPPLICATION ALLOWLIST ≠ OS ISOLATION",
+        style="bold #ffb454",
+    )
+    output.append(
+        "\nNo prompt, arguments, previews, results, paths, or secret values shown.",
+        style="dim",
+    )
+    return output
+
+
+def _append_security_boundary(
+    output: Text,
+    title: str,
+    boundary: SecurityBoundary,
+) -> None:
+    status_style = (
+        "bold #9ee37d"
+        if boundary.status in {"enforced", "ready"}
+        else "bold #ff4f7d"
+        if boundary.status in {"incomplete", "unavailable"}
+        else "dim"
+    )
+    output.append(title, style="bold #ff9fba")
+    output.append(f"\n{boundary.headline}", style=status_style)
+    for detail in boundary.details:
+        output.append(f"\n  {detail}", style="dim")
 
 
 def visible_node_ids(

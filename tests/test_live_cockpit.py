@@ -34,11 +34,15 @@ from neil_agent.live_cockpit import (
     format_context_insights,
     format_context_layers,
     format_node_detail,
+    format_security_boundaries,
+    format_security_capabilities,
+    format_security_title,
     run_live_cockpit,
     visible_node_ids,
 )
 from neil_agent.projections import ExecutionGraphProjector
 from neil_agent.schemas import TokenUsage, ToolCall
+from neil_agent.security import SecurityShield, project_security_shield
 
 NOW = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
 
@@ -147,6 +151,27 @@ def _execution_events() -> tuple[RuntimeEvent, ...]:
         parent_event_id=tool.event_id,
     )
     return turn, model, tool, failed
+
+
+def _security_snapshot() -> SecurityShield:
+    return project_security_shield(
+        {
+            "list_directory": False,
+            "read_file": False,
+            "search_text": False,
+            "set_task_plan": False,
+            "update_task_step": False,
+            "git_status": False,
+            "git_diff": False,
+            "write_file": True,
+            "replace_text": True,
+            "run_quality_check": True,
+            "git_stage": True,
+            "git_commit": True,
+        },
+        sandbox_backend="disabled",
+        audit_enabled=True,
+    )
 
 
 class FakeLiveAgent:
@@ -279,6 +304,31 @@ def test_context_tomography_formatters_are_metadata_only() -> None:
     assert "HISTORICAL · NOT A FORECAST" in detail.plain
 
 
+def test_security_formatters_show_four_states_and_distinct_layers() -> None:
+    security = _security_snapshot()
+
+    title = format_security_title(security)
+    bands = format_security_capabilities(security)
+    compact = format_security_capabilities(security, compact=True)
+    short = format_security_capabilities(security, compact=True, short=True)
+    detail = format_security_boundaries(security)
+
+    assert "DIRECT 3" in title.plain
+    assert "APPROVAL 3" in title.plain
+    assert "FORBIDDEN 1" in title.plain
+    assert "UNAVAILABLE 1" in title.plain
+    assert "WORKSPACE READ" in bands.plain
+    assert "bounded paths" in bands.plain
+    assert "bounded paths" not in compact.plain
+    assert len(short.plain.splitlines()) == 7
+    assert "FORBIDDEN HOST SHELL" in short.plain
+    assert "UNAVAILABLE OS CMD" in short.plain
+    assert "APPLICATION POLICY" in detail.plain
+    assert "OS SANDBOX" in detail.plain
+    assert "APPLICATION ALLOWLIST ≠ OS ISOLATION" in detail.plain
+    assert "METADATA RECORDING" in detail.plain
+
+
 @pytest.mark.asyncio
 async def test_live_app_streams_agent_events_and_output() -> None:
     bus = EventBus(queue_size=32)
@@ -398,6 +448,59 @@ async def test_live_app_switches_between_execution_and_context_views() -> None:
         assert app.monitor_view == "execution"
         assert switcher.current == "execution-view"
         assert app.query_one("#prompt", Input).has_focus
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_toggles_security_shield_without_disturbing_primary_view() -> (
+    None
+):
+    bus = EventBus()
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        security=_security_snapshot(),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        switcher = app.query_one("#workspace", ContentSwitcher)
+
+        await pilot.press("f3")
+        await pilot.press("f5")
+        await pilot.pause()
+
+        assert app.monitor_view == "security"
+        assert switcher.current == "security-view"
+        assert (
+            "WORKSPACE READ" in app.query_one("#security-capabilities").render().plain
+        )
+        assert "APPLICATION POLICY" in app.query_one("#security-detail").render().plain
+        assert app.check_action("filter_tools", ()) is False
+        assert app.check_action("context_what_if", ()) is False
+        assert app.query_one("#prompt", Input).has_focus
+
+        await pilot.press("f5")
+        await pilot.pause()
+
+        assert app.monitor_view == "context"
+        assert switcher.current == "context-view"
+
+        await pilot.press("f5")
+        await pilot.resize_terminal(60, 24)
+        await pilot.pause()
+
+        assert app.monitor_view == "security"
+        assert app.query_one("#security-panel").display
+        assert not app.query_one("#security-detail-panel").display
+        assert not app.query_one("#security-title").display
+        assert "OS SANDBOX · DISABLED" in str(
+            app.query_one("#security-panel").border_subtitle
+        )
+        assert app.query_one("#transcript", Log).region.height >= 5
 
     assert bus.close()
 

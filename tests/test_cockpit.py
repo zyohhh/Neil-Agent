@@ -9,6 +9,7 @@ from rich.console import Console
 from neil_agent.cockpit import CockpitSnapshot, build_cockpit_panel
 from neil_agent.context import ContextStats
 from neil_agent.schemas import TokenUsage
+from neil_agent.security import project_security_shield
 from neil_agent.task import QualityCheckRecord, TaskStep
 
 
@@ -47,13 +48,28 @@ def _snapshot(tmp_path: Path) -> CockpitSnapshot:
             exit_code=0,
             output="passed",
         ),
-        tool_count=12,
-        approval_tool_count=5,
+        security=project_security_shield(
+            {
+                "list_directory": False,
+                "read_file": False,
+                "search_text": False,
+                "set_task_plan": False,
+                "update_task_step": False,
+                "git_status": False,
+                "git_diff": False,
+                "write_file": True,
+                "replace_text": True,
+                "run_quality_check": True,
+                "git_stage": True,
+                "git_commit": True,
+            },
+            sandbox_backend="disabled",
+            audit_enabled=True,
+        ),
         instruction_status="active",
         instruction_sources=2,
         instruction_bytes=1_024,
         checkpoint_count=3,
-        audit_enabled=True,
         git_branch="## main...origin/main",
         git_changes=4,
     )
@@ -81,7 +97,11 @@ def test_cockpit_renders_useful_runtime_metadata(tmp_path: Path) -> None:
     assert "WORKSPACE SIGNAL" in output
     assert "Build cockpit" in output
     assert "TOTAL 9,200" in output
+    assert "DIRECT 3" in output
+    assert "FORBIDDEN 1" in output
+    assert "UNAVAILABLE 1" in output
     assert "DIRECT 7 · APPROVAL 5" in output
+    assert "SEPARATE FROM APP POLICY" in output
     assert "RECORDING METADATA" in output
     assert "3 IN-MEMORY" in output
     assert "4 CHANGES" in output

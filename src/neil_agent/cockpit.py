@@ -13,6 +13,7 @@ from rich.text import Text
 
 from .context import ContextStats
 from .schemas import TokenUsage
+from .security import SecurityShield
 from .task import QualityCheckRecord, TaskStep
 
 COCKPIT_METER_WIDTH = 24
@@ -32,13 +33,11 @@ class CockpitSnapshot:
     last_usage: TokenUsage | None
     plan: tuple[TaskStep, ...]
     latest_quality_check: QualityCheckRecord | None
-    tool_count: int
-    approval_tool_count: int
+    security: SecurityShield
     instruction_status: str
     instruction_sources: int
     instruction_bytes: int
     checkpoint_count: int
-    audit_enabled: bool
     git_branch: str
     git_changes: int
     git_available: bool = True
@@ -181,33 +180,62 @@ def _context_view(snapshot: CockpitSnapshot) -> RenderableType:
 
 
 def _security_view(snapshot: CockpitSnapshot) -> RenderableType:
-    direct_count = max(snapshot.tool_count - snapshot.approval_tool_count, 0)
+    security = snapshot.security
     table = Table.grid(expand=True, padding=(0, 1))
     table.add_column(width=12, no_wrap=True, style="dim")
     table.add_column(ratio=1, overflow="fold")
     table.add_row(
-        "工具权限",
-        Text(
-            f"DIRECT {direct_count} · APPROVAL {snapshot.approval_tool_count}",
-            style="green" if snapshot.approval_tool_count == 0 else "yellow",
-        ),
+        "权限色带",
+        _security_legend(security),
     )
     table.add_row(
-        "文件边界",
-        Text("WORKSPACE LOCKED · SENSITIVE PATHS BLOCKED", style="green"),
+        "应用层策略",
+        Text(
+            f"{security.application.headline} · {security.tool_count} TOOLS · "
+            f"DIRECT {security.direct_tool_count} · "
+            f"APPROVAL {security.approval_tool_count}",
+            style="green",
+        ),
     )
     table.add_row(
         "本地审计",
         Text(
-            "RECORDING METADATA" if snapshot.audit_enabled else "DISABLED",
-            style="green" if snapshot.audit_enabled else "dim",
+            "RECORDING METADATA" if security.audit_enabled else "DISABLED",
+            style="green" if security.audit_enabled else "dim",
         ),
     )
     table.add_row(
         "OS 沙箱",
-        Text("NOT ACTIVE · COMMAND ALLOWLIST ONLY", style="yellow"),
+        Text(
+            f"{security.os_sandbox.headline} · SEPARATE FROM APP POLICY",
+            style=(
+                "green"
+                if security.os_sandbox.status == "ready"
+                else "yellow"
+                if security.os_sandbox.status in {"incomplete", "unavailable"}
+                else "dim"
+            ),
+        ),
     )
     return table
+
+
+def _security_legend(security: SecurityShield) -> Text:
+    legend = Text()
+    styles = {
+        "direct": "green",
+        "approval": "bold yellow",
+        "forbidden": "bold red",
+        "unavailable": "dim",
+    }
+    for index, state in enumerate(styles):
+        if index:
+            legend.append(" · ", style="dim")
+        legend.append(
+            f"{state.upper()} {security.capability_count(state)}",  # type: ignore[arg-type]
+            style=styles[state],
+        )
+    return legend
 
 
 def _workspace_view(snapshot: CockpitSnapshot) -> RenderableType:

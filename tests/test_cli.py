@@ -114,7 +114,8 @@ def test_run_uses_injected_console(
     assert "test-key" not in printed_text
     assert "项目指令" in printed_text
     assert "权限与安全边界" in printed_text
-    assert "OS 沙箱：当前未实现" in printed_text
+    assert "OS 沙箱：DISABLED BY CONFIG" in printed_text
+    assert "应用工具白名单不等于 OS 隔离" in printed_text
     assert "已生效" in printed_text
     assert instruction_content not in printed_text
     assert "最近质量检查" in printed_text
@@ -148,7 +149,7 @@ def test_run_routes_explicit_live_cockpit_mode(
     monkeypatch.setattr(
         cli,
         "_try_show_live_cockpit",
-        lambda _console, _settings, _agent, _llm, _tracker, workspace: (
+        lambda _console, _settings, _agent, _llm, _tracker, workspace, _registry: (
             live_calls.append(workspace) or 0
         ),
     )

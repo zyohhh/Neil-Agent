@@ -42,6 +42,7 @@ from .noninteractive import (
     write_startup_error,
 )
 from .schemas import ActivityEvent, ToolCall
+from .security import SecurityShield, observe_security_shield
 from .session import (
     SessionHandle,
     SessionOrder,
@@ -398,6 +399,7 @@ def run(console: Console) -> None:
                     llm,
                     task_tracker,
                     filesystem_tools.root,
+                    registry,
                 )
                 if completed_turns is None:
                     _show_cockpit(
@@ -441,6 +443,7 @@ def run(console: Console) -> None:
                     registry,
                     filesystem_tools.root,
                     audit_log_enabled=settings.audit_log_enabled,
+                    sandbox_backend=settings.sandbox_backend,
                 )
             continue
         if command in CONTEXT_COMMANDS:
@@ -754,10 +757,6 @@ def _show_cockpit(
     except NeilAgentError:
         git_available = False
 
-    approval_tool_count = sum(
-        registry.requires_approval(definition.name)
-        for definition in registry.definitions
-    )
     snapshot = CockpitSnapshot(
         model=settings.deepseek_model,
         thinking_enabled=settings.thinking_enabled,
@@ -768,13 +767,11 @@ def _show_cockpit(
         last_usage=agent.last_usage,
         plan=task_tracker.steps,
         latest_quality_check=task_tracker.latest_quality_check,
-        tool_count=len(registry.definitions),
-        approval_tool_count=approval_tool_count,
+        security=_observe_security(settings, registry),
         instruction_status=instructions.status,
         instruction_sources=len(instructions.active_sources),
         instruction_bytes=instructions.size_bytes,
         checkpoint_count=filesystem_tools.checkpoints.count,
-        audit_enabled=settings.audit_log_enabled,
         git_branch=git_branch,
         git_changes=git_changes,
         git_available=git_available,
@@ -789,6 +786,7 @@ def _try_show_live_cockpit(
     llm: LLMClient,
     task_tracker: TaskTracker,
     workspace: Path,
+    registry: ToolRegistry | None = None,
 ) -> int | None:
     """Run Textual only in a terminal and return ``None`` for Rich fallback."""
 
@@ -812,6 +810,7 @@ def _try_show_live_cockpit(
             event_bus,
             model=settings.deepseek_model,
             workspace=str(workspace),
+            security=_observe_security(settings, registry or ToolRegistry()),
             approval_handler_owner=agent,
         )
     except Exception:  # noqa: BLE001 - optional UI degradation boundary.
@@ -854,8 +853,18 @@ def _show_permissions(
     workspace_root: Path,
     *,
     audit_log_enabled: bool = False,
+    sandbox_backend: str = "disabled",
 ) -> None:
     """Explain enforceable local boundaries without exposing hidden prompts."""
+
+    security = observe_security_shield(
+        {
+            definition.name: registry.requires_approval(definition.name)
+            for definition in registry.definitions
+        },
+        sandbox_backend=sandbox_backend,
+        audit_enabled=audit_log_enabled,
+    )
 
     direct = [
         definition.name
@@ -877,10 +886,25 @@ def _show_permissions(
         "  命令：仅固定质量检查和受限 Git 操作，不提供任意 shell\n"
         "  网络：只有模型 API 客户端可用；本地工具不提供网络访问\n"
         f"  生命周期审计：{'已启用元数据 JSONL' if audit_log_enabled else '未启用'}\n"
-        "  OS 沙箱：当前未实现，安全边界由工具白名单、路径校验和审批共同执行",
+        f"  应用层策略：{security.application.headline}\n"
+        f"  OS 沙箱：{security.os_sandbox.headline}\n"
+        "  分层说明：应用工具白名单不等于 OS 隔离，两者独立显示",
         markup=False,
         highlight=False,
         soft_wrap=True,
+    )
+
+
+def _observe_security(settings: Settings, registry: ToolRegistry) -> SecurityShield:
+    """Capture a metadata-only security snapshot for one explicit UI request."""
+
+    return observe_security_shield(
+        {
+            definition.name: registry.requires_approval(definition.name)
+            for definition in registry.definitions
+        },
+        sandbox_backend=settings.sandbox_backend,
+        audit_enabled=settings.audit_log_enabled,
     )
 
 
