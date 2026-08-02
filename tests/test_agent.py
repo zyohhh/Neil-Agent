@@ -752,6 +752,64 @@ def test_agent_previews_and_executes_approved_write_tool() -> None:
     )
 
 
+def test_agent_emits_changed_binding_when_preview_invalidates_after_approval() -> None:
+    call = ToolCall(id="call-guarded", name="guarded_write", arguments={})
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(call,))],
+        ["not written", ModelResponse(content="not written")],
+    ]
+    preview_version = ["PRIVATE-PREVIEW-V1"]
+    writes: list[str] = []
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="guarded_write",
+            description="Guarded mutation.",
+            input_schema={"type": "object"},
+        ),
+        lambda: writes.append("executed") or "written",
+        requires_approval=True,
+        preview_handler=lambda: preview_version[0],
+    )
+    events: list[RuntimeEvent] = []
+    bus = EventBus()
+    bus.subscribe(events.append)
+
+    def approve_and_invalidate(_call: ToolCall, _preview: str) -> bool:
+        preview_version[0] = "PRIVATE-PREVIEW-V2"
+        return True
+
+    agent = Agent(
+        model,
+        registry=registry,
+        approval_handler=approve_and_invalidate,
+        event_bus=bus,
+    )
+
+    assert "".join(agent.stream_chat("guarded mutation")) == "not written"
+    assert bus.flush()
+
+    approval_finish = next(
+        event
+        for event in events
+        if event.stage == "approval" and event.status == "succeeded"
+    )
+    tool_finish = next(
+        event
+        for event in events
+        if event.stage == "tool_call" and event.status == "failed"
+    )
+    assert approval_finish.metadata_dict()["approval_decision"] == "approved"
+    assert approval_finish.metadata_dict()["preview_binding"] == "pending"
+    assert tool_finish.metadata_dict()["approval_decision"] == "approved"
+    assert tool_finish.metadata_dict()["preview_binding"] == "changed"
+    assert writes == []
+    assert model.requests[1][-1].tool_results[0].is_error is True
+    assert "PRIVATE-PREVIEW" not in repr(events)
+    assert bus.close()
+
+
 def test_agent_returns_denied_write_to_model_without_execution() -> None:
     call = ToolCall(
         id="call-write",
@@ -961,6 +1019,16 @@ def test_agent_emits_correlated_metadata_only_runtime_events() -> None:
         if event.stage == "tool_call" and event.status == "started"
     )
     approval_wait = next(event for event in events if event.stage == "approval")
+    approval_finish = next(
+        event
+        for event in events
+        if event.stage == "approval" and event.status == "succeeded"
+    )
+    tool_finish = next(
+        event
+        for event in events
+        if event.stage == "tool_call" and event.status == "succeeded"
+    )
     quality_start = next(
         event
         for event in events
@@ -970,6 +1038,11 @@ def test_agent_emits_correlated_metadata_only_runtime_events() -> None:
     assert tool_start.parent_event_id == model_starts[0].event_id
     assert approval_wait.parent_event_id == tool_start.event_id
     assert quality_start.parent_event_id == tool_start.event_id
+    assert approval_wait.metadata_dict()["approval_decision"] == "pending"
+    assert approval_finish.metadata_dict()["approval_decision"] == "approved"
+    assert approval_finish.metadata_dict()["preview_binding"] == "pending"
+    assert tool_finish.metadata_dict()["approval_decision"] == "approved"
+    assert tool_finish.metadata_dict()["preview_binding"] == "valid"
 
     serialized = " ".join(str(event.model_dump()) for event in events)
     assert "TOP-SECRET-PROMPT" not in serialized

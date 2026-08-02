@@ -123,6 +123,43 @@ def test_runtime_metadata_redactor_rejects_content_and_control_characters() -> N
         redact_runtime_metadata("model_request", {"error_type": "x" * 201})
     with pytest.raises(ValidationError):
         RuntimeMetadataItem(name="elapsed_ms", value=-1)
+    with pytest.raises(ValidationError, match="unknown state"):
+        redact_runtime_metadata(
+            "approval",
+            {"approval_decision": "maybe"},
+        )
+
+
+def test_approval_metadata_accepts_only_bounded_decision_and_binding_states() -> None:
+    waiting = redact_runtime_metadata(
+        "approval",
+        {
+            "tool_name": "write_file",
+            "preview_chars": 240,
+            "approval_decision": "pending",
+            "preview_binding": "pending",
+        },
+    )
+    finished_tool = redact_runtime_metadata(
+        "tool_call",
+        {
+            "approval_decision": "approved",
+            "preview_binding": "valid",
+            "is_error": False,
+        },
+    )
+
+    assert {item.name: item.value for item in waiting} == {
+        "tool_name": "write_file",
+        "preview_chars": 240,
+        "approval_decision": "pending",
+        "preview_binding": "pending",
+    }
+    assert {item.name: item.value for item in finished_tool} == {
+        "approval_decision": "approved",
+        "preview_binding": "valid",
+        "is_error": False,
+    }
 
 
 def test_event_emitter_reuses_span_identity_for_state_changes() -> None:

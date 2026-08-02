@@ -37,7 +37,9 @@ from .context import (
 )
 from .errors import AgentError, HookError, NeilAgentError
 from .events import (
+    ApprovalDecision,
     EventBus,
+    PreviewBindingState,
     RuntimeEventEmitter,
     RuntimeEventFactory,
     RuntimeSpan,
@@ -1145,6 +1147,8 @@ class Agent:
             metadata={
                 "tool_name": safe_tool_name(call.name),
                 "preview_chars": len(preview.content),
+                "approval_decision": "pending",
+                "preview_binding": "pending",
             },
             status="waiting",
         )
@@ -1153,6 +1157,8 @@ class Agent:
                 approval_span,
                 "failed",
                 metadata={
+                    "approval_decision": "unavailable",
+                    "preview_binding": "not_checked",
                     "elapsed_ms": self._elapsed_ms(approval_started_at),
                     "error_type": "ApprovalUnavailable",
                 },
@@ -1169,6 +1175,8 @@ class Agent:
                 started_at,
                 tool_span=tool_span,
                 quality_span=quality_span,
+                approval_decision="unavailable",
+                preview_binding="not_checked",
             )
         self._emit_activity(
             "waiting",
@@ -1182,6 +1190,8 @@ class Agent:
                 approval_span,
                 "failed",
                 metadata={
+                    "approval_decision": "error",
+                    "preview_binding": "not_checked",
                     "elapsed_ms": self._elapsed_ms(approval_started_at),
                     "error_type": type(error).__name__,
                 },
@@ -1194,13 +1204,19 @@ class Agent:
                 quality_span=quality_span,
                 status="failed",
                 error_type=type(error).__name__,
+                approval_decision="error",
+                preview_binding="not_checked",
             )
             raise
         if not approved:
             self._finish_runtime_span(
                 approval_span,
                 "skipped",
-                metadata={"elapsed_ms": self._elapsed_ms(approval_started_at)},
+                metadata={
+                    "approval_decision": "rejected",
+                    "preview_binding": "not_checked",
+                    "elapsed_ms": self._elapsed_ms(approval_started_at),
+                },
             )
             result = ToolResult(
                 tool_call_id=call.id,
@@ -1215,22 +1231,28 @@ class Agent:
                 tool_span=tool_span,
                 quality_span=quality_span,
                 skipped=True,
+                approval_decision="rejected",
+                preview_binding="not_checked",
             )
         self._finish_runtime_span(
             approval_span,
             "succeeded",
-            metadata={"elapsed_ms": self._elapsed_ms(approval_started_at)},
+            metadata={
+                "approval_decision": "approved",
+                "preview_binding": "pending",
+                "elapsed_ms": self._elapsed_ms(approval_started_at),
+            },
         )
         self._emit_activity(
             "running",
             f"执行：{activity.title}",
             activity.details,
         )
-        result = self._registry.execute(
+        approved_execution = self._registry.execute_approved(
             call,
-            approved=True,
             approved_preview=preview.content,
         )
+        result = approved_execution.result
         return self._finish_tool_call(
             call,
             result,
@@ -1238,6 +1260,8 @@ class Agent:
             started_at,
             tool_span=tool_span,
             quality_span=quality_span,
+            approval_decision="approved",
+            preview_binding=approved_execution.preview_binding,
         )
 
     def _refresh_instruction_scope(self, call: ToolCall) -> ToolResult | None:
@@ -1289,6 +1313,8 @@ class Agent:
         quality_span: RuntimeSpan | None = None,
         skipped: bool = False,
         skipped_reason: str = "用户拒绝，未执行",
+        approval_decision: ApprovalDecision | None = None,
+        preview_binding: PreviewBindingState | None = None,
     ) -> ToolResult:
         """Record observable task state and append safe workflow guidance."""
 
@@ -1306,6 +1332,8 @@ class Agent:
             tool_span=tool_span,
             quality_span=quality_span,
             status=runtime_status,
+            approval_decision=approval_decision,
+            preview_binding=preview_binding,
         )
         if skipped:
             self._emit_activity(
@@ -1383,6 +1411,8 @@ class Agent:
         quality_span: RuntimeSpan | None,
         status: RuntimeStatus,
         error_type: str | None = None,
+        approval_decision: ApprovalDecision | None = None,
+        preview_binding: PreviewBindingState | None = None,
     ) -> None:
         """Complete tool and quality-check observations from one safe summary."""
 
@@ -1398,6 +1428,10 @@ class Agent:
             )
         if error_type is not None:
             metadata["error_type"] = error_type
+        if approval_decision is not None:
+            metadata["approval_decision"] = approval_decision
+        if preview_binding is not None:
+            metadata["preview_binding"] = preview_binding
         self._finish_runtime_span(tool_span, status, metadata=metadata)
 
         if call.name != "run_quality_check" or quality_span is None:

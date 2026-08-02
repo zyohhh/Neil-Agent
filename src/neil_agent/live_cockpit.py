@@ -41,6 +41,9 @@ from .projections import (
 )
 from .schemas import TokenUsage, ToolCall
 from .security import (
+    ApprovalFlow,
+    ApprovalFlowProjector,
+    ApprovalTrace,
     CapabilityState,
     SecurityBoundary,
     SecurityShield,
@@ -135,6 +138,20 @@ _SECURITY_STATE_MARKERS: dict[CapabilityState, str] = {
     "approval": "◆",
     "forbidden": "■",
     "unavailable": "○",
+}
+_APPROVAL_DECISION_LABELS = {
+    "pending": "PENDING",
+    "approved": "APPROVED",
+    "rejected": "REJECTED",
+    "unavailable": "UNAVAILABLE",
+    "error": "ERROR",
+}
+_PREVIEW_BINDING_LABELS = {
+    "pending": "BINDING PENDING",
+    "valid": "BINDING VALID",
+    "changed": "BINDING CHANGED",
+    "unavailable": "BINDING UNAVAILABLE",
+    "not_checked": "NOT CHECKED",
 }
 
 
@@ -648,7 +665,13 @@ class LiveCockpitApp(App[None]):
         scrollbar-background: #09131a;
     }
 
-    #security-capabilities,
+    #security-capabilities {
+        height: auto;
+        padding: 1 2 0 2;
+        color: #c6d4df;
+    }
+
+    #approval-flows,
     #security-detail {
         height: 1fr;
         padding: 1 2;
@@ -708,6 +731,11 @@ class LiveCockpitApp(App[None]):
     LiveCockpitApp.narrow #context-detail-panel,
     LiveCockpitApp.narrow #security-detail-panel {
         display: none;
+    }
+
+    LiveCockpitApp.narrow #approval-flows {
+        height: auto;
+        padding: 1 2;
     }
 
     LiveCockpitApp.narrow #brand {
@@ -780,6 +808,10 @@ class LiveCockpitApp(App[None]):
         padding: 0 1;
     }
 
+    LiveCockpitApp.short #approval-flows {
+        display: none;
+    }
+
     LiveCockpitApp.short #context-insights {
         display: none;
     }
@@ -827,6 +859,7 @@ class LiveCockpitApp(App[None]):
         )
         self._graph = ExecutionGraphProjector().project(self._events)
         self._metrics = MetricsProjector().project(self._graph)
+        self._approval_flow = ApprovalFlowProjector().project(self._graph)
         self._context_snapshot = agent.context_tomography()
         self._context_simulation: ContextWhatIf | None = None
         self._monitor_view: MonitorView = "execution"
@@ -883,6 +916,10 @@ class LiveCockpitApp(App[None]):
         return self._security
 
     @property
+    def approval_flow(self) -> ApprovalFlow:
+        return self._approval_flow
+
+    @property
     def _cockpit_screen(self) -> Screen[Any]:
         return self.screen_stack[0]
 
@@ -923,6 +960,7 @@ class LiveCockpitApp(App[None]):
                         classes="panel-title",
                     )
                     yield Static(id="security-capabilities")
+                    yield Static(id="approval-flows")
                 with Vertical(id="security-detail-panel"):
                     yield Static("ENFORCEMENT LAYERS", classes="panel-title")
                     yield Static(id="security-detail")
@@ -1350,7 +1388,8 @@ class LiveCockpitApp(App[None]):
             else None
         )
         panel.border_subtitle = (
-            f" OS SANDBOX · {os_boundary.status.upper()} · SEPARATE LAYER "
+            f" {_compact_approval_signal(self._approval_flow)} · "
+            f"OS {os_boundary.status.upper()} "
             if self.has_class("short")
             else None
         )
@@ -1364,6 +1403,12 @@ class LiveCockpitApp(App[None]):
                 short=self.has_class("short"),
             )
         )
+        self._cockpit_screen.query_one("#approval-flows", Static).update(
+            format_approval_flows(
+                self._approval_flow,
+                compact=compact,
+            )
+        )
         self._cockpit_screen.query_one("#security-detail", Static).update(
             format_security_boundaries(self._security)
         )
@@ -1371,7 +1416,9 @@ class LiveCockpitApp(App[None]):
     def _refresh_projection(self) -> None:
         self._graph = ExecutionGraphProjector().project(self._events)
         self._metrics = MetricsProjector().project(self._graph)
+        self._approval_flow = ApprovalFlowProjector().project(self._graph)
         self._refresh_tree()
+        self._refresh_security_view()
         self._refresh_metrics()
 
     def _refresh_tree(self) -> None:
@@ -1408,7 +1455,10 @@ class LiveCockpitApp(App[None]):
         while stack:
             parent_tree_node, node = stack.pop()
             tree_node = parent_tree_node.add(
-                format_node_label(node),
+                format_node_label(
+                    node,
+                    approval_trace=self._approval_flow.trace(node.correlation_id),
+                ),
                 data=node.correlation_id,
                 expand=True,
             )
@@ -1449,7 +1499,12 @@ class LiveCockpitApp(App[None]):
         if node is None:
             detail.update(Text("节点已不在当前有界事件窗口中", style="dim"))
             return
-        detail.update(format_node_detail(node))
+        detail.update(
+            format_node_detail(
+                node,
+                approval_trace=self._approval_flow.trace(node.correlation_id),
+            )
+        )
 
     def _refresh_metrics(self) -> None:
         if self._closed:
@@ -1590,6 +1645,49 @@ def format_security_capabilities(
     return output
 
 
+def format_approval_flows(
+    flow: ApprovalFlow,
+    *,
+    compact: bool = False,
+    limit: int = 4,
+) -> Text:
+    """Render recent approval decisions and preview bindings without previews."""
+
+    output = Text("APPROVAL FLOW", style="bold #ffd08a")
+    output.append(f"  ·  {len(flow.traces)}", style="dim")
+    output.append("  ·  DAG LINKED", style="#9bcdf5")
+    if not compact:
+        output.append("  ·  PREVIEW BODY HIDDEN", style="dim")
+    if not flow.traces:
+        output.append("\n○ NO APPROVAL REQUESTS IN EVENT WINDOW", style="dim")
+        return output
+
+    visible = tuple(reversed(flow.traces[-max(limit, 1) :]))
+    for trace in visible:
+        style = _approval_trace_style(trace)
+        output.append(f"\n{_approval_trace_marker(trace)} ", style=style)
+        output.append(_safe_inline(trace.tool_name), style="bold #f4f7fb")
+        decision = _APPROVAL_DECISION_LABELS[trace.decision]
+        binding = _PREVIEW_BINDING_LABELS[trace.preview_binding]
+        if compact:
+            output.append(
+                f"  {decision} / {binding.removeprefix('BINDING ')}",
+                style=style,
+            )
+            continue
+        output.append(f"  {decision} · {binding}", style=style)
+        if trace.tool_correlation_id is None:
+            output.append("  → UNRESOLVED TOOL", style="bold red")
+        else:
+            output.append(f"  → {_short_id(trace.tool_correlation_id)}", style="dim")
+        if trace.elapsed_ms is not None:
+            output.append(f"  ·  {trace.elapsed_ms:,}ms", style="dim")
+    omitted = len(flow.traces) - len(visible)
+    if omitted:
+        output.append(f"\n… {omitted} EARLIER APPROVALS", style="dim")
+    return output
+
+
 def format_security_boundaries(security: SecurityShield) -> Text:
     """Explain the application/OS split and prevent false sandbox claims."""
 
@@ -1611,6 +1709,39 @@ def format_security_boundaries(security: SecurityShield) -> Text:
         style="dim",
     )
     return output
+
+
+def _compact_approval_signal(flow: ApprovalFlow) -> str:
+    if not flow.traces:
+        return "APPROVAL NONE"
+    trace = flow.traces[-1]
+    decision = _APPROVAL_DECISION_LABELS[trace.decision]
+    binding = _PREVIEW_BINDING_LABELS[trace.preview_binding].removeprefix("BINDING ")
+    return f"APPROVAL {decision}/{binding}"
+
+
+def _approval_trace_style(trace: ApprovalTrace) -> str:
+    if trace.preview_binding in {"changed", "unavailable"}:
+        return "bold #ff4f7d"
+    return {
+        "pending": "bold #ffb454",
+        "approved": "bold #9ee37d",
+        "rejected": "dim",
+        "unavailable": "bold #ff4f7d",
+        "error": "bold #ff4f7d",
+    }[trace.decision]
+
+
+def _approval_trace_marker(trace: ApprovalTrace) -> str:
+    if trace.preview_binding in {"changed", "unavailable"}:
+        return "▲"
+    return {
+        "pending": "◇",
+        "approved": "●",
+        "rejected": "○",
+        "unavailable": "▲",
+        "error": "▲",
+    }[trace.decision]
 
 
 def _append_security_boundary(
@@ -1648,7 +1779,7 @@ def visible_node_ids(
             if node_filter == "active"
             else node.status == "failed"
             if node_filter == "failed"
-            else node.stage == "tool_call"
+            else node.stage in {"tool_call", "approval"}
         )
     }
     visible = set(matched)
@@ -1954,22 +2085,45 @@ def _context_meter(value: int, total: int, *, style: str) -> Text:
     return meter
 
 
-def format_node_label(node: ExecutionNode) -> Text:
+def format_node_label(
+    node: ExecutionNode,
+    *,
+    approval_trace: ApprovalTrace | None = None,
+) -> Text:
     """Create one compact label without interpreting metadata as markup."""
 
-    style = _STATUS_STYLE[node.status]
-    label = Text(f"{_STATUS_MARKER[node.status]} ", style=style)
+    style = (
+        _approval_trace_style(approval_trace)
+        if approval_trace is not None
+        else _STATUS_STYLE[node.status]
+    )
+    marker = (
+        _approval_trace_marker(approval_trace)
+        if approval_trace is not None
+        else _STATUS_MARKER[node.status]
+    )
+    label = Text(f"{marker} ", style=style)
     label.append(node.stage.replace("_", " ").upper(), style=style)
     tool_name = _metadata_value(node, "tool_name")
     if tool_name is not None:
         label.append(f"  {_safe_inline(tool_name)}", style="bold")
+    if approval_trace is not None:
+        decision = _APPROVAL_DECISION_LABELS[approval_trace.decision]
+        binding = _PREVIEW_BINDING_LABELS[approval_trace.preview_binding].removeprefix(
+            "BINDING "
+        )
+        label.append(f"  {decision}/{binding}", style=style)
     label.append(f"  {_short_id(node.correlation_id)}", style="dim")
     if node.anomalies:
         label.append(f"  ⚠{len(node.anomalies)}", style="yellow")
     return label
 
 
-def format_node_detail(node: ExecutionNode) -> Text:
+def format_node_detail(
+    node: ExecutionNode,
+    *,
+    approval_trace: ApprovalTrace | None = None,
+) -> Text:
     """Render only IDs, times, status, anomalies, and allowlisted metadata."""
 
     detail = Text()
@@ -1980,6 +2134,22 @@ def format_node_detail(node: ExecutionNode) -> Text:
     )
     detail.append("STAGE\n", style="dim")
     detail.append(f"{node.stage}\n\n", style="bold")
+    if approval_trace is not None:
+        detail.append("APPROVAL TRACE\n", style="bold #ffb454")
+        detail.append("DECISION  ", style="dim")
+        detail.append(
+            f"{_APPROVAL_DECISION_LABELS[approval_trace.decision]}\n",
+            style=_approval_trace_style(approval_trace),
+        )
+        detail.append("PREVIEW BINDING  ", style="dim")
+        detail.append(
+            f"{_PREVIEW_BINDING_LABELS[approval_trace.preview_binding]}\n",
+            style=_approval_trace_style(approval_trace),
+        )
+        detail.append("TOOL NODE  ", style="dim")
+        detail.append(f"{approval_trace.tool_correlation_id or 'UNRESOLVED'}\n")
+        detail.append("PREVIEW SIZE  ", style="dim")
+        detail.append(f"{approval_trace.preview_chars:,} CHARS · BODY HIDDEN\n\n")
     detail.append("CORRELATION\n", style="dim")
     detail.append(f"{node.correlation_id}\n\n")
     detail.append("PARENT\n", style="dim")
@@ -1992,6 +2162,11 @@ def format_node_detail(node: ExecutionNode) -> Text:
     if metadata:
         detail.append("\nSAFE METADATA\n", style="dim")
         for item in metadata:
+            if approval_trace is not None and item.name in {
+                "approval_decision",
+                "preview_binding",
+            }:
+                continue
             detail.append(f"{item.name}  ", style="#8fa9bd")
             detail.append(f"{_safe_inline(item.value)}\n")
     if node.anomalies:

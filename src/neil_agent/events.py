@@ -39,7 +39,22 @@ RuntimeStage = Literal[
     "quality_check",
 ]
 RuntimeStatus = Literal["started", "waiting", "succeeded", "skipped", "failed"]
+ApprovalDecision = Literal[
+    "pending",
+    "approved",
+    "rejected",
+    "unavailable",
+    "error",
+]
+PreviewBindingState = Literal[
+    "pending",
+    "valid",
+    "changed",
+    "unavailable",
+    "not_checked",
+]
 RuntimeMetadataName = Literal[
+    "approval_decision",
     "argument_count",
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
@@ -56,6 +71,7 @@ RuntimeMetadataName = Literal[
     "omitted_rounds",
     "output_tokens",
     "preview_chars",
+    "preview_binding",
     "requires_approval",
     "response_chars",
     "result_chars",
@@ -122,6 +138,8 @@ _STAGE_METADATA_FIELDS: dict[
         "tool_name",
         "argument_count",
         "requires_approval",
+        "approval_decision",
+        "preview_binding",
         "is_error",
         "result_chars",
         "elapsed_ms",
@@ -130,6 +148,8 @@ _STAGE_METADATA_FIELDS: dict[
     "approval": (
         "tool_name",
         "preview_chars",
+        "approval_decision",
+        "preview_binding",
         "elapsed_ms",
         "error_type",
     ),
@@ -138,6 +158,14 @@ _STAGE_METADATA_FIELDS: dict[
         "result_chars",
         "elapsed_ms",
         "error_type",
+    ),
+}
+_ENUM_METADATA_VALUES = {
+    "approval_decision": frozenset(
+        {"pending", "approved", "rejected", "unavailable", "error"}
+    ),
+    "preview_binding": frozenset(
+        {"pending", "valid", "changed", "unavailable", "not_checked"}
     ),
 }
 
@@ -164,6 +192,11 @@ class RuntimeMetadataItem(BaseModel):
             if any(category(character).startswith("C") for character in value):
                 raise ValueError(
                     "runtime metadata text contains a control or format character"
+                )
+            enum_values = _ENUM_METADATA_VALUES.get(self.name)
+            if enum_values is not None and value not in enum_values:
+                raise ValueError(
+                    f"runtime metadata {self.name} contains an unknown state"
                 )
         elif not isinstance(value, bool) and (
             value < 0 or value > MAX_RUNTIME_METADATA_INTEGER

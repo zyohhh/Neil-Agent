@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from inspect import signature
+from typing import Literal
 
 from ..errors import ToolError
 from ..schemas import ToolCall, ToolDefinition, ToolResult
 
 ToolHandler = Callable[..., str]
 ToolPreviewHandler = Callable[..., str]
+ApprovedPreviewBinding = Literal["valid", "changed", "unavailable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +21,14 @@ class RegisteredTool:
     handler: ToolHandler
     requires_approval: bool = False
     preview_handler: ToolPreviewHandler | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedToolExecution:
+    """One approved execution plus its fail-closed preview-binding result."""
+
+    result: ToolResult
+    preview_binding: ApprovedPreviewBinding
 
 
 class ToolRegistry:
@@ -87,14 +97,41 @@ class ToolRegistry:
                 return self._error(call, f"工具需要用户确认后才能执行：{call.name}")
             if approved_preview is None:
                 return self._error(call, f"工具缺少已确认的操作预览：{call.name}")
-            assert registered.preview_handler is not None
-            current_preview = self._invoke(call, registered.preview_handler)
-            if current_preview.is_error:
-                return current_preview
-            if current_preview.content != approved_preview:
-                return self._error(call, "操作预览在确认后发生变化，请重新预览并确认。")
+            return self.execute_approved(
+                call,
+                approved_preview=approved_preview,
+            ).result
 
         return self._invoke(call, registered.handler)
+
+    def execute_approved(
+        self,
+        call: ToolCall,
+        *,
+        approved_preview: str,
+    ) -> ApprovedToolExecution:
+        """Revalidate one approved preview and report binding without exposing it."""
+
+        registered = self._tools.get(call.name)
+        if registered is None:
+            return ApprovedToolExecution(
+                self._error(call, f"未知工具：{call.name}"),
+                "unavailable",
+            )
+        if not registered.requires_approval or registered.preview_handler is None:
+            return ApprovedToolExecution(
+                self._error(call, f"工具不支持批准后执行：{call.name}"),
+                "unavailable",
+            )
+        current_preview = self._invoke(call, registered.preview_handler)
+        if current_preview.is_error:
+            return ApprovedToolExecution(current_preview, "unavailable")
+        if current_preview.content != approved_preview:
+            return ApprovedToolExecution(
+                self._error(call, "操作预览在确认后发生变化，请重新预览并确认。"),
+                "changed",
+            )
+        return ApprovedToolExecution(self._invoke(call, registered.handler), "valid")
 
     def _invoke(self, call: ToolCall, handler: ToolHandler) -> ToolResult:
         """Validate arguments, invoke a handler, and normalize its result."""

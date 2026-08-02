@@ -4,18 +4,27 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from .errors import SandboxError
+from .events import (
+    MAX_RUNTIME_METADATA_TEXT_CHARS,
+    ApprovalDecision,
+    PreviewBindingState,
+    RuntimeMetadataItem,
+)
+from .projections import ExecutionGraph, ExecutionNode
 from .sandbox import SandboxCapabilities, WindowsSandboxBackend
 
 SECURITY_SHIELD_SCHEMA_VERSION = 1
+APPROVAL_FLOW_SCHEMA_VERSION = 1
 MAX_SECURITY_LABEL_CHARS = 48
 MAX_SECURITY_SUMMARY_CHARS = 120
 
 CapabilityState = Literal["direct", "approval", "forbidden", "unavailable"]
 SecurityLayer = Literal["application", "os"]
 BoundaryStatus = Literal["enforced", "ready", "disabled", "incomplete", "unavailable"]
+ApprovalAssociation = Literal["linked", "unresolved"]
 
 _CAPABILITY_STATES = frozenset({"direct", "approval", "forbidden", "unavailable"})
 _LAYERS = frozenset({"application", "os"})
@@ -220,6 +229,196 @@ class SecurityShield:
         """Count bands in one state for compact summaries and legends."""
 
         return sum(capability.state == state for capability in self.capabilities)
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalTrace:
+    """One approval node joined to its parent tool without preview content."""
+
+    correlation_id: str
+    tool_correlation_id: str | None
+    tool_name: str
+    association: ApprovalAssociation
+    decision: ApprovalDecision
+    preview_binding: PreviewBindingState
+    preview_chars: int
+    elapsed_ms: int | None
+
+    def __post_init__(self) -> None:
+        if not self.correlation_id.startswith("approval-"):
+            raise ValueError("approval trace correlation ID is invalid")
+        if self.association == "linked":
+            if (
+                self.tool_correlation_id is None
+                or not self.tool_correlation_id.startswith("tool-")
+            ):
+                raise ValueError("linked approval trace requires a tool node")
+        elif self.tool_correlation_id is not None:
+            raise ValueError("unresolved approval trace cannot claim a tool node")
+        if not self.tool_name or len(self.tool_name) > MAX_RUNTIME_METADATA_TEXT_CHARS:
+            raise ValueError("approval trace tool name is invalid")
+        if self.decision not in {
+            "pending",
+            "approved",
+            "rejected",
+            "unavailable",
+            "error",
+        }:
+            raise ValueError("approval trace decision is invalid")
+        if self.preview_binding not in {
+            "pending",
+            "valid",
+            "changed",
+            "unavailable",
+            "not_checked",
+        }:
+            raise ValueError("approval trace preview binding is invalid")
+        if (
+            isinstance(self.preview_chars, bool)
+            or not isinstance(self.preview_chars, int)
+            or self.preview_chars < 0
+        ):
+            raise ValueError("approval trace preview size is invalid")
+        if self.elapsed_ms is not None and (
+            isinstance(self.elapsed_ms, bool)
+            or not isinstance(self.elapsed_ms, int)
+            or self.elapsed_ms < 0
+        ):
+            raise ValueError("approval trace elapsed time is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalFlow:
+    """Versioned, deterministic approvals projected from one execution graph."""
+
+    traces: tuple[ApprovalTrace, ...]
+    schema_version: int = APPROVAL_FLOW_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, bool)
+            or self.schema_version != APPROVAL_FLOW_SCHEMA_VERSION
+        ):
+            raise ValueError("unsupported approval flow schema version")
+        if not isinstance(self.traces, tuple) or any(
+            not isinstance(trace, ApprovalTrace) for trace in self.traces
+        ):
+            raise ValueError("approval flow traces must be immutable")
+        if len({trace.correlation_id for trace in self.traces}) != len(self.traces):
+            raise ValueError("approval flow traces must be unique")
+
+    @property
+    def pending_count(self) -> int:
+        return sum(trace.decision == "pending" for trace in self.traces)
+
+    @property
+    def changed_count(self) -> int:
+        return sum(trace.preview_binding == "changed" for trace in self.traces)
+
+    def trace(self, correlation_id: str) -> ApprovalTrace | None:
+        return next(
+            (trace for trace in self.traces if trace.correlation_id == correlation_id),
+            None,
+        )
+
+
+class ApprovalFlowProjector:
+    """Join approval nodes with parent tool outcomes from a stable DAG."""
+
+    def project(self, graph: ExecutionGraph) -> ApprovalFlow:
+        nodes = {node.correlation_id: node for node in graph.nodes}
+        traces = tuple(
+            self._trace(node, nodes) for node in graph.nodes if node.stage == "approval"
+        )
+        return ApprovalFlow(traces=traces)
+
+    @staticmethod
+    def _trace(
+        approval: ExecutionNode,
+        nodes: Mapping[str, ExecutionNode],
+    ) -> ApprovalTrace:
+        parent = (
+            nodes.get(approval.parent_correlation_id)
+            if approval.parent_correlation_id is not None
+            else None
+        )
+        linked_tool = (
+            parent if parent is not None and parent.stage == "tool_call" else None
+        )
+        decision = _approval_decision(approval)
+        binding = _preview_binding(approval)
+        if linked_tool is not None:
+            tool_decision = _text_metadata(
+                linked_tool.finish_metadata,
+                "approval_decision",
+            )
+            tool_binding = _text_metadata(
+                linked_tool.finish_metadata,
+                "preview_binding",
+            )
+            if tool_decision == "approved" and tool_binding in {
+                "valid",
+                "changed",
+                "unavailable",
+            }:
+                decision = "approved"
+                binding = cast(PreviewBindingState, tool_binding)
+        tool_name = _text_metadata(approval.start_metadata, "tool_name")
+        if tool_name is None and linked_tool is not None:
+            tool_name = _text_metadata(linked_tool.start_metadata, "tool_name")
+        preview_chars = _integer_metadata(approval.start_metadata, "preview_chars")
+        elapsed_ms = _integer_metadata(approval.finish_metadata, "elapsed_ms")
+        return ApprovalTrace(
+            correlation_id=approval.correlation_id,
+            tool_correlation_id=(
+                None if linked_tool is None else linked_tool.correlation_id
+            ),
+            tool_name=tool_name or "UNKNOWN TOOL",
+            association="unresolved" if linked_tool is None else "linked",
+            decision=decision,
+            preview_binding=binding,
+            preview_chars=preview_chars or 0,
+            elapsed_ms=elapsed_ms,
+        )
+
+
+def _approval_decision(node: ExecutionNode) -> ApprovalDecision:
+    value = _text_metadata(node.finish_metadata, "approval_decision")
+    if value is None and node.status == "waiting":
+        value = _text_metadata(node.start_metadata, "approval_decision")
+    if value in {"pending", "approved", "rejected", "unavailable", "error"}:
+        return cast(ApprovalDecision, value)
+    return {
+        "waiting": "pending",
+        "succeeded": "approved",
+        "skipped": "rejected",
+        "failed": "error",
+    }.get(node.status, "error")  # type: ignore[return-value]
+
+
+def _preview_binding(node: ExecutionNode) -> PreviewBindingState:
+    value = _text_metadata(node.finish_metadata, "preview_binding")
+    if value is None and node.status == "waiting":
+        value = _text_metadata(node.start_metadata, "preview_binding")
+    if value in {"pending", "valid", "changed", "unavailable", "not_checked"}:
+        return cast(PreviewBindingState, value)
+    return "pending" if node.status == "waiting" else "not_checked"
+
+
+def _text_metadata(
+    metadata: tuple[RuntimeMetadataItem, ...],
+    name: str,
+) -> str | None:
+    value = next((item.value for item in metadata if item.name == name), None)
+    return value if isinstance(value, str) else None
+
+
+def _integer_metadata(
+    metadata: tuple[RuntimeMetadataItem, ...],
+    name: str,
+) -> int | None:
+    value = next((item.value for item in metadata if item.name == name), None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def observe_security_shield(

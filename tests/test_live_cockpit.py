@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from threading import Thread
+from typing import Literal
 
 import pytest
 from textual.widgets import ContentSwitcher, Input, Log, Tree
@@ -30,10 +31,12 @@ from neil_agent.live_cockpit import (
     LiveCockpitApp,
     RuntimeEventBridge,
     ToolApprovalScreen,
+    format_approval_flows,
     format_context_detail,
     format_context_insights,
     format_context_layers,
     format_node_detail,
+    format_node_label,
     format_security_boundaries,
     format_security_capabilities,
     format_security_title,
@@ -42,7 +45,11 @@ from neil_agent.live_cockpit import (
 )
 from neil_agent.projections import ExecutionGraphProjector
 from neil_agent.schemas import TokenUsage, ToolCall
-from neil_agent.security import SecurityShield, project_security_shield
+from neil_agent.security import (
+    ApprovalFlowProjector,
+    SecurityShield,
+    project_security_shield,
+)
 
 NOW = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
 
@@ -151,6 +158,90 @@ def _execution_events() -> tuple[RuntimeEvent, ...]:
         parent_event_id=tool.event_id,
     )
     return turn, model, tool, failed
+
+
+def _approval_execution_events(
+    *,
+    binding: Literal["valid", "changed"] = "valid",
+) -> tuple[RuntimeEvent, ...]:
+    turn_id = "turn-" + "d" * 32
+    tool_id = "tool-" + "e" * 32
+    approval_id = "approval-" + "f" * 32
+    turn = _event(
+        10,
+        correlation_id=turn_id,
+        stage="agent_turn",
+        status="started",
+        offset_ms=0,
+    )
+    tool = _event(
+        11,
+        correlation_id=tool_id,
+        stage="tool_call",
+        status="started",
+        offset_ms=1,
+        parent_event_id=turn.event_id,
+    ).model_copy(
+        update={
+            "metadata": (
+                RuntimeMetadataItem(name="tool_name", value="write_file"),
+                RuntimeMetadataItem(name="argument_count", value=2),
+                RuntimeMetadataItem(name="requires_approval", value=True),
+            )
+        }
+    )
+    approval = _event(
+        12,
+        correlation_id=approval_id,
+        stage="approval",
+        status="waiting",
+        offset_ms=2,
+        parent_event_id=tool.event_id,
+    ).model_copy(
+        update={
+            "metadata": (
+                RuntimeMetadataItem(name="tool_name", value="write_file"),
+                RuntimeMetadataItem(name="preview_chars", value=320),
+                RuntimeMetadataItem(name="approval_decision", value="pending"),
+                RuntimeMetadataItem(name="preview_binding", value="pending"),
+            )
+        }
+    )
+    decision = _event(
+        13,
+        correlation_id=approval_id,
+        stage="approval",
+        status="succeeded",
+        offset_ms=3,
+        parent_event_id=approval.event_id,
+    ).model_copy(
+        update={
+            "metadata": (
+                RuntimeMetadataItem(name="approval_decision", value="approved"),
+                RuntimeMetadataItem(name="preview_binding", value="pending"),
+                RuntimeMetadataItem(name="elapsed_ms", value=12),
+            )
+        }
+    )
+    tool_finish = _event(
+        14,
+        correlation_id=tool_id,
+        stage="tool_call",
+        status="succeeded" if binding == "valid" else "failed",
+        offset_ms=4,
+        parent_event_id=tool.event_id,
+    ).model_copy(
+        update={
+            "metadata": (
+                RuntimeMetadataItem(name="approval_decision", value="approved"),
+                RuntimeMetadataItem(name="preview_binding", value=binding),
+                RuntimeMetadataItem(name="is_error", value=binding != "valid"),
+                RuntimeMetadataItem(name="result_chars", value=24),
+                RuntimeMetadataItem(name="elapsed_ms", value=20),
+            )
+        }
+    )
+    return turn, tool, approval, decision, tool_finish
 
 
 def _security_snapshot() -> SecurityShield:
@@ -329,6 +420,33 @@ def test_security_formatters_show_four_states_and_distinct_layers() -> None:
     assert "METADATA RECORDING" in detail.plain
 
 
+def test_approval_trace_formatters_link_dag_and_flag_changed_binding() -> None:
+    graph = ExecutionGraphProjector().project(
+        _approval_execution_events(binding="changed")
+    )
+    flow = ApprovalFlowProjector().project(graph)
+    trace = flow.traces[0]
+    approval_node = graph.node(trace.correlation_id)
+    assert approval_node is not None
+
+    formatted = format_approval_flows(flow)
+    compact = format_approval_flows(flow, compact=True)
+    label = format_node_label(approval_node, approval_trace=trace)
+    detail = format_node_detail(approval_node, approval_trace=trace)
+
+    assert "APPROVAL FLOW" in formatted.plain
+    assert "APPROVED · BINDING CHANGED" in formatted.plain
+    assert "tool-eeeeeeee" in formatted.plain
+    assert "PREVIEW BODY HIDDEN" in formatted.plain
+    assert "APPROVED / CHANGED" in compact.plain
+    assert "APPROVED/CHANGED" in label.plain
+    assert "APPROVAL TRACE" in detail.plain
+    assert "BINDING CHANGED" in detail.plain
+    assert "320 CHARS · BODY HIDDEN" in detail.plain
+    assert "approval_decision" not in detail.plain
+    assert trace.correlation_id in visible_node_ids(graph, "tools")
+
+
 @pytest.mark.asyncio
 async def test_live_app_streams_agent_events_and_output() -> None:
     bus = EventBus(queue_size=32)
@@ -479,6 +597,7 @@ async def test_live_app_toggles_security_shield_without_disturbing_primary_view(
             "WORKSPACE READ" in app.query_one("#security-capabilities").render().plain
         )
         assert "APPLICATION POLICY" in app.query_one("#security-detail").render().plain
+        assert "NO APPROVAL REQUESTS" in app.query_one("#approval-flows").render().plain
         assert app.check_action("filter_tools", ()) is False
         assert app.check_action("context_what_if", ()) is False
         assert app.query_one("#prompt", Input).has_focus
@@ -497,7 +616,43 @@ async def test_live_app_toggles_security_shield_without_disturbing_primary_view(
         assert app.query_one("#security-panel").display
         assert not app.query_one("#security-detail-panel").display
         assert not app.query_one("#security-title").display
-        assert "OS SANDBOX · DISABLED" in str(
+        assert "APPROVAL NONE · OS DISABLED" in str(
+            app.query_one("#security-panel").border_subtitle
+        )
+        assert app.query_one("#transcript", Log).region.height >= 5
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_security_view_tracks_changed_approval_binding_responsively() -> (
+    None
+):
+    bus = EventBus()
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        security=_security_snapshot(),
+        initial_events=_approval_execution_events(binding="changed"),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("f5")
+        await pilot.pause()
+
+        assert app.approval_flow.changed_count == 1
+        approval_view = app.query_one("#approval-flows").render().plain
+        assert "write_file" in approval_view
+        assert "APPROVED · BINDING CHANGED" in approval_view
+        assert "tool-eeeeeeee" in approval_view
+
+        await pilot.resize_terminal(80, 28)
+        await pilot.pause()
+
+        assert not app.query_one("#approval-flows").display
+        assert "APPROVAL APPROVED/CHANGED · OS DISABLED" in str(
             app.query_one("#security-panel").border_subtitle
         )
         assert app.query_one("#transcript", Log).region.height >= 5

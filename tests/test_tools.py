@@ -97,16 +97,17 @@ def test_write_file_requires_preview_and_approval(tmp_path: Path) -> None:
 
     preview = registry.preview(call)
     denied = registry.execute(call)
-    approved = registry.execute(
+    approved_execution = registry.execute_approved(
         call,
-        approved=True,
         approved_preview=preview.content,
     )
+    approved = approved_execution.result
 
     assert "-old" in preview.content
     assert "+new" in preview.content
     assert denied.is_error is True
     assert "需要用户确认" in denied.content
+    assert approved_execution.preview_binding == "valid"
     assert approved.is_error is False
     assert target.read_text(encoding="utf-8") == "new\n"
 
@@ -162,12 +163,13 @@ def test_write_rejects_stale_approved_preview(tmp_path: Path) -> None:
     preview = registry.preview(call)
     target.write_text("external change\n", encoding="utf-8")
 
-    result = registry.execute(
+    execution = registry.execute_approved(
         call,
-        approved=True,
         approved_preview=preview.content,
     )
+    result = execution.result
 
+    assert execution.preview_binding == "changed"
     assert result.is_error is True
     assert "确认后发生变化" in result.content
     assert target.read_text(encoding="utf-8") == "external change\n"
