@@ -13,7 +13,11 @@ from rich.text import Text
 
 from .context import ContextStats
 from .schemas import TokenUsage
-from .security import SecurityShield
+from .security import (
+    SecurityBoundarySignal,
+    SecurityShield,
+    project_security_boundary_watch,
+)
 from .task import QualityCheckRecord, TaskStep
 
 COCKPIT_METER_WIDTH = 24
@@ -181,6 +185,7 @@ def _context_view(snapshot: CockpitSnapshot) -> RenderableType:
 
 def _security_view(snapshot: CockpitSnapshot) -> RenderableType:
     security = snapshot.security
+    boundary_watch = project_security_boundary_watch((security,))
     table = Table.grid(expand=True, padding=(0, 1))
     table.add_column(width=12, no_wrap=True, style="dim")
     table.add_column(ratio=1, overflow="fold")
@@ -198,10 +203,37 @@ def _security_view(snapshot: CockpitSnapshot) -> RenderableType:
         ),
     )
     table.add_row(
+        "四类边界",
+        Text(
+            " · ".join(
+                _basic_boundary_token(signal) for signal in boundary_watch.signals
+            ),
+            style="cyan",
+        ),
+    )
+    table.add_row(
+        "边界变化",
+        Text(
+            f"STABLE · {boundary_watch.observation_count} OBS · "
+            f"ALERT {boundary_watch.warning_count}",
+            style="yellow" if boundary_watch.warning_count else "green",
+        ),
+    )
+    table.add_row(
         "本地审计",
         Text(
-            "RECORDING METADATA" if security.audit_enabled else "DISABLED",
-            style="green" if security.audit_enabled else "dim",
+            (
+                "RECORDING METADATA"
+                if security.audit_status == "recording"
+                else security.audit_status.upper()
+            ),
+            style=(
+                "green"
+                if security.audit_status == "recording"
+                else "yellow"
+                if security.audit_status in {"busy", "disabled"}
+                else "bold red"
+            ),
         ),
     )
     table.add_row(
@@ -236,6 +268,32 @@ def _security_legend(security: SecurityShield) -> Text:
             style=styles[state],
         )
     return legend
+
+
+def _basic_boundary_token(signal: SecurityBoundarySignal) -> str:
+    labels = {
+        "path": {
+            "enforced": "PATH OS",
+            "application_only": "PATH APP",
+            "absent": "PATH NONE",
+        },
+        "network": {
+            "enforced": "NETWORK DENY",
+            "absent": "NETWORK ABSENT",
+        },
+        "command": {
+            "restricted": "COMMAND FIXED",
+            "absent": "COMMAND NONE",
+        },
+        "audit": {
+            "recording": "AUDIT RECORDING",
+            "busy": "AUDIT BUSY",
+            "disabled": "AUDIT DISABLED",
+            "degraded": "AUDIT DEGRADED",
+            "unavailable": "AUDIT UNAVAILABLE",
+        },
+    }
+    return labels.get(signal.key, {}).get(signal.state, "UNKNOWN")
 
 
 def _workspace_view(snapshot: CockpitSnapshot) -> RenderableType:

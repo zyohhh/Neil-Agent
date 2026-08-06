@@ -149,7 +149,7 @@ def test_run_routes_explicit_live_cockpit_mode(
     monkeypatch.setattr(
         cli,
         "_try_show_live_cockpit",
-        lambda _console, _settings, _agent, _llm, _tracker, workspace, _registry: (
+        lambda _console, _settings, _agent, _llm, _tracker, workspace, _registry, _audit: (
             live_calls.append(workspace) or 0
         ),
     )

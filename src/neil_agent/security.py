@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections import deque
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
-from .errors import SandboxError
+from .audit import AuditLogStatus
+from .errors import AuditError, SandboxError
 from .events import (
     MAX_RUNTIME_METADATA_TEXT_CHARS,
     ApprovalDecision,
@@ -16,20 +18,69 @@ from .events import (
 from .projections import ExecutionGraph, ExecutionNode
 from .sandbox import SandboxCapabilities, WindowsSandboxBackend
 
-SECURITY_SHIELD_SCHEMA_VERSION = 1
+SECURITY_SHIELD_SCHEMA_VERSION = 2
 APPROVAL_FLOW_SCHEMA_VERSION = 1
+SECURITY_BOUNDARY_WATCH_SCHEMA_VERSION = 1
 MAX_SECURITY_LABEL_CHARS = 48
 MAX_SECURITY_SUMMARY_CHARS = 120
+MAX_SECURITY_BOUNDARY_CHANGES = 16
+MAX_SECURITY_BOUNDARY_ALERTS = 8
 
 CapabilityState = Literal["direct", "approval", "forbidden", "unavailable"]
 SecurityLayer = Literal["application", "os"]
 BoundaryStatus = Literal["enforced", "ready", "disabled", "incomplete", "unavailable"]
 ApprovalAssociation = Literal["linked", "unresolved"]
+AuditBoundaryStatus = Literal[
+    "recording",
+    "busy",
+    "disabled",
+    "degraded",
+    "unavailable",
+]
+SecurityBoundaryKey = Literal["path", "network", "command", "audit"]
+SecurityBoundaryState = Literal[
+    "enforced",
+    "application_only",
+    "restricted",
+    "absent",
+    "recording",
+    "busy",
+    "disabled",
+    "degraded",
+    "unavailable",
+]
+SecurityBoundaryQualifier = Literal[
+    "os_ready",
+    "os_disabled",
+    "os_fail_closed",
+    "application",
+]
+SecurityAlertSeverity = Literal["information", "warning", "critical"]
+SecurityAlertScope = Literal["path", "network", "command", "audit", "observer"]
+SecurityAlertCode = Literal[
+    "os_disabled",
+    "os_fail_closed",
+    "audit_busy",
+    "audit_disabled",
+    "audit_degraded",
+    "audit_unavailable",
+    "observation_failed",
+    "boundary_downgrade",
+]
 
 _CAPABILITY_STATES = frozenset({"direct", "approval", "forbidden", "unavailable"})
 _LAYERS = frozenset({"application", "os"})
 _BOUNDARY_STATUSES = frozenset(
     {"enforced", "ready", "disabled", "incomplete", "unavailable"}
+)
+_AUDIT_BOUNDARY_STATUSES = frozenset(
+    {"recording", "busy", "disabled", "degraded", "unavailable"}
+)
+_SECURITY_BOUNDARY_ORDER: tuple[SecurityBoundaryKey, ...] = (
+    "path",
+    "network",
+    "command",
+    "audit",
 )
 
 
@@ -192,6 +243,7 @@ class SecurityShield:
     direct_tool_count: int
     approval_tool_count: int
     audit_enabled: bool
+    audit_status: AuditBoundaryStatus
     schema_version: int = SECURITY_SHIELD_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -224,11 +276,176 @@ class SecurityShield:
             )
         if type(self.audit_enabled) is not bool:
             raise ValueError("security audit state must be boolean")
+        if self.audit_status not in _AUDIT_BOUNDARY_STATUSES:
+            raise ValueError("security audit boundary status is invalid")
+        if self.audit_enabled == (self.audit_status == "disabled"):
+            raise ValueError("security audit configuration and status contradict")
 
     def capability_count(self, state: CapabilityState) -> int:
         """Count bands in one state for compact summaries and legends."""
 
         return sum(capability.state == state for capability in self.capabilities)
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityBoundarySignal:
+    """One fixed, value-free posture for a monitored security boundary."""
+
+    key: SecurityBoundaryKey
+    state: SecurityBoundaryState
+    layer: SecurityLayer
+    qualifier: SecurityBoundaryQualifier
+
+    def __post_init__(self) -> None:
+        if self.key not in _SECURITY_BOUNDARY_ORDER:
+            raise ValueError("security boundary signal key is invalid")
+        allowed = {
+            "path": {
+                ("enforced", "os", "os_ready"),
+                ("application_only", "application", "os_ready"),
+                ("application_only", "application", "os_disabled"),
+                ("application_only", "application", "os_fail_closed"),
+                ("absent", "application", "application"),
+            },
+            "network": {
+                ("enforced", "os", "os_ready"),
+                ("absent", "application", "os_ready"),
+                ("absent", "application", "os_disabled"),
+                ("absent", "application", "os_fail_closed"),
+            },
+            "command": {
+                ("restricted", "application", "application"),
+                ("restricted", "os", "os_ready"),
+                ("absent", "application", "application"),
+            },
+            "audit": {
+                ("recording", "application", "application"),
+                ("busy", "application", "application"),
+                ("disabled", "application", "application"),
+                ("degraded", "application", "application"),
+                ("unavailable", "application", "application"),
+            },
+        }[self.key]
+        if (self.state, self.layer, self.qualifier) not in allowed:
+            raise ValueError("security boundary signal combination is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityBoundaryChange:
+    """One deterministic boundary transition between adjacent observations."""
+
+    observation_index: int
+    before: SecurityBoundarySignal
+    after: SecurityBoundarySignal
+    severity: SecurityAlertSeverity
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.observation_index, bool)
+            or not isinstance(self.observation_index, int)
+            or self.observation_index < 2
+        ):
+            raise ValueError("security boundary change index is invalid")
+        if not isinstance(self.before, SecurityBoundarySignal) or not isinstance(
+            self.after, SecurityBoundarySignal
+        ):
+            raise ValueError("security boundary change signals are invalid")
+        if self.before.key != self.after.key or self.before == self.after:
+            raise ValueError("security boundary change must alter one boundary")
+        if self.severity not in {"information", "warning", "critical"}:
+            raise ValueError("security boundary change severity is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityBoundaryAlert:
+    """One aggregate, coded alert without paths, commands, or audit content."""
+
+    scope: SecurityAlertScope
+    code: SecurityAlertCode
+    severity: SecurityAlertSeverity
+    observation_index: int
+    occurrences: int = 1
+
+    def __post_init__(self) -> None:
+        if self.scope not in {*_SECURITY_BOUNDARY_ORDER, "observer"}:
+            raise ValueError("security boundary alert scope is invalid")
+        if self.code not in {
+            "os_disabled",
+            "os_fail_closed",
+            "audit_busy",
+            "audit_disabled",
+            "audit_degraded",
+            "audit_unavailable",
+            "observation_failed",
+            "boundary_downgrade",
+        }:
+            raise ValueError("security boundary alert code is invalid")
+        if self.severity not in {"information", "warning", "critical"}:
+            raise ValueError("security boundary alert severity is invalid")
+        for value in (self.observation_index, self.occurrences):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError("security boundary alert count is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityBoundaryWatch:
+    """Versioned, bounded state changes for four metadata-only boundaries."""
+
+    signals: tuple[SecurityBoundarySignal, ...]
+    changes: tuple[SecurityBoundaryChange, ...]
+    alerts: tuple[SecurityBoundaryAlert, ...]
+    observation_count: int
+    total_change_count: int
+    dropped_change_count: int
+    dropped_alert_count: int
+    observation_failures: int = 0
+    schema_version: int = SECURITY_BOUNDARY_WATCH_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SECURITY_BOUNDARY_WATCH_SCHEMA_VERSION:
+            raise ValueError("unsupported security boundary watch schema version")
+        if any(
+            not isinstance(signal, SecurityBoundarySignal) for signal in self.signals
+        ):
+            raise ValueError("security boundary watch signals are invalid")
+        if tuple(signal.key for signal in self.signals) != _SECURITY_BOUNDARY_ORDER:
+            raise ValueError("security boundary watch signals are incomplete")
+        if len(self.changes) > MAX_SECURITY_BOUNDARY_CHANGES or any(
+            not isinstance(change, SecurityBoundaryChange) for change in self.changes
+        ):
+            raise ValueError("security boundary watch changes are invalid")
+        if len(self.alerts) > MAX_SECURITY_BOUNDARY_ALERTS or any(
+            not isinstance(alert, SecurityBoundaryAlert) for alert in self.alerts
+        ):
+            raise ValueError("security boundary watch alerts are invalid")
+        for value in (
+            self.observation_count,
+            self.total_change_count,
+            self.dropped_change_count,
+            self.dropped_alert_count,
+            self.observation_failures,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("security boundary watch count is invalid")
+        if self.observation_count < 1:
+            raise ValueError("security boundary watch requires an observation")
+        if self.total_change_count != len(self.changes) + self.dropped_change_count:
+            raise ValueError("security boundary watch change counts contradict")
+        if any(
+            change.observation_index > self.observation_count for change in self.changes
+        ) or any(
+            alert.observation_index > self.observation_count for alert in self.alerts
+        ):
+            raise ValueError("security boundary watch observation index contradicts")
+
+    def signal(self, key: SecurityBoundaryKey) -> SecurityBoundarySignal:
+        """Return one of the four fixed current boundary signals."""
+
+        return self.signals[_SECURITY_BOUNDARY_ORDER.index(key)]
+
+    @property
+    def warning_count(self) -> int:
+        return sum(alert.severity in {"warning", "critical"} for alert in self.alerts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,12 +638,271 @@ def _integer_metadata(
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def project_security_boundary_watch(
+    observations: Iterable[SecurityShield],
+    *,
+    max_changes: int = MAX_SECURITY_BOUNDARY_CHANGES,
+    max_alerts: int = MAX_SECURITY_BOUNDARY_ALERTS,
+    observation_failures: int = 0,
+) -> SecurityBoundaryWatch:
+    """Project four current boundaries plus bounded adjacent state changes."""
+
+    if (
+        isinstance(max_changes, bool)
+        or not isinstance(max_changes, int)
+        or not 1 <= max_changes <= MAX_SECURITY_BOUNDARY_CHANGES
+    ):
+        raise ValueError("security boundary change limit is invalid")
+    if (
+        isinstance(max_alerts, bool)
+        or not isinstance(max_alerts, int)
+        or not 1 <= max_alerts <= MAX_SECURITY_BOUNDARY_ALERTS
+    ):
+        raise ValueError("security boundary alert limit is invalid")
+    if (
+        isinstance(observation_failures, bool)
+        or not isinstance(observation_failures, int)
+        or observation_failures < 0
+    ):
+        raise ValueError("security observation failure count is invalid")
+
+    retained_changes: deque[SecurityBoundaryChange] = deque(maxlen=max_changes)
+    previous: tuple[SecurityBoundarySignal, ...] | None = None
+    current: tuple[SecurityBoundarySignal, ...] | None = None
+    observation_count = 0
+    total_change_count = 0
+    for observation_count, shield in enumerate(observations, start=1):
+        if not isinstance(shield, SecurityShield):
+            raise ValueError("security boundary observations are invalid")
+        current = _security_boundary_signals(shield)
+        if previous is not None:
+            for before, after in zip(previous, current, strict=True):
+                if before == after:
+                    continue
+                total_change_count += 1
+                retained_changes.append(
+                    SecurityBoundaryChange(
+                        observation_index=observation_count,
+                        before=before,
+                        after=after,
+                        severity=(
+                            "warning"
+                            if _security_boundary_risk(after)
+                            > _security_boundary_risk(before)
+                            else "information"
+                        ),
+                    )
+                )
+        previous = current
+    if current is None:
+        raise ValueError("security boundary watch requires an observation")
+
+    changes = tuple(retained_changes)
+    alerts = _security_boundary_alerts(
+        current,
+        changes,
+        observation_count=observation_count,
+        observation_failures=observation_failures,
+    )
+    dropped_alert_count = max(len(alerts) - max_alerts, 0)
+    retained_alerts = alerts[-max_alerts:]
+    return SecurityBoundaryWatch(
+        signals=current,
+        changes=changes,
+        alerts=retained_alerts,
+        observation_count=observation_count,
+        total_change_count=total_change_count,
+        dropped_change_count=total_change_count - len(changes),
+        dropped_alert_count=dropped_alert_count,
+        observation_failures=observation_failures,
+    )
+
+
+def _security_boundary_signals(
+    security: SecurityShield,
+) -> tuple[SecurityBoundarySignal, ...]:
+    os_qualifier: SecurityBoundaryQualifier = (
+        "os_ready"
+        if security.os_sandbox.status == "ready"
+        else "os_disabled"
+        if security.os_sandbox.status == "disabled"
+        else "os_fail_closed"
+    )
+    path_tools = any(
+        capability.tool_count
+        and capability.key.startswith(("workspace-read", "workspace-write"))
+        for capability in security.capabilities
+    )
+    command_tools = any(
+        capability.tool_count
+        and capability.key.startswith(("quality-run", "git-mutate"))
+        for capability in security.capabilities
+    )
+    os_command_exposed = any(
+        capability.tool_count
+        and capability.key.startswith("os-command")
+        and capability.state in {"direct", "approval"}
+        for capability in security.capabilities
+    )
+    os_command_enforced = os_command_exposed and os_qualifier == "os_ready"
+    return (
+        SecurityBoundarySignal(
+            "path",
+            "enforced"
+            if os_command_enforced
+            else "application_only"
+            if path_tools
+            else "absent",
+            "os" if os_command_enforced else "application",
+            "os_ready"
+            if os_command_enforced
+            else os_qualifier
+            if path_tools
+            else "application",
+        ),
+        SecurityBoundarySignal(
+            "network",
+            "enforced" if os_command_enforced else "absent",
+            "os" if os_command_enforced else "application",
+            "os_ready" if os_command_enforced else os_qualifier,
+        ),
+        SecurityBoundarySignal(
+            "command",
+            "restricted" if command_tools or os_command_exposed else "absent",
+            "os" if os_command_enforced else "application",
+            "os_ready" if os_command_enforced else "application",
+        ),
+        SecurityBoundarySignal(
+            "audit",
+            cast(SecurityBoundaryState, security.audit_status),
+            "application",
+            "application",
+        ),
+    )
+
+
+def _security_boundary_risk(signal: SecurityBoundarySignal) -> int:
+    if signal.key == "path":
+        return {"enforced": 0, "absent": 0, "application_only": 1}[signal.state]
+    if signal.key == "audit":
+        return {
+            "recording": 0,
+            "busy": 1,
+            "disabled": 1,
+            "degraded": 2,
+            "unavailable": 2,
+        }[signal.state]
+    return 0
+
+
+def _security_boundary_alerts(
+    signals: tuple[SecurityBoundarySignal, ...],
+    changes: tuple[SecurityBoundaryChange, ...],
+    *,
+    observation_count: int,
+    observation_failures: int,
+) -> tuple[SecurityBoundaryAlert, ...]:
+    candidates: list[SecurityBoundaryAlert] = []
+    path = signals[0]
+    if path.qualifier == "os_disabled":
+        candidates.append(
+            SecurityBoundaryAlert(
+                "path",
+                "os_disabled",
+                "warning",
+                observation_count,
+            )
+        )
+    elif path.qualifier == "os_fail_closed":
+        candidates.append(
+            SecurityBoundaryAlert(
+                "path",
+                "os_fail_closed",
+                "warning",
+                observation_count,
+            )
+        )
+    audit = signals[3]
+    audit_alerts: dict[
+        SecurityBoundaryState,
+        tuple[SecurityAlertCode, SecurityAlertSeverity],
+    ] = {
+        "busy": ("audit_busy", "warning"),
+        "disabled": ("audit_disabled", "warning"),
+        "degraded": ("audit_degraded", "critical"),
+        "unavailable": ("audit_unavailable", "critical"),
+    }
+    if audit.state in audit_alerts:
+        code, severity = audit_alerts[audit.state]
+        candidates.append(
+            SecurityBoundaryAlert(
+                "audit",
+                code,
+                severity,
+                observation_count,
+            )
+        )
+    for change in changes:
+        if change.severity == "warning":
+            candidates.append(
+                SecurityBoundaryAlert(
+                    change.after.key,
+                    "boundary_downgrade",
+                    "warning",
+                    change.observation_index,
+                )
+            )
+    if observation_failures:
+        candidates.append(
+            SecurityBoundaryAlert(
+                "observer",
+                "observation_failed",
+                "critical",
+                observation_count,
+                observation_failures,
+            )
+        )
+
+    aggregated: dict[
+        tuple[SecurityAlertScope, SecurityAlertCode], SecurityBoundaryAlert
+    ] = {}
+    for alert in candidates:
+        key = (alert.scope, alert.code)
+        existing = aggregated.get(key)
+        if existing is None:
+            aggregated[key] = alert
+            continue
+        aggregated[key] = SecurityBoundaryAlert(
+            alert.scope,
+            alert.code,
+            (
+                "critical"
+                if "critical" in {existing.severity, alert.severity}
+                else "warning"
+            ),
+            max(existing.observation_index, alert.observation_index),
+            existing.occurrences + alert.occurrences,
+        )
+    return tuple(
+        sorted(
+            aggregated.values(),
+            key=lambda alert: (
+                {"information": 0, "warning": 1, "critical": 2}[alert.severity],
+                alert.observation_index,
+                alert.scope,
+                alert.code,
+            ),
+        )
+    )
+
+
 def observe_security_shield(
     tool_permissions: Mapping[str, bool],
     *,
     sandbox_backend: str,
     audit_enabled: bool,
     sandbox_probe: Callable[[], SandboxCapabilities] | None = None,
+    audit_probe: Callable[[], AuditLogStatus] | None = None,
 ) -> SecurityShield:
     """Capture optional OS availability, then run the deterministic projection."""
 
@@ -438,10 +914,35 @@ def observe_security_shield(
             capabilities = probe()
         except (OSError, RuntimeError, SandboxError, ValueError):
             probe_failed = True
+    audit_status: AuditBoundaryStatus = "disabled"
+    if audit_enabled:
+        audit_status = "recording"
+        if audit_probe is not None:
+            try:
+                audit_observation = audit_probe()
+            except (AuditError, OSError, RuntimeError, ValueError):
+                audit_status = "unavailable"
+            else:
+                if not isinstance(audit_observation, AuditLogStatus):
+                    audit_status = "unavailable"
+                elif not audit_observation.lock_available:
+                    audit_status = "busy"
+                elif any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in (
+                        audit_observation.current_records,
+                        audit_observation.backup_records,
+                        audit_observation.invalid_records,
+                    )
+                ):
+                    audit_status = "unavailable"
+                elif audit_observation.invalid_records:
+                    audit_status = "degraded"
     return project_security_shield(
         tool_permissions,
         sandbox_backend=sandbox_backend,
         audit_enabled=audit_enabled,
+        audit_status=audit_status,
         sandbox_capabilities=capabilities,
         sandbox_probe_failed=probe_failed,
     )
@@ -452,6 +953,7 @@ def project_security_shield(
     *,
     sandbox_backend: str,
     audit_enabled: bool,
+    audit_status: AuditBoundaryStatus | None = None,
     sandbox_capabilities: SandboxCapabilities | None = None,
     sandbox_probe_failed: bool = False,
 ) -> SecurityShield:
@@ -461,6 +963,15 @@ def project_security_shield(
         raise ValueError("unknown sandbox backend")
     if type(audit_enabled) is not bool or type(sandbox_probe_failed) is not bool:
         raise ValueError("security observation flags must be boolean")
+    resolved_audit_status: AuditBoundaryStatus = (
+        "recording" if audit_enabled else "disabled"
+    )
+    if audit_status is not None:
+        if audit_status not in _AUDIT_BOUNDARY_STATUSES:
+            raise ValueError("security audit observation status is invalid")
+        resolved_audit_status = audit_status
+    if audit_enabled == (resolved_audit_status == "disabled"):
+        raise ValueError("security audit configuration and status contradict")
     if any(
         not isinstance(name, str) or not name or not isinstance(requires_approval, bool)
         for name, requires_approval in tool_permissions.items()
@@ -570,6 +1081,7 @@ def project_security_shield(
         direct_tool_count=direct_count,
         approval_tool_count=approval_count,
         audit_enabled=audit_enabled,
+        audit_status=resolved_audit_status,
     )
 
 

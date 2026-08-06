@@ -38,6 +38,7 @@ from neil_agent.live_cockpit import (
     format_node_detail,
     format_node_label,
     format_security_boundaries,
+    format_security_boundary_watch,
     format_security_capabilities,
     format_security_title,
     run_live_cockpit,
@@ -48,6 +49,7 @@ from neil_agent.schemas import TokenUsage, ToolCall
 from neil_agent.security import (
     ApprovalFlowProjector,
     SecurityShield,
+    project_security_boundary_watch,
     project_security_shield,
 )
 
@@ -265,6 +267,28 @@ def _security_snapshot() -> SecurityShield:
     )
 
 
+def _changed_security_snapshot() -> SecurityShield:
+    return project_security_shield(
+        {
+            "list_directory": False,
+            "read_file": False,
+            "search_text": False,
+            "set_task_plan": False,
+            "update_task_step": False,
+            "git_status": False,
+            "git_diff": False,
+            "write_file": True,
+            "replace_text": True,
+            "run_quality_check": True,
+            "git_stage": True,
+            "git_commit": True,
+        },
+        sandbox_backend="windows-sandbox",
+        audit_enabled=False,
+        sandbox_probe_failed=True,
+    )
+
+
 class FakeLiveAgent:
     def __init__(self, bus: EventBus) -> None:
         self._emitter = RuntimeEventEmitter(bus)
@@ -397,27 +421,43 @@ def test_context_tomography_formatters_are_metadata_only() -> None:
 
 def test_security_formatters_show_four_states_and_distinct_layers() -> None:
     security = _security_snapshot()
+    watch = project_security_boundary_watch((security,))
 
-    title = format_security_title(security)
+    title = format_security_title(security, boundary_watch=watch)
     bands = format_security_capabilities(security)
     compact = format_security_capabilities(security, compact=True)
     short = format_security_capabilities(security, compact=True, short=True)
-    detail = format_security_boundaries(security)
+    compact_watch = format_security_boundary_watch(watch, compact=True)
+    detail = format_security_boundaries(security, watch)
 
     assert "DIRECT 3" in title.plain
     assert "APPROVAL 3" in title.plain
     assert "FORBIDDEN 1" in title.plain
     assert "UNAVAILABLE 1" in title.plain
+    assert "ALERT 1" in title.plain
     assert "WORKSPACE READ" in bands.plain
     assert "bounded paths" in bands.plain
     assert "bounded paths" not in compact.plain
     assert len(short.plain.splitlines()) == 7
     assert "FORBIDDEN HOST SHELL" in short.plain
     assert "UNAVAILABLE OS CMD" in short.plain
-    assert "APPLICATION POLICY" in detail.plain
-    assert "OS SANDBOX" in detail.plain
-    assert "APPLICATION ALLOWLIST ≠ OS ISOLATION" in detail.plain
-    assert "METADATA RECORDING" in detail.plain
+    assert "P APP" in compact_watch.plain
+    assert "N ABS" in compact_watch.plain
+    assert "C FIX" in compact_watch.plain
+    assert "A REC" in compact_watch.plain
+    assert "BOUNDARY WATCH" in detail.plain
+    assert "PATH" in detail.plain
+    assert "NETWORK" in detail.plain
+    assert "COMMAND" in detail.plain
+    assert "AUDIT" in detail.plain
+    assert "STABLE IN OBSERVATION WINDOW" in detail.plain
+    assert "BOUNDED ALERTS" in detail.plain
+    assert "APP ALLOWLIST ENFORCED" in detail.plain
+    assert (
+        "OS PROBE FAILED · FAIL CLOSED" in detail.plain or "OS DISABLED" in detail.plain
+    )
+    assert "APP ≠ OS" in detail.plain
+    assert "LAYER SPLIT" in detail.plain
 
 
 def test_approval_trace_formatters_link_dag_and_flag_changed_binding() -> None:
@@ -438,7 +478,7 @@ def test_approval_trace_formatters_link_dag_and_flag_changed_binding() -> None:
     assert "APPROVED · BINDING CHANGED" in formatted.plain
     assert "tool-eeeeeeee" in formatted.plain
     assert "PREVIEW BODY HIDDEN" in formatted.plain
-    assert "APPROVED / CHANGED" in compact.plain
+    assert "APPROVED/CHANGED" in compact.plain
     assert "APPROVED/CHANGED" in label.plain
     assert "APPROVAL TRACE" in detail.plain
     assert "BINDING CHANGED" in detail.plain
@@ -596,7 +636,7 @@ async def test_live_app_toggles_security_shield_without_disturbing_primary_view(
         assert (
             "WORKSPACE READ" in app.query_one("#security-capabilities").render().plain
         )
-        assert "APPLICATION POLICY" in app.query_one("#security-detail").render().plain
+        assert "BOUNDARY WATCH" in app.query_one("#security-detail").render().plain
         assert "NO APPROVAL REQUESTS" in app.query_one("#approval-flows").render().plain
         assert app.check_action("filter_tools", ()) is False
         assert app.check_action("context_what_if", ()) is False
@@ -616,7 +656,10 @@ async def test_live_app_toggles_security_shield_without_disturbing_primary_view(
         assert app.query_one("#security-panel").display
         assert not app.query_one("#security-detail-panel").display
         assert not app.query_one("#security-title").display
-        assert "APPROVAL NONE · OS DISABLED" in str(
+        assert "APP ENFORCED · APPROVAL NONE" in str(
+            app.query_one("#security-panel").border_title
+        )
+        assert "P APP · N ABS · C FIX · A REC · Δ0/W1" in str(
             app.query_one("#security-panel").border_subtitle
         )
         assert app.query_one("#transcript", Log).region.height >= 5
@@ -652,10 +695,95 @@ async def test_live_security_view_tracks_changed_approval_binding_responsively()
         await pilot.pause()
 
         assert not app.query_one("#approval-flows").display
-        assert "APPROVAL APPROVED/CHANGED · OS DISABLED" in str(
+        assert "APP ENFORCED · APPROVAL APPROVED/CHANGED" in str(
+            app.query_one("#security-panel").border_title
+        )
+        assert "P APP · N ABS · C FIX · A REC · Δ0/W1" in str(
             app.query_one("#security-panel").border_subtitle
         )
         assert app.query_one("#transcript", Log).region.height >= 5
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_security_view_reobserves_and_bounds_boundary_changes() -> None:
+    bus = EventBus()
+    observations = iter((_changed_security_snapshot(),))
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        security=_security_snapshot(),
+        security_observer=lambda: next(observations),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("f5")
+        await pilot.pause()
+
+        assert app.security_snapshot.audit_status == "disabled"
+        assert app.boundary_watch.observation_count == 2
+        assert app.boundary_watch.total_change_count == 3
+        assert app.boundary_watch.warning_count == 3
+        detail = app.query_one("#security-detail").render().plain
+        assert "RECENT CHANGES" in detail
+        assert "#2 AUDIT" in detail
+        assert "AUDIT  REC → OFF" in detail
+        assert "OS FAIL-CLOSED · APP GUARDS ACTIVE" in detail
+        assert "AUDIT RECORDING OFF" in detail
+
+        await pilot.resize_terminal(60, 40)
+        await pilot.pause()
+
+        compact = app.query_one("#security-watch").render().plain
+        assert app.query_one("#security-watch").display
+        assert "P APP" in compact
+        assert "N ABS" in compact
+        assert "C FIX" in compact
+        assert "A OFF" in compact
+        assert "Δ3" in compact
+
+        await pilot.resize_terminal(80, 28)
+        await pilot.pause()
+
+        assert not app.query_one("#security-watch").display
+        assert "P APP · N ABS · C FIX · A OFF · Δ3/W3" in str(
+            app.query_one("#security-panel").border_subtitle
+        )
+        assert app.query_one("#transcript", Log).region.height >= 5
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_security_observer_failure_keeps_last_safe_snapshot() -> None:
+    bus = EventBus()
+
+    def fail_observation() -> SecurityShield:
+        raise RuntimeError("PRIVATE-CANARY")
+
+    initial = _security_snapshot()
+    app = LiveCockpitApp(
+        FakeLiveAgent(bus),
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        security=initial,
+        security_observer=fail_observation,
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("f5")
+        await pilot.pause()
+
+        assert app.security_snapshot is initial
+        assert app.boundary_watch.observation_failures == 1
+        assert app.boundary_watch.alerts[-1].code == "observation_failed"
+        detail = app.query_one("#security-detail").render().plain
+        assert "LAST SAFE SNAPSHOT" in detail
+        assert "PRIVATE-CANARY" not in detail
 
     assert bus.close()
 

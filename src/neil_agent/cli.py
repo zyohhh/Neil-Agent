@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 import shlex
@@ -18,7 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .agent import Agent
-from .audit import JsonlAuditSink
+from .audit import AuditLogStatus, JsonlAuditSink
 from .cockpit import CockpitSnapshot, build_cockpit_panel
 from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
@@ -299,13 +300,15 @@ def run(console: Console) -> None:
         raise SystemExit(1) from None
     filesystem_tools.register(registry)
     lifecycle_hooks: LifecycleHooks | None = None
+    audit_sink: JsonlAuditSink | None = None
     if settings.audit_log_enabled:
         try:
             lifecycle_hooks = LifecycleHooks()
-            JsonlAuditSink(
+            audit_sink = JsonlAuditSink(
                 filesystem_tools.root,
                 max_bytes=settings.audit_log_max_bytes,
-            ).register(lifecycle_hooks)
+            )
+            audit_sink.register(lifecycle_hooks)
         except AuditError as error:
             console.print(f"[bold red]审计日志配置错误：[/bold red]{error}")
             raise SystemExit(1) from None
@@ -400,6 +403,7 @@ def run(console: Console) -> None:
                     task_tracker,
                     filesystem_tools.root,
                     registry,
+                    audit_sink,
                 )
                 if completed_turns is None:
                     _show_cockpit(
@@ -412,6 +416,7 @@ def run(console: Console) -> None:
                         instruction_manager.current,
                         current_session,
                         shell_tools,
+                        audit_sink=audit_sink,
                     )
                 elif completed_turns:
                     current_session = _save_current_session(
@@ -432,6 +437,7 @@ def run(console: Console) -> None:
                     instruction_manager.current,
                     current_session,
                     shell_tools,
+                    audit_sink=audit_sink,
                 )
             continue
         if command in PERMISSIONS_COMMANDS:
@@ -444,6 +450,7 @@ def run(console: Console) -> None:
                     filesystem_tools.root,
                     audit_log_enabled=settings.audit_log_enabled,
                     sandbox_backend=settings.sandbox_backend,
+                    audit_probe=audit_sink.inspect if audit_sink is not None else None,
                 )
             continue
         if command in CONTEXT_COMMANDS:
@@ -739,6 +746,8 @@ def _show_cockpit(
     instructions: ProjectInstructions,
     current_session: SessionHandle,
     shell_tools: ShellTools,
+    *,
+    audit_sink: JsonlAuditSink | None = None,
 ) -> None:
     """Render a read-only mission-control snapshot without calling the model."""
 
@@ -767,7 +776,11 @@ def _show_cockpit(
         last_usage=agent.last_usage,
         plan=task_tracker.steps,
         latest_quality_check=task_tracker.latest_quality_check,
-        security=_observe_security(settings, registry),
+        security=_observe_security(
+            settings,
+            registry,
+            audit_probe=audit_sink.inspect if audit_sink is not None else None,
+        ),
         instruction_status=instructions.status,
         instruction_sources=len(instructions.active_sources),
         instruction_bytes=instructions.size_bytes,
@@ -787,6 +800,7 @@ def _try_show_live_cockpit(
     task_tracker: TaskTracker,
     workspace: Path,
     registry: ToolRegistry | None = None,
+    audit_sink: JsonlAuditSink | None = None,
 ) -> int | None:
     """Run Textual only in a terminal and return ``None`` for Rich fallback."""
 
@@ -804,13 +818,25 @@ def _try_show_live_cockpit(
     previous_retry = llm.replace_retry_handler(None)
     previous_plan = task_tracker.replace_change_handler(None)
     agent.set_event_bus(event_bus)
+    active_registry = registry or ToolRegistry()
+    audit_probe = audit_sink.inspect if audit_sink is not None else None
     try:
+        initial_security = _observe_security(
+            settings,
+            active_registry,
+            audit_probe=audit_probe,
+        )
         return run_live_cockpit(
             agent,
             event_bus,
             model=settings.deepseek_model,
             workspace=str(workspace),
-            security=_observe_security(settings, registry or ToolRegistry()),
+            security=initial_security,
+            security_observer=lambda: _observe_security(
+                settings,
+                active_registry,
+                audit_probe=audit_probe,
+            ),
             approval_handler_owner=agent,
         )
     except Exception:  # noqa: BLE001 - optional UI degradation boundary.
@@ -854,6 +880,7 @@ def _show_permissions(
     *,
     audit_log_enabled: bool = False,
     sandbox_backend: str = "disabled",
+    audit_probe: Callable[[], AuditLogStatus] | None = None,
 ) -> None:
     """Explain enforceable local boundaries without exposing hidden prompts."""
 
@@ -864,6 +891,7 @@ def _show_permissions(
         },
         sandbox_backend=sandbox_backend,
         audit_enabled=audit_log_enabled,
+        audit_probe=audit_probe,
     )
 
     direct = [
@@ -885,7 +913,7 @@ def _show_permissions(
         "  文件恢复：/rewind-task 恢复本进程内最近一次 Agent 任务的文件编辑\n"
         "  命令：仅固定质量检查和受限 Git 操作，不提供任意 shell\n"
         "  网络：只有模型 API 客户端可用；本地工具不提供网络访问\n"
-        f"  生命周期审计：{'已启用元数据 JSONL' if audit_log_enabled else '未启用'}\n"
+        f"  生命周期审计：{security.audit_status.upper()}\n"
         f"  应用层策略：{security.application.headline}\n"
         f"  OS 沙箱：{security.os_sandbox.headline}\n"
         "  分层说明：应用工具白名单不等于 OS 隔离，两者独立显示",
@@ -895,7 +923,12 @@ def _show_permissions(
     )
 
 
-def _observe_security(settings: Settings, registry: ToolRegistry) -> SecurityShield:
+def _observe_security(
+    settings: Settings,
+    registry: ToolRegistry,
+    *,
+    audit_probe: Callable[[], AuditLogStatus] | None = None,
+) -> SecurityShield:
     """Capture a metadata-only security snapshot for one explicit UI request."""
 
     return observe_security_shield(
@@ -905,6 +938,7 @@ def _observe_security(settings: Settings, registry: ToolRegistry) -> SecurityShi
         },
         sandbox_backend=settings.sandbox_backend,
         audit_enabled=settings.audit_log_enabled,
+        audit_probe=audit_probe,
     )
 
 

@@ -41,12 +41,16 @@ from .projections import (
 )
 from .schemas import TokenUsage, ToolCall
 from .security import (
+    MAX_SECURITY_BOUNDARY_ALERTS,
     ApprovalFlow,
     ApprovalFlowProjector,
     ApprovalTrace,
     CapabilityState,
-    SecurityBoundary,
+    SecurityBoundaryAlert,
+    SecurityBoundarySignal,
+    SecurityBoundaryWatch,
     SecurityShield,
+    project_security_boundary_watch,
     project_security_shield,
 )
 
@@ -55,6 +59,7 @@ MAX_BRIDGE_EVENTS = 1_024
 MAX_LIVE_OUTPUT_LINES = 500
 MAX_LIVE_ERROR_CHARS = 500
 MAX_APPROVAL_PREVIEW_CHARS = 20_000
+MAX_SECURITY_OBSERVATIONS = 64
 NARROW_TERMINAL_WIDTH = 88
 SHORT_TERMINAL_HEIGHT = 36
 
@@ -152,6 +157,12 @@ _PREVIEW_BINDING_LABELS = {
     "changed": "BINDING CHANGED",
     "unavailable": "BINDING UNAVAILABLE",
     "not_checked": "NOT CHECKED",
+}
+_SECURITY_BOUNDARY_LABELS = {
+    "path": "PATH",
+    "network": "NETWORK",
+    "command": "COMMAND",
+    "audit": "AUDIT",
 }
 
 
@@ -671,6 +682,13 @@ class LiveCockpitApp(App[None]):
         color: #c6d4df;
     }
 
+    #security-watch {
+        display: none;
+        height: auto;
+        padding: 0 2;
+        color: #c6d4df;
+    }
+
     #approval-flows,
     #security-detail {
         height: 1fr;
@@ -735,7 +753,11 @@ class LiveCockpitApp(App[None]):
 
     LiveCockpitApp.narrow #approval-flows {
         height: auto;
-        padding: 1 2;
+        padding: 0 2 1 2;
+    }
+
+    LiveCockpitApp.narrow #security-watch {
+        display: block;
     }
 
     LiveCockpitApp.narrow #brand {
@@ -812,6 +834,10 @@ class LiveCockpitApp(App[None]):
         display: none;
     }
 
+    LiveCockpitApp.short #security-watch {
+        display: none;
+    }
+
     LiveCockpitApp.short #context-insights {
         display: none;
     }
@@ -835,11 +861,14 @@ class LiveCockpitApp(App[None]):
         model: str,
         workspace: str,
         security: SecurityShield | None = None,
+        security_observer: Callable[[], SecurityShield] | None = None,
         initial_events: Iterable[RuntimeEvent] = (),
         max_events: int = MAX_LIVE_EVENTS,
     ) -> None:
         if max_events < 1:
             raise ValueError("live cockpit event capacity must be at least 1")
+        if security_observer is not None and not callable(security_observer):
+            raise ValueError("live cockpit security observer must be callable")
         super().__init__()
         self._agent = agent
         self._event_bus = event_bus
@@ -849,6 +878,12 @@ class LiveCockpitApp(App[None]):
             {},
             sandbox_backend="disabled",
             audit_enabled=False,
+        )
+        self._security_observer = security_observer
+        self._security_observations = [self._security]
+        self._security_observation_failures = 0
+        self._boundary_watch = project_security_boundary_watch(
+            self._security_observations
         )
         materialized_events = tuple(initial_events)
         self._events = list(materialized_events[-max_events:])
@@ -920,6 +955,10 @@ class LiveCockpitApp(App[None]):
         return self._approval_flow
 
     @property
+    def boundary_watch(self) -> SecurityBoundaryWatch:
+        return self._boundary_watch
+
+    @property
     def _cockpit_screen(self) -> Screen[Any]:
         return self.screen_stack[0]
 
@@ -960,6 +999,7 @@ class LiveCockpitApp(App[None]):
                         classes="panel-title",
                     )
                     yield Static(id="security-capabilities")
+                    yield Static(id="security-watch")
                     yield Static(id="approval-flows")
                 with Vertical(id="security-detail-panel"):
                     yield Static("ENFORCEMENT LAYERS", classes="panel-title")
@@ -1289,10 +1329,34 @@ class LiveCockpitApp(App[None]):
         if monitor_view == "context":
             self._refresh_context_view()
         elif monitor_view == "security":
+            self._observe_security_boundaries()
             self._refresh_security_view()
         self._refresh_stream_title()
         self.refresh_bindings()
         self._cockpit_screen.query_one("#prompt", Input).focus()
+
+    def _observe_security_boundaries(self) -> None:
+        if self._security_observer is None:
+            return
+        try:
+            observation = self._security_observer()
+            if not isinstance(observation, SecurityShield):
+                raise ValueError("security observer returned an invalid snapshot")
+        except Exception:  # noqa: BLE001 - optional observation degradation boundary.
+            self._security_observation_failures += 1
+            self.notify(
+                "安全边界观察失败；已保留上一份安全快照",
+                severity="error",
+            )
+        else:
+            self._security = observation
+            self._security_observations.append(observation)
+            if len(self._security_observations) > MAX_SECURITY_OBSERVATIONS:
+                del self._security_observations[0]
+        self._boundary_watch = project_security_boundary_watch(
+            self._security_observations,
+            observation_failures=self._security_observation_failures,
+        )
 
     def _sync_responsive_classes(self, width: int, height: int) -> None:
         self.set_class(width < NARROW_TERMINAL_WIDTH, "narrow")
@@ -1374,27 +1438,41 @@ class LiveCockpitApp(App[None]):
         compact = self.has_class("narrow") or self.has_class("short")
         panel = self._cockpit_screen.query_one("#security-panel", Vertical)
         os_boundary = self._security.os_sandbox
+        has_critical_alert = any(
+            alert.severity == "critical" for alert in self._boundary_watch.alerts
+        )
+        has_warning_alert = any(
+            alert.severity == "warning" for alert in self._boundary_watch.alerts
+        )
         panel.styles.border = (
             "round",
-            "#277c6f"
+            "#d72d5b"
+            if has_critical_alert
+            else "#7d5b24"
+            if has_warning_alert
+            else "#277c6f"
             if os_boundary.status == "ready"
             else "#d72d5b"
             if os_boundary.status in {"incomplete", "unavailable"}
             else "#7d5b24",
         )
         panel.border_title = (
-            f" APP POLICY · {self._security.application.status.upper()} "
+            f" APP {self._security.application.status.upper()} · "
+            f"{_compact_approval_signal(self._approval_flow)} "
             if self.has_class("short")
             else None
         )
         panel.border_subtitle = (
-            f" {_compact_approval_signal(self._approval_flow)} · "
-            f"OS {os_boundary.status.upper()} "
+            f" {_compact_boundary_signal(self._boundary_watch)} "
             if self.has_class("short")
             else None
         )
         self._cockpit_screen.query_one("#security-title", Static).update(
-            format_security_title(self._security, compact=compact)
+            format_security_title(
+                self._security,
+                compact=compact,
+                boundary_watch=self._boundary_watch,
+            )
         )
         self._cockpit_screen.query_one("#security-capabilities", Static).update(
             format_security_capabilities(
@@ -1403,14 +1481,18 @@ class LiveCockpitApp(App[None]):
                 short=self.has_class("short"),
             )
         )
+        self._cockpit_screen.query_one("#security-watch", Static).update(
+            format_security_boundary_watch(self._boundary_watch, compact=True)
+        )
         self._cockpit_screen.query_one("#approval-flows", Static).update(
             format_approval_flows(
                 self._approval_flow,
                 compact=compact,
+                limit=1 if compact else 4,
             )
         )
         self._cockpit_screen.query_one("#security-detail", Static).update(
-            format_security_boundaries(self._security)
+            format_security_boundaries(self._security, self._boundary_watch)
         )
 
     def _refresh_projection(self) -> None:
@@ -1558,6 +1640,7 @@ def run_live_cockpit(
     model: str,
     workspace: str,
     security: SecurityShield | None = None,
+    security_observer: Callable[[], SecurityShield] | None = None,
     approval_handler_owner: object | None = None,
 ) -> int:
     """Run the app and return the number of successful turns it completed."""
@@ -1568,6 +1651,7 @@ def run_live_cockpit(
         model=model,
         workspace=workspace,
         security=security,
+        security_observer=security_observer,
     )
     previous_handler: object | None = None
     replace_handler = getattr(
@@ -1590,6 +1674,7 @@ def format_security_title(
     security: SecurityShield,
     *,
     compact: bool = False,
+    boundary_watch: SecurityBoundaryWatch | None = None,
 ) -> Text:
     """Render the shared four-state legend without relying on color alone."""
 
@@ -1600,6 +1685,12 @@ def format_security_title(
         output.append(
             f"{_SECURITY_STATE_LABELS[state]} {security.capability_count(state)}",
             style=_SECURITY_STATE_STYLES[state],
+        )
+    if boundary_watch is not None:
+        output.append("  ·  ", style="dim")
+        output.append(
+            f"ALERT {boundary_watch.warning_count}",
+            style=("bold #ff4f7d" if boundary_watch.warning_count else "#9ee37d"),
         )
     return output
 
@@ -1653,6 +1744,28 @@ def format_approval_flows(
 ) -> Text:
     """Render recent approval decisions and preview bindings without previews."""
 
+    if compact:
+        output = Text("APPROVAL", style="bold #ffd08a")
+        if not flow.traces:
+            output.append("  ·  NONE", style="dim")
+            return output
+        visible = tuple(reversed(flow.traces[-max(limit, 1) :]))
+        for index, trace in enumerate(visible):
+            style = _approval_trace_style(trace)
+            output.append("  ·  " if index == 0 else "\n", style="dim")
+            output.append(f"{_approval_trace_marker(trace)} ", style=style)
+            output.append(_safe_inline(trace.tool_name), style="bold #f4f7fb")
+            decision = _APPROVAL_DECISION_LABELS[trace.decision]
+            binding = _PREVIEW_BINDING_LABELS[trace.preview_binding]
+            output.append(
+                f"  {decision}/{binding.removeprefix('BINDING ')}",
+                style=style,
+            )
+        omitted = len(flow.traces) - len(visible)
+        if omitted:
+            output.append(f"\n… {omitted} EARLIER", style="dim")
+        return output
+
     output = Text("APPROVAL FLOW", style="bold #ffd08a")
     output.append(f"  ·  {len(flow.traces)}", style="dim")
     output.append("  ·  DAG LINKED", style="#9bcdf5")
@@ -1665,16 +1778,11 @@ def format_approval_flows(
     visible = tuple(reversed(flow.traces[-max(limit, 1) :]))
     for trace in visible:
         style = _approval_trace_style(trace)
-        output.append(f"\n{_approval_trace_marker(trace)} ", style=style)
+        output.append("\n")
+        output.append(f"{_approval_trace_marker(trace)} ", style=style)
         output.append(_safe_inline(trace.tool_name), style="bold #f4f7fb")
         decision = _APPROVAL_DECISION_LABELS[trace.decision]
         binding = _PREVIEW_BINDING_LABELS[trace.preview_binding]
-        if compact:
-            output.append(
-                f"  {decision} / {binding.removeprefix('BINDING ')}",
-                style=style,
-            )
-            continue
         output.append(f"  {decision} · {binding}", style=style)
         if trace.tool_correlation_id is None:
             output.append("  → UNRESOLVED TOOL", style="bold red")
@@ -1688,26 +1796,118 @@ def format_approval_flows(
     return output
 
 
-def format_security_boundaries(security: SecurityShield) -> Text:
-    """Explain the application/OS split and prevent false sandbox claims."""
+def format_security_boundary_watch(
+    watch: SecurityBoundaryWatch,
+    *,
+    compact: bool = False,
+    change_limit: int = 3,
+    alert_limit: int = 4,
+) -> Text:
+    """Render four fixed boundaries, recent changes, and bounded coded alerts."""
 
-    output = Text()
-    _append_security_boundary(output, "APPLICATION POLICY", security.application)
+    if compact:
+        output = Text("BOUNDARY", style="bold #ffd08a")
+        for signal in watch.signals:
+            output.append(" · ", style="dim")
+            output.append(
+                _compact_boundary_token(signal), style=_boundary_style(signal)
+            )
+        output.append(
+            f" · Δ{watch.total_change_count}/W{watch.warning_count}",
+            style="bold #ff4f7d" if watch.warning_count else "#9ee37d",
+        )
+        return output
+
+    output = Text("BOUNDARY WATCH", style="bold #ffd08a")
+    output.append(f"  ·  {watch.observation_count} OBS", style="dim")
+    output.append(f"  ·  Δ{watch.total_change_count}", style="#9bcdf5")
+    output.append(
+        f"  ·  ALERT {watch.warning_count}",
+        style="bold #ff4f7d" if watch.warning_count else "#9ee37d",
+    )
+    for row in (watch.signals[:2], watch.signals[2:]):
+        output.append("\n")
+        for index, signal in enumerate(row):
+            if index:
+                output.append("  ·  ", style="dim")
+            output.append(_boundary_marker(signal), style=_boundary_style(signal))
+            output.append(
+                f" {_SECURITY_BOUNDARY_LABELS[signal.key]} "
+                f"{_boundary_change_token(signal)}",
+                style=_boundary_style(signal),
+            )
+
+    output.append("\nRECENT CHANGES", style="bold #9bcdf5")
+    if not watch.changes:
+        output.append("\n○ STABLE IN OBSERVATION WINDOW", style="dim")
+    else:
+        visible_changes = watch.changes[-max(change_limit, 1) :]
+        for change in reversed(visible_changes):
+            output.append("\n")
+            output.append(
+                "▲ " if change.severity == "warning" else "◆ ",
+                style=("bold #ffb454" if change.severity == "warning" else "#9bcdf5"),
+            )
+            output.append(
+                f"#{change.observation_index} "
+                f"{_SECURITY_BOUNDARY_LABELS[change.after.key]}  "
+                f"{_boundary_change_token(change.before)} → "
+                f"{_boundary_change_token(change.after)}",
+                style=("#ffb454" if change.severity == "warning" else "#9bcdf5"),
+            )
+        omitted_changes = len(watch.changes) - len(visible_changes)
+        if omitted_changes or watch.dropped_change_count:
+            output.append(
+                f"\n… {omitted_changes + watch.dropped_change_count} EARLIER CHANGES",
+                style="dim",
+            )
+
+    output.append(
+        f"\nBOUNDED ALERTS  ·  {len(watch.alerts)}/{MAX_SECURITY_BOUNDARY_ALERTS}",
+        style="bold #ff9fba",
+    )
+    if not watch.alerts:
+        output.append("\n● NO ACTIVE BOUNDARY ALERTS", style="#9ee37d")
+    else:
+        visible_alerts = watch.alerts[-max(alert_limit, 1) :]
+        for alert in reversed(visible_alerts):
+            output.append("\n")
+            output.append(
+                "■ " if alert.severity == "critical" else "▲ ",
+                style=_boundary_alert_style(alert),
+            )
+            output.append(
+                _boundary_alert_label(alert),
+                style=_boundary_alert_style(alert),
+            )
+        omitted_alerts = len(watch.alerts) - len(visible_alerts)
+        if omitted_alerts or watch.dropped_alert_count:
+            output.append(
+                f"\n… {omitted_alerts + watch.dropped_alert_count} EARLIER ALERTS",
+                style="dim",
+            )
+    return output
+
+
+def format_security_boundaries(
+    security: SecurityShield,
+    boundary_watch: SecurityBoundaryWatch | None = None,
+) -> Text:
+    """Show boundary changes before concise application/OS layer truth."""
+
+    watch = boundary_watch or project_security_boundary_watch((security,))
+    output = Text("LAYER SPLIT  ·  APP ", style="bold #ff9fba")
+    output.append(security.application.headline, style="bold #9ee37d")
+    output.append("  ·  OS ", style="dim")
+    output.append(
+        security.os_sandbox.headline,
+        style=(
+            "bold #9ee37d" if security.os_sandbox.status == "ready" else "bold #ffb454"
+        ),
+    )
+    output.append("  ·  APP ≠ OS", style="bold #ffb454")
     output.append("\n")
-    _append_security_boundary(output, "OS SANDBOX", security.os_sandbox)
-    output.append("\nAUDIT SIGNAL\n", style="bold #ff9fba")
-    output.append(
-        "● METADATA RECORDING" if security.audit_enabled else "○ DISABLED",
-        style="green" if security.audit_enabled else "dim",
-    )
-    output.append(
-        "\nAPPLICATION ALLOWLIST ≠ OS ISOLATION",
-        style="bold #ffb454",
-    )
-    output.append(
-        "\nNo prompt, arguments, previews, results, paths, or secret values shown.",
-        style="dim",
-    )
+    output.append_text(format_security_boundary_watch(watch))
     return output
 
 
@@ -1718,6 +1918,110 @@ def _compact_approval_signal(flow: ApprovalFlow) -> str:
     decision = _APPROVAL_DECISION_LABELS[trace.decision]
     binding = _PREVIEW_BINDING_LABELS[trace.preview_binding].removeprefix("BINDING ")
     return f"APPROVAL {decision}/{binding}"
+
+
+def _compact_boundary_signal(watch: SecurityBoundaryWatch) -> str:
+    signals = " · ".join(_compact_boundary_token(item) for item in watch.signals)
+    return f"{signals} · Δ{watch.total_change_count}/W{watch.warning_count}"
+
+
+def _compact_boundary_token(signal: SecurityBoundarySignal) -> str:
+    return {
+        "path": {
+            "enforced": "P OS",
+            "application_only": "P APP",
+            "absent": "P NONE",
+        },
+        "network": {
+            "enforced": "N DENY",
+            "absent": "N ABS",
+        },
+        "command": {
+            "restricted": "C FIX",
+            "absent": "C NONE",
+        },
+        "audit": {
+            "recording": "A REC",
+            "busy": "A BUSY",
+            "disabled": "A OFF",
+            "degraded": "A BAD",
+            "unavailable": "A N/A",
+        },
+    }[signal.key][signal.state]
+
+
+def _boundary_change_token(signal: SecurityBoundarySignal) -> str:
+    state = {
+        "path": {
+            "enforced": "OS",
+            "application_only": "APP",
+            "absent": "NONE",
+        },
+        "network": {"enforced": "DENY", "absent": "ABS"},
+        "command": {"restricted": "FIX", "absent": "NONE"},
+        "audit": {
+            "recording": "REC",
+            "busy": "BUSY",
+            "disabled": "OFF",
+            "degraded": "BAD",
+            "unavailable": "N/A",
+        },
+    }[signal.key][signal.state]
+    if signal.key not in {"path", "network"}:
+        return state
+    qualifier = {
+        "os_ready": "READY",
+        "os_disabled": "OFF",
+        "os_fail_closed": "FAIL",
+        "application": "APP",
+    }[signal.qualifier]
+    return f"{state}/{qualifier}"
+
+
+def _boundary_style(signal: SecurityBoundarySignal) -> str:
+    if signal.state in {"degraded", "unavailable"}:
+        return "bold #ff4f7d"
+    if signal.state in {"busy", "disabled"} or signal.qualifier == "os_fail_closed":
+        return "bold #ffb454"
+    if signal.state == "application_only":
+        return "bold #ffd08a"
+    if signal.state in {"enforced", "recording", "absent"}:
+        return "bold #9ee37d"
+    return "bold #9bcdf5"
+
+
+def _boundary_marker(signal: SecurityBoundarySignal) -> str:
+    if signal.state in {"degraded", "unavailable"}:
+        return "■"
+    if signal.state in {"busy", "disabled"} or signal.qualifier == "os_fail_closed":
+        return "▲"
+    if signal.state == "application_only":
+        return "◆"
+    return "●"
+
+
+def _boundary_alert_style(alert: SecurityBoundaryAlert) -> str:
+    return {
+        "information": "#9bcdf5",
+        "warning": "bold #ffb454",
+        "critical": "bold #ff4f7d",
+    }[alert.severity]
+
+
+def _boundary_alert_label(alert: SecurityBoundaryAlert) -> str:
+    label = {
+        "os_disabled": "OS LAYER OFF · APP GUARDS ACTIVE",
+        "os_fail_closed": "OS FAIL-CLOSED · APP GUARDS ACTIVE",
+        "audit_busy": "AUDIT CHECK BUSY · RETRY NEXT VIEW",
+        "audit_disabled": "AUDIT RECORDING OFF",
+        "audit_degraded": "AUDIT INVALID RECORDS",
+        "audit_unavailable": "AUDIT CHECK UNAVAILABLE",
+        "observation_failed": "OBSERVER FAILED · LAST SAFE SNAPSHOT",
+        "boundary_downgrade": f"{alert.scope.upper()} POSTURE DOWNGRADE",
+    }[alert.code]
+    if alert.occurrences > 1:
+        return f"{label}  ×{alert.occurrences}"
+    return label
 
 
 def _approval_trace_style(trace: ApprovalTrace) -> str:
@@ -1742,24 +2046,6 @@ def _approval_trace_marker(trace: ApprovalTrace) -> str:
         "unavailable": "▲",
         "error": "▲",
     }[trace.decision]
-
-
-def _append_security_boundary(
-    output: Text,
-    title: str,
-    boundary: SecurityBoundary,
-) -> None:
-    status_style = (
-        "bold #9ee37d"
-        if boundary.status in {"enforced", "ready"}
-        else "bold #ff4f7d"
-        if boundary.status in {"incomplete", "unavailable"}
-        else "dim"
-    )
-    output.append(title, style="bold #ff9fba")
-    output.append(f"\n{boundary.headline}", style=status_style)
-    for detail in boundary.details:
-        output.append(f"\n  {detail}", style="dim")
 
 
 def visible_node_ids(

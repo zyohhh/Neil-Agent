@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import pytest
 
+from neil_agent.audit import AuditLogStatus
+from neil_agent.errors import AuditError
 from neil_agent.events import RuntimeEvent, RuntimeEventFactory
 from neil_agent.projections import ExecutionGraphProjector
 from neil_agent.sandbox import SandboxCapabilities
 from neil_agent.security import (
     APPROVAL_FLOW_SCHEMA_VERSION,
+    MAX_SECURITY_BOUNDARY_ALERTS,
+    MAX_SECURITY_BOUNDARY_CHANGES,
+    SECURITY_BOUNDARY_WATCH_SCHEMA_VERSION,
     SECURITY_SHIELD_SCHEMA_VERSION,
     ApprovalFlowProjector,
     SecurityCapability,
     observe_security_shield,
+    project_security_boundary_watch,
     project_security_shield,
 )
 
@@ -117,7 +124,100 @@ def test_projection_builds_four_bands_and_keeps_enforcement_layers_distinct() ->
     assert shield.application.status == "enforced"
     assert shield.os_sandbox.layer == "os"
     assert shield.os_sandbox.status == "disabled"
+    assert shield.audit_status == "recording"
     assert "not a sandbox" in " ".join(shield.os_sandbox.details)
+
+
+def test_boundary_watch_projects_four_fixed_value_free_signals() -> None:
+    security = project_security_shield(
+        _tool_permissions(),
+        sandbox_backend="disabled",
+        audit_enabled=True,
+    )
+
+    watch = project_security_boundary_watch((security,))
+
+    assert watch.schema_version == SECURITY_BOUNDARY_WATCH_SCHEMA_VERSION
+    assert watch.observation_count == 1
+    assert watch.total_change_count == 0
+    assert tuple(signal.key for signal in watch.signals) == (
+        "path",
+        "network",
+        "command",
+        "audit",
+    )
+    assert watch.signal("path").state == "application_only"
+    assert watch.signal("path").qualifier == "os_disabled"
+    assert watch.signal("network").state == "absent"
+    assert watch.signal("command").state == "restricted"
+    assert watch.signal("audit").state == "recording"
+    assert [(alert.scope, alert.code) for alert in watch.alerts] == [
+        ("path", "os_disabled")
+    ]
+
+
+def test_boundary_watch_tracks_adjacent_changes_and_downgrades() -> None:
+    initial = project_security_shield(
+        _tool_permissions(),
+        sandbox_backend="disabled",
+        audit_enabled=True,
+    )
+    changed = project_security_shield(
+        _tool_permissions(),
+        sandbox_backend="windows-sandbox",
+        audit_enabled=False,
+        sandbox_probe_failed=True,
+    )
+
+    watch = project_security_boundary_watch((initial, changed))
+
+    assert watch.observation_count == 2
+    assert watch.total_change_count == 3
+    assert [change.after.key for change in watch.changes] == [
+        "path",
+        "network",
+        "audit",
+    ]
+    assert watch.changes[-1].severity == "warning"
+    assert watch.signal("path").qualifier == "os_fail_closed"
+    assert watch.signal("audit").state == "disabled"
+    assert {alert.code for alert in watch.alerts} == {
+        "os_fail_closed",
+        "audit_disabled",
+        "boundary_downgrade",
+    }
+
+
+def test_boundary_watch_bounds_change_history_and_aggregated_alerts() -> None:
+    enabled = project_security_shield(
+        _tool_permissions(),
+        sandbox_backend="disabled",
+        audit_enabled=True,
+    )
+    disabled = project_security_shield(
+        _tool_permissions(),
+        sandbox_backend="disabled",
+        audit_enabled=False,
+    )
+
+    watch = project_security_boundary_watch(
+        (enabled, disabled, enabled, disabled, enabled),
+        max_changes=2,
+        max_alerts=1,
+        observation_failures=3,
+    )
+
+    assert watch.observation_count == 5
+    assert watch.total_change_count == 4
+    assert len(watch.changes) == 2
+    assert watch.dropped_change_count == 2
+    assert len(watch.alerts) == 1
+    assert watch.dropped_alert_count >= 1
+    assert watch.alerts[0].code == "observation_failed"
+    assert watch.alerts[0].occurrences == 3
+    assert "PRIVATE-CANARY" not in repr(watch)
+    assert MAX_SECURITY_BOUNDARY_CHANGES == 16
+    assert MAX_SECURITY_BOUNDARY_ALERTS == 8
 
 
 def test_approval_flow_joins_decision_and_final_binding_to_parent_tool() -> None:
@@ -219,6 +319,86 @@ def test_observation_reports_unavailable_and_probe_failure_without_fallback() ->
     assert "PRIVATE-CANARY" not in repr(failed)
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (
+            AuditLogStatus(
+                path=Path("audit.jsonl"),
+                current_size_bytes=10,
+                backup_size_bytes=0,
+                max_bytes=1_000_000,
+                current_records=None,
+                backup_records=None,
+                invalid_records=None,
+                lock_available=False,
+            ),
+            "busy",
+        ),
+        (
+            AuditLogStatus(
+                path=Path("audit.jsonl"),
+                current_size_bytes=10,
+                backup_size_bytes=0,
+                max_bytes=1_000_000,
+                current_records=1,
+                backup_records=0,
+                invalid_records=1,
+                lock_available=True,
+            ),
+            "degraded",
+        ),
+        (
+            AuditLogStatus(
+                path=Path("audit.jsonl"),
+                current_size_bytes=10,
+                backup_size_bytes=0,
+                max_bytes=1_000_000,
+                current_records=None,
+                backup_records=0,
+                invalid_records=0,
+                lock_available=True,
+            ),
+            "unavailable",
+        ),
+    ],
+)
+def test_observation_derives_audit_health_without_retaining_paths(
+    status: AuditLogStatus,
+    expected: str,
+) -> None:
+    shield = observe_security_shield(
+        _tool_permissions(),
+        sandbox_backend="disabled",
+        audit_enabled=True,
+        audit_probe=lambda: status,
+    )
+
+    assert shield.audit_status == expected
+    assert "audit.jsonl" not in repr(shield)
+
+
+def test_observation_marks_audit_probe_failure_and_skips_disabled_probe() -> None:
+    calls: list[str] = []
+    unavailable = observe_security_shield(
+        _tool_permissions(),
+        sandbox_backend="disabled",
+        audit_enabled=True,
+        audit_probe=lambda: (_ for _ in ()).throw(AuditError("PRIVATE-CANARY")),
+    )
+    disabled = observe_security_shield(
+        _tool_permissions(),
+        sandbox_backend="disabled",
+        audit_enabled=False,
+        audit_probe=lambda: calls.append("called"),  # type: ignore[arg-type]
+    )
+
+    assert unavailable.audit_status == "unavailable"
+    assert "PRIVATE-CANARY" not in repr(unavailable)
+    assert disabled.audit_status == "disabled"
+    assert calls == []
+
+
 def test_projection_rejects_capabilities_from_another_sandbox_backend() -> None:
     mismatched = SandboxCapabilities(
         backend="other-backend",
@@ -274,3 +454,12 @@ def test_security_models_reject_invalid_or_contradictory_metadata() -> None:
             sandbox_backend="disabled",
             audit_enabled=False,
         )
+    with pytest.raises(ValueError, match="audit configuration"):
+        project_security_shield(
+            {},
+            sandbox_backend="disabled",
+            audit_enabled=False,
+            audit_status="recording",
+        )
+    with pytest.raises(ValueError, match="requires an observation"):
+        project_security_boundary_watch(())

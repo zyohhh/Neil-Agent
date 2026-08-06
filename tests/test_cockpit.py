@@ -103,6 +103,10 @@ def test_cockpit_renders_useful_runtime_metadata(tmp_path: Path) -> None:
     assert "DIRECT 7 · APPROVAL 5" in output
     assert "SEPARATE FROM APP POLICY" in output
     assert "RECORDING METADATA" in output
+    assert "PATH APP" in output
+    assert "NETWORK ABSENT" in output
+    assert "COMMAND FIXED" in output
+    assert "STABLE · 1 OBS · ALERT 1" in output
     assert "3 IN-MEMORY" in output
     assert "4 CHANGES" in output
 
