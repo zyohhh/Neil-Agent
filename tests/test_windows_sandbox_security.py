@@ -491,6 +491,73 @@ def test_real_wsb_blocks_host_files_network_and_workspace_writeback(
     assert not (artifacts.source / "sandbox-must-not-write.txt").exists()
 
 
+def test_real_wsb_restricts_low_integrity_child_and_protects_runner_result(
+    tmp_path: Path,
+    wsb_cli: Path,
+    guest_runner: GuestRunnerBuild,
+    security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
+) -> None:
+    result = _execute_probe(
+        tmp_path,
+        wsb_cli=wsb_cli,
+        guest_runner=guest_runner,
+        security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
+        mode="token-boundary",
+    ).result
+
+    assert result.status == "exited"
+    assert result.exit_code == 0
+    assert result.stdout.strip() == b"token-boundary-ok"
+    assert result.job_terminated is True
+
+
+def test_real_wsb_blocks_scm_task_scheduler_and_wmi_broker_escape(
+    tmp_path: Path,
+    wsb_cli: Path,
+    guest_runner: GuestRunnerBuild,
+    security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
+) -> None:
+    result = _execute_probe(
+        tmp_path,
+        wsb_cli=wsb_cli,
+        guest_runner=guest_runner,
+        security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
+        mode="broker-escape",
+        timeout_ms=45_000,
+    ).result
+
+    assert result.status == "exited"
+    assert result.exit_code == 0
+    assert result.stdout.strip() == b"broker-escape-blocked"
+    assert result.job_terminated is True
+
+
+def test_real_wsb_job_denies_breakaway_process_creation(
+    tmp_path: Path,
+    wsb_cli: Path,
+    guest_runner: GuestRunnerBuild,
+    security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
+) -> None:
+    result = _execute_probe(
+        tmp_path,
+        wsb_cli=wsb_cli,
+        guest_runner=guest_runner,
+        security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
+        mode="breakaway",
+    ).result
+
+    assert result.status == "exited"
+    assert result.exit_code == 0
+    assert result.stdout.strip() == b"breakaway-blocked"
+    assert result.job_terminated is True
+
+
 def test_real_wsb_kills_child_and_grandchild_on_timeout(
     tmp_path: Path,
     wsb_cli: Path,
@@ -630,6 +697,35 @@ def test_real_wsb_enforces_process_memory_limit(
     if result.status == "exited":
         assert result.exit_code == 0
         assert b"memory-limit-observed" in result.stdout
+    else:
+        assert result.status == "resource_limit"
+        assert result.error_code == "resource_limit"
+
+
+def test_real_wsb_enforces_aggregate_job_memory_limit(
+    tmp_path: Path,
+    wsb_cli: Path,
+    guest_runner: GuestRunnerBuild,
+    security_probe: Path,
+    evidence_raw_observer: WsbRawObserver | None,
+) -> None:
+    result = _execute_probe(
+        tmp_path,
+        wsb_cli=wsb_cli,
+        guest_runner=guest_runner,
+        security_probe=security_probe,
+        raw_observer=evidence_raw_observer,
+        mode="job-memory",
+        timeout_ms=25_000,
+        active_process_limit=4,
+        process_memory_bytes=96 * 1024 * 1024,
+        job_memory_bytes=120 * 1024 * 1024,
+    ).result
+
+    assert result.job_terminated is True
+    if result.status == "exited":
+        assert result.exit_code == 0
+        assert b"job-memory-limit-observed=" in result.stdout
     else:
         assert result.status == "resource_limit"
         assert result.error_code == "resource_limit"

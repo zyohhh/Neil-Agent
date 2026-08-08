@@ -1165,22 +1165,68 @@ CLI 展示修改预览并等待用户输入 y/yes
 - Ruff lint 与全仓库 70 个文件格式检查通过，mypy 对 36 个源文件检查通过；相关 64 项测试通过，全量 pytest 为 555 项通过、15 项平台条件跳过，5 个内置离线评测全部通过。全部验证未调用真实 DeepSeek API。
 - Phase 2B 三批全部完成并正式收口；下一可视化阶段为 Phase 3A Time Machine 只读回放，先浏览事件和历史投影，不重新调用模型或工具，也不与安全恢复混合。
 
+## 2026-08-08：Windows Sandbox 权限分层与执行期句柄租约
+
+### restricted/Low Integrity guest 权限边界
+
+- 固定 runner 升级为版本 3，安全保证改为
+  `candidate-restricted-low-integrity-job-not-certified`；canonical guest 协议仍为
+  版本 2。approval binding 自动绑定新的 runner 版本与二进制 hash，旧批准不能
+  重放到新边界。
+- 可信 runner 保持原 guest 身份，result 目录改为只继承 runner SID 的 DACL 和
+  Medium Integrity `NO_WRITE_UP`；scratch 使用相同 runner DACL 和 Low Integrity。
+  不可信命令不再继承 runner token，而是使用
+  `DISABLE_MAX_PRIVILEGE | SANDBOX_INERT | LUA_TOKEN` 的一次性 restricted primary
+  token，再降到 Low Integrity，并通过 `CreateProcessAsUser` 以 suspended 状态
+  创建。原有 STARTUPINFOEX 三句柄 allowlist、Job 分配后恢复、输出/时间/资源上限
+  与完整树终止语义保持不变。
+- runner 只向子进程增加固定的自身 PID 与 scratch 路径元数据，不继承宿主环境。
+  固定安全 probe 新增 token/完整性自检、scratch 正向写入、control/result 伪造、
+  对 runner 的 `OpenProcess` 写/注入权限、SCM create-service、Task Scheduler、
+  WMI `Win32_Process.Create` 和 `CREATE_BREAKAWAY_FROM_JOB` 攻击路径。
+
+### snapshot/control/export 生命周期租约
+
+- 新增 `sandbox_lease.py`。Windows 在 start 前为 snapshot/control 的根、全部目录与
+  文件持有不共享 write/delete 的有界句柄；每次复核同时查询持有句柄和当前路径，
+  严格比较 volume/file index、类型、链接数、大小和修改身份。reparse point、
+  hardlink、非普通文件、条目/字节超限、路径集合变化及 open/query/read/close
+  任一步异常均 fail-closed。
+- export 根先用允许新增文件但不共享 delete 的句柄跨越 share/export；exporter
+  返回后必须恰好出现唯一 `result.json`，host 立即取得只读封存树租约。该文件的
+  写入、删除和重命名被阻止；结果直到严格 stop 且 `wsb list --raw` 确认 UUID
+  消失后，才从已经持有的同一文件句柄读取。stop 报错不会跳过独立 list 确认，
+  任一租约关闭失败会推翻原本有效的结果。
+- 回归测试新增真实 Windows share-mode 写/delete/rename 阻断、新条目检测、export
+  根替换阻断、租约上下限和清理失败；真实 C# runner 测试会等待子/孙进程写出
+  `tree-ready` 后才触发取消，并验证完整 Job 已清空。目标 WSB 攻击集还区分单进程
+  内存与聚合 Job 内存，覆盖 breakaway、受限令牌和三类 broker 逃逸。
+
+### 证据门禁与当前状态
+
+- 强制证据 manifest 从 8 项扩展到 14 项，并把新租约源码/测试、tree-ready 取消、
+  token/broker/breakaway/聚合内存用例纳入 subject 与三轮 wheel-backed workflow。
+- 当前开发机仍缺少可用 `wsb.exe`，真实 WSB 攻击测试按设计跳过；本阶段没有生成
+  aggregate、独立 review、certification 或 ready 状态，也没有接入 backend、
+  `/doctor` 或 `run_command`。
+
+### 验证
+
+- Ruff lint、全仓库格式检查和 mypy 对 37 个源文件检查通过。
+- pytest 全量为 561 项通过、19 项平台条件跳过；真实 runner 编译、restricted
+  token 启动、快速洪泛重分类、tree-ready 后取消与 Windows handle lease 回归
+  已在本机执行通过。目标 WSB 用例的跳过不计为认证。
+- 5 个内置离线评测全部通过。全部验证未调用真实 DeepSeek API，也未生成或伪造
+  目标平台安全证据。
+
 ## 下一阶段计划
 
-1. 重构 guest 权限边界：可信 runner 保持受保护身份，把不可信命令放入一次性
-   restricted token/低完整性或 AppContainer/LPAC；结果与 control 使用仅 runner
-   可写的 ACL。补充子进程 `OpenProcess`/注入/结果伪造，以及 WMI、SCM、
-   Task Scheduler 和其他 broker 逃逸攻击用例。
-2. 为 snapshot、control 和 export 建立有界的执行生命周期句柄租约，禁止写入、
-   delete 和 rename，并从持有句柄而不是可替换路径复核 identity；同时补齐
-   聚合 Job 内存、breakaway、取消前 guest tree ready、stop 后 list 消失和
-   清理失败测试。
-3. 在一次性、无敏感凭据的 Windows 11 Pro/Enterprise 24H2+ runner 上使用
+1. 在一次性、无敏感凭据的 Windows 11 Pro/Enterprise 24H2+ runner 上使用
    同一构建执行三轮强制 workflow，校准真实 raw schema，保存并校验完整 artifact
    bundle、Actions provenance/attestation 和自托管 runner 版本；定义 evidence
    到 review 的最大新鲜度，并由独立 reviewer 关闭固定 gate 集后 pin review
    digest。
-4. 让认证 verifier 重新校验完整 raw bundle，只把未过期且与当前 commit、
+2. 让认证 verifier 重新校验完整 raw bundle，只把未过期且与当前 commit、
    本机 OS/WSB/runner hash、协议和固定 gate 集完全一致的证据转换为不可伪造的
    运行时能力；随后才接入 backend 与 `/doctor`。
    以上门禁全部通过后再注册只接受 executable + argv、丢弃全部 guest 修改的

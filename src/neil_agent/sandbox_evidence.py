@@ -62,6 +62,10 @@ REQUIRED_WINDOWS_SANDBOX_TESTS = tuple(
         (
             "tests/test_sandbox_guest.py"
             "::test_real_runner_reclassifies_fast_flood_after_child_exit",
+            "tests/test_sandbox_guest.py"
+            "::test_real_runner_cancels_only_after_guest_tree_is_ready",
+            "tests/test_sandbox_lease.py"
+            "::test_sealed_lease_blocks_write_delete_and_rename",
             "tests/test_sandbox_snapshot.py"
             "::test_windows_directory_guard_blocks_real_junction_replacement",
             "tests/test_windows_sandbox_security.py"
@@ -73,9 +77,17 @@ REQUIRED_WINDOWS_SANDBOX_TESTS = tuple(
             "tests/test_windows_sandbox_security.py"
             "::test_real_wsb_enforces_process_memory_limit",
             "tests/test_windows_sandbox_security.py"
+            "::test_real_wsb_enforces_aggregate_job_memory_limit",
+            "tests/test_windows_sandbox_security.py"
             "::test_real_wsb_host_cancellation_stops_the_explicit_instance",
             "tests/test_windows_sandbox_security.py"
+            "::test_real_wsb_job_denies_breakaway_process_creation",
+            "tests/test_windows_sandbox_security.py"
             "::test_real_wsb_kills_child_and_grandchild_on_timeout",
+            "tests/test_windows_sandbox_security.py"
+            "::test_real_wsb_restricts_low_integrity_child_and_protects_runner_result",
+            "tests/test_windows_sandbox_security.py"
+            "::test_real_wsb_blocks_scm_task_scheduler_and_wmi_broker_escape",
         )
     )
 )
@@ -97,10 +109,12 @@ REQUIRED_SUBJECT_SOURCE_PATHS = (
     "src/neil_agent/sandbox_evidence.py",
     "src/neil_agent/sandbox_guest.py",
     "src/neil_agent/sandbox_guest_runner.cs",
+    "src/neil_agent/sandbox_lease.py",
     "src/neil_agent/sandbox_snapshot.py",
     "src/neil_agent/windows_sandbox.py",
     "tests/fixtures/sandbox_security_probe.cs",
     "tests/test_sandbox_guest.py",
+    "tests/test_sandbox_lease.py",
     "tests/test_sandbox_snapshot.py",
     "tests/test_windows_sandbox_security.py",
 )

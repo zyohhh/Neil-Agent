@@ -18,6 +18,7 @@ from xml.etree import ElementTree
 import pytest
 
 from neil_agent.sandbox import CancellationSignal
+from neil_agent.errors import SandboxError
 from neil_agent.sandbox_approval import RunCommandApprovalBinding
 from neil_agent.sandbox_guest import (
     GUEST_PROTOCOL_VERSION,
@@ -27,6 +28,7 @@ from neil_agent.sandbox_guest import (
     SandboxGuestResult,
 )
 from neil_agent.sandbox_snapshot import inspect_prepared_snapshot
+from neil_agent.sandbox_lease import HandleLease, acquire_bounded_tree_lease
 from neil_agent.windows_sandbox import (
     MAX_CLI_STDERR_BYTES,
     MAX_CLI_STDOUT_BYTES,
@@ -399,13 +401,78 @@ def test_stop_failure_rejects_an_otherwise_valid_result(tmp_path: Path) -> None:
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
 
-def test_result_is_not_read_until_explicit_stop_succeeds(tmp_path: Path) -> None:
+def test_handle_lease_close_failure_rejects_an_otherwise_valid_result(
+    tmp_path: Path,
+) -> None:
+    wsb, plan, _ = _make_plan(tmp_path)
+    runner = _FakeCliRunner(plan)
+    created = 0
+
+    class CloseFailingLease:
+        def __init__(self, delegate: HandleLease, fail: bool) -> None:
+            self.delegate = delegate
+            self.fail = fail
+
+        def __enter__(self) -> CloseFailingLease:
+            self.delegate.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.delegate.close()
+            if self.fail:
+                raise SandboxError("injected lease close failure")
+
+        def validate(self) -> None:
+            self.delegate.validate()
+
+        def read_file(self, relative_path: str, maximum_bytes: int) -> bytes:
+            return self.delegate.read_file(relative_path, maximum_bytes)
+
+        def close(self) -> None:
+            self.delegate.close()
+            if self.fail:
+                raise SandboxError("injected lease close failure")
+
+    def factory(
+        root: Path,
+        *,
+        writable_root: bool = False,
+        expected_names: frozenset[str] | None = None,
+        max_entries: int,
+        max_total_bytes: int,
+    ) -> HandleLease:
+        nonlocal created
+        delegate = acquire_bounded_tree_lease(
+            root,
+            writable_root=writable_root,
+            expected_names=expected_names,
+            max_entries=max_entries,
+            max_total_bytes=max_total_bytes,
+        )
+        result = CloseFailingLease(delegate, fail=created == 0)
+        created += 1
+        return result
+
+    with pytest.raises(WsbHostExecutionError, match="lease"):
+        WsbHostExecutor(
+            wsb,
+            cli_runner=runner,
+            lease_factory=factory,
+        ).execute(plan)
+
+    assert [_stage(call[0]) for call in runner.calls][-2:] == [
+        "stop",
+        "list_after_stop",
+    ]
+
+
+def test_result_must_be_sealed_before_explicit_stop(tmp_path: Path) -> None:
     wsb, plan, _ = _make_plan(tmp_path)
     runner = _FakeCliRunner(plan, write_result_stage="stop")
 
-    result = WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
+    with pytest.raises(WsbHostExecutionError):
+        WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
-    assert result.status == "exited"
     assert [_stage(call[0]) for call in runner.calls][-3:] == [
         "exporter",
         "stop",
@@ -606,7 +673,7 @@ def test_explicitly_contradictory_raw_status_fails_closed(
         assert "矛盾" in str(caught.value)
     stages = [_stage(call[0]) for call in runner.calls]
     if stage == "stop":
-        assert stages[-1] == "stop"
+        assert stages[-2:] == ["stop", "list_after_stop"]
     else:
         assert stages[-2:] == ["stop", "list_after_stop"]
     assert stages.count("stop") == 1
@@ -751,7 +818,7 @@ def test_changed_snapshot_manifest_is_rejected_before_start(tmp_path: Path) -> N
     (plan.snapshot_directory / "tool.exe").write_bytes(b"replaced")
     runner = _FakeCliRunner(plan)
 
-    with pytest.raises(WsbHostExecutionError, match="manifest"):
+    with pytest.raises(WsbHostExecutionError):
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
     assert runner.calls == []
@@ -782,7 +849,7 @@ def test_snapshot_mutation_during_execution_is_rejected(
     wsb, plan, _ = _make_plan(tmp_path)
     runner = _FakeCliRunner(plan, mutate_snapshot_stage=stage)
 
-    with pytest.raises(WsbHostExecutionError, match="manifest"):
+    with pytest.raises(WsbHostExecutionError):
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
     assert [_stage(call[0]) for call in runner.calls] == expected_stages
@@ -794,7 +861,7 @@ def test_noncanonical_or_changed_request_is_rejected_fail_closed(
     wsb, plan, _ = _make_plan(tmp_path)
     runner = _FakeCliRunner(plan, mutate_control_after_start=True)
 
-    with pytest.raises(WsbHostExecutionError, match="request"):
+    with pytest.raises(WsbHostExecutionError):
         WsbHostExecutor(wsb, cli_runner=runner).execute(plan)
 
     assert [_stage(call[0]) for call in runner.calls] == [

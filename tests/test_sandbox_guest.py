@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
 import os
+import re
 import subprocess
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 import pytest
@@ -214,7 +217,9 @@ def test_result_round_trip_is_bound_bounded_and_job_confirmed() -> None:
     assert result.stdout == b"hello"
     assert result.stderr == b"warning"
     assert result.job_terminated is True
-    assert result.security_assurance == "candidate-job-only-not-certified"
+    assert result.security_assurance == (
+        "candidate-restricted-low-integrity-job-not-certified"
+    )
     assert result.result_hash == _digest(result.hash_payload())
 
 
@@ -297,11 +302,18 @@ def test_runner_source_keeps_fixed_candidate_security_contract() -> None:
         in source
     )
 
-    create = source.index("created = CreateProcess(")
+    restrict = source.index("restrictedToken = CreateRestrictedLowIntegrityToken()")
+    create = source.index("created = CreateProcessAsUser(")
     assign = source.index("AssignProcessToJobObject(", create)
     resume = source.index("ResumeThread(", assign)
-    assert create < assign < resume
+    assert restrict < create < assign < resume
     assert "CreateSuspended" in source[create:assign]
+    assert "CreateRestrictedToken(" in source
+    assert "DisableMaxPrivilege | SandboxInert | LuaToken" in source
+    assert 'ConvertStringSidToSid("S-1-16-4096"' in source
+    assert "SetTokenInformation(" in source
+    assert 'SecureRunnerDirectory(ResultRoot, "ME")' in source
+    assert 'SecureRunnerDirectory(ScratchRoot, "LW")' in source
     assert "JobObjectLimitKillOnJobClose" in source
     assert "JobObjectLimitActiveProcess" in source
     assert "JobObjectLimitProcessMemory" in source
@@ -444,6 +456,123 @@ internal static class FastFlood
     assert parsed.job_terminated is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows Job Objects")
+def test_real_runner_cancels_only_after_guest_tree_is_ready(tmp_path: Path) -> None:
+    compiler = find_dotnet_framework_csc()
+    if compiler is None:
+        pytest.skip(".NET Framework csc.exe is unavailable")
+
+    control = tmp_path / "control"
+    snapshot = tmp_path / "snapshot"
+    scratch = tmp_path / "scratch"
+    result_root = tmp_path / "result"
+    export = tmp_path / "export"
+    control.mkdir()
+    snapshot.mkdir()
+    request = _request(
+        executable="probe.exe",
+        argv=("tree",),
+        cwd=".",
+        environment={},
+        timeout_ms=60_000,
+        max_output_bytes=16 * 1024,
+        active_process_limit=4,
+        process_memory_bytes=128 * 1024 * 1024,
+        job_memory_bytes=256 * 1024 * 1024,
+    )
+    (control / "request.json").write_bytes(request.canonical_bytes())
+
+    probe_source = (
+        Path(__file__).resolve().parent / "fixtures" / "sandbox_security_probe.cs"
+    )
+    _compile_csharp(
+        compiler,
+        probe_source,
+        snapshot / "probe.exe",
+        reference=None,
+        cwd=tmp_path,
+    )
+    fixed_source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "neil_agent"
+        / "sandbox_guest_runner.cs"
+    ).read_text(encoding="utf-8")
+    patched_source = _replace_runner_paths(
+        fixed_source,
+        {
+            "ControlRoot": control,
+            "SnapshotRoot": snapshot,
+            "ScratchRoot": scratch,
+            "ResultRoot": result_root,
+            "ExportRoot": export,
+            "RequestPath": control / "request.json",
+            "CancelPath": control / "cancel.signal",
+            "ResultPath": result_root / "result.json",
+            "MarkerPath": result_root / "complete.marker",
+            "ExportPath": export / "result.json",
+        },
+    )
+    runner_source = tmp_path / "sandbox_guest_runner.cs"
+    runner_source.write_text(patched_source, encoding="utf-8")
+    runner_binary = tmp_path / GUEST_BINARY_FILENAME
+    _compile_csharp(
+        compiler,
+        runner_source,
+        runner_binary,
+        reference=compiler.parent / "System.Web.Extensions.dll",
+        cwd=tmp_path,
+    )
+
+    process = subprocess.Popen(
+        [str(runner_binary), GUEST_EXECUTE_MODE],
+        shell=False,
+        cwd=tmp_path,
+        env={
+            "SystemRoot": r"C:\Windows",
+            "WINDIR": r"C:\Windows",
+            "TEMP": str(tmp_path),
+            "TMP": str(tmp_path),
+        },
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    ready = scratch / "tree-ready.txt"
+    deadline = monotonic() + 15.0
+    try:
+        while not ready.is_file() and monotonic() < deadline:
+            sleep(0.02)
+        assert ready.is_file(), "guest grandchild never reached its ready boundary"
+        grandchild_pid = int(ready.read_text(encoding="utf-8"))
+        (control / "cancel.signal").write_bytes(b"cancel")
+        stdout, stderr = process.communicate(timeout=15)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode == 0
+    assert stdout == b""
+    assert stderr == b""
+    parsed = parse_guest_result(
+        (result_root / "result.json").read_bytes(),
+        request=request,
+    )
+    assert parsed.status == "cancelled"
+    assert parsed.error_code == "cancelled"
+    assert parsed.job_terminated is True
+    process_ids = {
+        int(value)
+        for value in re.findall(
+            rb"(?:tree-root|child|tree-child|grandchild)=(\d+)", parsed.stdout
+        )
+    }
+    process_ids.add(grandchild_pid)
+    assert len(process_ids) >= 3
+    assert all(not _windows_process_is_running(pid) for pid in process_ids)
+
+
 def _replace_runner_paths(source: str, paths: dict[str, Path]) -> str:
     result = source
     for constant, path in paths.items():
@@ -454,6 +583,29 @@ def _replace_runner_paths(source: str, paths: dict[str, Path]) -> str:
         replacement = f'{prefix}@"{escaped_path}";'
         result = result.replace(matches[0], replacement, 1)
     return result
+
+
+def _windows_process_is_running(process_id: int) -> bool:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    get_exit_code = kernel32.GetExitCodeProcess
+    get_exit_code.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    get_exit_code.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    handle = open_process(0x1000, 0, process_id)
+    if not handle:
+        return False
+    try:
+        exit_code = ctypes.c_uint32()
+        return bool(get_exit_code(handle, ctypes.byref(exit_code))) and (
+            exit_code.value == 259
+        )
+    finally:
+        close_handle(handle)
 
 
 def _compile_csharp(

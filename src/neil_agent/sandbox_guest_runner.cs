@@ -5,7 +5,9 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -14,8 +16,9 @@ using Microsoft.Win32.SafeHandles;
 internal static class SandboxGuestRunner
 {
     private const int ProtocolVersion = 2;
-    private const int RunnerVersion = 2;
-    private const string SecurityAssurance = "candidate-job-only-not-certified";
+    private const int RunnerVersion = 3;
+    private const string SecurityAssurance =
+        "candidate-restricted-low-integrity-job-not-certified";
 
     private const string ControlRoot = @"C:\NeilAgent\Control";
     private const string SnapshotRoot = @"C:\NeilAgent\Snapshot";
@@ -63,6 +66,20 @@ internal static class SandboxGuestRunner
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint MoveFileWriteThrough = 0x00000008;
     private const uint ProcThreadAttributeHandleList = 0x00020002;
+    private const uint TokenAssignPrimary = 0x0001;
+    private const uint TokenDuplicate = 0x0002;
+    private const uint TokenQuery = 0x0008;
+    private const uint TokenAdjustDefault = 0x0080;
+    private const uint TokenAdjustSessionId = 0x0100;
+    private const uint DisableMaxPrivilege = 0x00000001;
+    private const uint SandboxInert = 0x00000002;
+    private const uint LuaToken = 0x00000004;
+    private const uint SeGroupIntegrity = 0x00000020;
+    private const uint SeGroupIntegrityEnabled = 0x00000040;
+    private const int TokenIntegrityLevel = 25;
+    private const uint LabelSecurityInformation = 0x00000010;
+    private const int SeFileObject = 1;
+    private const uint SecurityDescriptorRevision = 1;
     private const int ErrorAlreadyExists = 183;
     private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
 
@@ -96,6 +113,8 @@ internal static class SandboxGuestRunner
         EnsureSafeDirectory(SnapshotRoot, false);
         EnsureSafeDirectory(ScratchRoot, true);
         EnsureSafeDirectory(ResultRoot, true);
+        SecureRunnerDirectory(ResultRoot, "ME");
+        SecureRunnerDirectory(ScratchRoot, "LW");
         EnsureAbsent(ResultPath);
         EnsureAbsent(MarkerPath);
 
@@ -190,6 +209,7 @@ internal static class SandboxGuestRunner
         IntPtr stderrWrite = IntPtr.Zero;
         IntPtr nullInput = IntPtr.Zero;
         IntPtr job = IntPtr.Zero;
+        IntPtr restrictedToken = IntPtr.Zero;
         PROCESS_INFORMATION processInformation = new PROCESS_INFORMATION();
         OutputReader stdoutReader = null;
         OutputReader stderrReader = null;
@@ -259,6 +279,7 @@ internal static class SandboxGuestRunner
             startup.StartupInfo.hStdOutput = stdoutWrite;
             startup.StartupInfo.hStdError = stderrWrite;
             string commandLine = BuildCommandLine(executable, request.Arguments);
+            restrictedToken = CreateRestrictedLowIntegrityToken();
             IntPtr environment = BuildEnvironmentBlock(request.Environment);
             bool created;
             try
@@ -267,7 +288,8 @@ internal static class SandboxGuestRunner
                     new IntPtr[] { nullInput, stdoutWrite, stderrWrite }))
                 {
                     startup.lpAttributeList = inherited.AttributeList;
-                    created = CreateProcess(
+                    created = CreateProcessAsUser(
+                        restrictedToken,
                         executable,
                         new StringBuilder(commandLine),
                         IntPtr.Zero,
@@ -293,6 +315,7 @@ internal static class SandboxGuestRunner
             CloseHandleIfValid(ref stdoutWrite);
             CloseHandleIfValid(ref stderrWrite);
             CloseHandleIfValid(ref nullInput);
+            CloseHandleIfValid(ref restrictedToken);
             if (!created)
             {
                 return GuestResult.Failure(
@@ -484,6 +507,7 @@ internal static class SandboxGuestRunner
             CloseHandleIfValid(ref stderrRead);
             CloseHandleIfValid(ref stderrWrite);
             CloseHandleIfValid(ref nullInput);
+            CloseHandleIfValid(ref restrictedToken);
             CloseHandleIfValid(ref processInformation.hThread);
             CloseHandleIfValid(ref processInformation.hProcess);
             CloseHandleIfValid(ref job);
@@ -656,6 +680,9 @@ internal static class SandboxGuestRunner
         values["TMP"] = ScratchRoot;
         values["USERPROFILE"] = ScratchRoot;
         values["HOME"] = ScratchRoot;
+        values["NEIL_SCRATCH_ROOT"] = ScratchRoot;
+        values["NEIL_RUNNER_PID"] = Process.GetCurrentProcess().Id.ToString(
+            CultureInfo.InvariantCulture);
         foreach (KeyValuePair<string, string> pair in requested)
         {
             values[pair.Key] = pair.Value;
@@ -670,6 +697,185 @@ internal static class SandboxGuestRunner
         }
         block.Append('\0');
         return Marshal.StringToHGlobalUni(block.ToString());
+    }
+
+    private static void SecureRunnerDirectory(
+        string path,
+        string integritySidAlias)
+    {
+        SecurityIdentifier runnerSid = WindowsIdentity.GetCurrent().User;
+        if (runnerSid == null)
+        {
+            throw new InvalidOperationException("runner SID unavailable");
+        }
+        DirectorySecurity security = new DirectorySecurity();
+        security.SetAccessRuleProtection(true, false);
+        InheritanceFlags inheritance =
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        security.AddAccessRule(
+            new FileSystemAccessRule(
+                runnerSid,
+                FileSystemRights.FullControl,
+                inheritance,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        new DirectoryInfo(path).SetAccessControl(security);
+        ApplyIntegrityLabel(path, integritySidAlias);
+    }
+
+    private static void ApplyIntegrityLabel(
+        string path,
+        string integritySidAlias)
+    {
+        IntPtr descriptor = IntPtr.Zero;
+        string sddl = "S:(ML;;NW;;;" + integritySidAlias + ")";
+        uint descriptorLength;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+            sddl,
+            SecurityDescriptorRevision,
+            out descriptor,
+            out descriptorLength))
+        {
+            throw new InvalidOperationException(
+                "integrity descriptor creation failed: "
+                + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+        }
+        try
+        {
+            IntPtr sacl;
+            bool saclPresent;
+            bool saclDefaulted;
+            if (!GetSecurityDescriptorSacl(
+                descriptor,
+                out saclPresent,
+                out sacl,
+                out saclDefaulted)
+                || !saclPresent
+                || sacl == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "integrity label unavailable: "
+                    + Marshal.GetLastWin32Error().ToString(
+                        CultureInfo.InvariantCulture));
+            }
+            uint error = SetNamedSecurityInfo(
+                path,
+                SeFileObject,
+                LabelSecurityInformation,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                sacl);
+            if (error != 0)
+            {
+                throw new InvalidOperationException(
+                    "integrity label assignment failed: "
+                    + error.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+        finally
+        {
+            if (descriptor != IntPtr.Zero)
+            {
+                LocalFree(descriptor);
+            }
+        }
+    }
+
+    private static IntPtr CreateRestrictedLowIntegrityToken()
+    {
+        IntPtr currentToken = IntPtr.Zero;
+        IntPtr restrictedToken = IntPtr.Zero;
+        uint desiredAccess =
+            TokenAssignPrimary
+            | TokenDuplicate
+            | TokenQuery
+            | TokenAdjustDefault
+            | TokenAdjustSessionId;
+        if (!OpenProcessToken(
+            Process.GetCurrentProcess().Handle,
+            desiredAccess,
+            out currentToken))
+        {
+            throw new InvalidOperationException(
+                "runner token open failed: "
+                + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+        }
+        try
+        {
+            uint flags = DisableMaxPrivilege | SandboxInert | LuaToken;
+            if (!CreateRestrictedToken(
+                currentToken,
+                flags,
+                0,
+                null,
+                0,
+                IntPtr.Zero,
+                0,
+                null,
+                out restrictedToken))
+            {
+                throw new InvalidOperationException(
+                    "restricted token creation failed: "
+                    + Marshal.GetLastWin32Error().ToString(
+                        CultureInfo.InvariantCulture));
+            }
+            SetLowIntegrityLevel(restrictedToken);
+            return restrictedToken;
+        }
+        catch
+        {
+            CloseHandleIfValid(ref restrictedToken);
+            throw;
+        }
+        finally
+        {
+            CloseHandleIfValid(ref currentToken);
+        }
+    }
+
+    private static void SetLowIntegrityLevel(IntPtr token)
+    {
+        IntPtr lowSid = IntPtr.Zero;
+        if (!ConvertStringSidToSid("S-1-16-4096", out lowSid))
+        {
+            throw new InvalidOperationException(
+                "low-integrity SID creation failed: "
+                + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+        }
+        try
+        {
+            TOKEN_MANDATORY_LABEL label = new TOKEN_MANDATORY_LABEL();
+            label.Label.Sid = lowSid;
+            label.Label.Attributes = SeGroupIntegrity | SeGroupIntegrityEnabled;
+            int size = Marshal.SizeOf(typeof(TOKEN_MANDATORY_LABEL));
+            IntPtr pointer = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(label, pointer, false);
+                uint informationLength = unchecked(
+                    (uint)(size + GetLengthSid(lowSid)));
+                if (!SetTokenInformation(
+                    token,
+                    TokenIntegrityLevel,
+                    pointer,
+                    informationLength))
+                {
+                    throw new InvalidOperationException(
+                        "low-integrity token assignment failed: "
+                        + Marshal.GetLastWin32Error().ToString(
+                            CultureInfo.InvariantCulture));
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(pointer);
+            }
+        }
+        finally
+        {
+            LocalFree(lowSid);
+        }
     }
 
     private static string BuildCommandLine(
@@ -1918,6 +2124,19 @@ internal static class SandboxGuestRunner
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct SID_AND_ATTRIBUTES
+    {
+        internal IntPtr Sid;
+        internal uint Attributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TOKEN_MANDATORY_LABEL
+    {
+        internal SID_AND_ATTRIBUTES Label;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct STARTUPINFOEX
     {
         internal STARTUPINFO StartupInfo;
@@ -1998,9 +2217,10 @@ internal static class SandboxGuestRunner
         uint dwFlagsAndAttributes,
         IntPtr hTemplateFile);
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateProcess(
+    private static extern bool CreateProcessAsUser(
+        IntPtr hToken,
         string lpApplicationName,
         StringBuilder lpCommandLine,
         IntPtr lpProcessAttributes,
@@ -2011,6 +2231,72 @@ internal static class SandboxGuestRunner
         string lpCurrentDirectory,
         ref STARTUPINFOEX lpStartupInfo,
         out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(
+        IntPtr processHandle,
+        uint desiredAccess,
+        out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateRestrictedToken(
+        IntPtr existingTokenHandle,
+        uint flags,
+        uint disableSidCount,
+        [In] SID_AND_ATTRIBUTES[] sidsToDisable,
+        uint deletePrivilegeCount,
+        IntPtr privilegesToDelete,
+        uint restrictedSidCount,
+        [In] SID_AND_ATTRIBUTES[] sidsToRestrict,
+        out IntPtr newTokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetTokenInformation(
+        IntPtr tokenHandle,
+        int tokenInformationClass,
+        IntPtr tokenInformation,
+        uint tokenInformationLength);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertStringSidToSid(
+        string stringSid,
+        out IntPtr sid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern int GetLengthSid(IntPtr sid);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+        string stringSecurityDescriptor,
+        uint stringSdRevision,
+        out IntPtr securityDescriptor,
+        out uint securityDescriptorSize);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetSecurityDescriptorSacl(
+        IntPtr securityDescriptor,
+        out bool saclPresent,
+        out IntPtr sacl,
+        out bool saclDefaulted);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint SetNamedSecurityInfo(
+        string objectName,
+        int objectType,
+        uint securityInfo,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        IntPtr sacl);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

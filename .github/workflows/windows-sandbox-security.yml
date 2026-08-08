@@ -155,6 +155,8 @@ jobs:
               --import-mode=importlib -o xfail_strict=true --junitxml="$junit" `
               tests/test_windows_sandbox_security.py `
               tests/test_sandbox_guest.py::test_real_runner_reclassifies_fast_flood_after_child_exit `
+              tests/test_sandbox_guest.py::test_real_runner_cancels_only_after_guest_tree_is_ready `
+              tests/test_sandbox_lease.py::test_sealed_lease_blocks_write_delete_and_rename `
               tests/test_sandbox_snapshot.py::test_windows_directory_guard_blocks_real_junction_replacement
             $pytestExitCode = $LASTEXITCODE
             $finishedAt = [DateTimeOffset]::UtcNow.ToString("o")

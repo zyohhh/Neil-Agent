@@ -99,7 +99,7 @@ skip、xfail 和 xpass 即使出现在报告中，也不能通过 `verify`。
 - repeat ID、execution nonce、transcript hash 和 evidence digest 分别唯一；
 - 三轮来自同一 workflow run/attempt 和 producer，并按时间串行且不重叠；
 - 三轮的 instance ID、run ID 和 request hash 集合彼此不重叠；
-- 固定的八项攻击测试完整存在；
+- 固定的十四项攻击测试完整存在；
 - failed/error/skipped/xfailed/xpassed 全为零；
 - platform、subject 和规范化 CLI schema 完全一致。
 

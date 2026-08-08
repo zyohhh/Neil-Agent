@@ -37,10 +37,10 @@ from pydantic import (
 )
 
 GUEST_PROTOCOL_VERSION: Literal[2] = 2
-GUEST_RUNNER_VERSION: Literal[2] = 2
-GUEST_RUNNER_SECURITY_ASSURANCE: Literal["candidate-job-only-not-certified"] = (
-    "candidate-job-only-not-certified"
-)
+GUEST_RUNNER_VERSION: Literal[3] = 3
+GUEST_RUNNER_SECURITY_ASSURANCE: Literal[
+    "candidate-restricted-low-integrity-job-not-certified"
+] = "candidate-restricted-low-integrity-job-not-certified"
 GUEST_SOURCE_FILENAME = "sandbox_guest_runner.cs"
 GUEST_BINARY_FILENAME = "neil-sandbox-runner.exe"
 GUEST_CONTROL_DIRECTORY = r"C:\NeilAgent\Control"
@@ -285,10 +285,10 @@ class SandboxGuestResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     version: Literal[2] = GUEST_PROTOCOL_VERSION
-    runner_version: Literal[2] = GUEST_RUNNER_VERSION
-    security_assurance: Literal["candidate-job-only-not-certified"] = (
-        GUEST_RUNNER_SECURITY_ASSURANCE
-    )
+    runner_version: Literal[3] = GUEST_RUNNER_VERSION
+    security_assurance: Literal[
+        "candidate-restricted-low-integrity-job-not-certified"
+    ] = GUEST_RUNNER_SECURITY_ASSURANCE
     run_id: StrictStr
     request_hash: StrictStr
     instance_id: StrictStr

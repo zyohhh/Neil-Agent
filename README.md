@@ -74,8 +74,9 @@ uv run neil-agent -p "更新版本号" --protocol-version 2 --permission-mode ap
 `windows-sandbox` 只读探测 Windows Sandbox 平台能力。该设置不会开放通用
 命令，后端不可用或能力不完整时会 fail-closed，现有质量检查与 Git 命令仍
 保持固定白名单。`/doctor` 不启动沙箱或修改系统，只显示结构化能力状态。
-仓库已包含过滤只读快照、固定 guest runner 和 `wsb.exe` 两阶段结果导出的
-候选实现，但它尚未接入 Agent 工具，也不代表后端已经通过真实平台认证。
+仓库已包含过滤只读快照、restricted/Low Integrity 固定 guest runner、执行期
+句柄租约和 `wsb.exe` 两阶段结果导出的候选实现，但它尚未接入 Agent 工具，
+也不代表后端已经通过真实平台认证。
 专用 Windows 安全任务使用 `SANDBOX_REQUIRED=1`，缺少组件或任何隔离用例
 未通过都会失败；它还要求同一构建重复三轮，记录平台/产物/JUnit 与真实
 `--raw` 调用 transcript，并实际安装和测试唯一 wheel 后生成 canonical

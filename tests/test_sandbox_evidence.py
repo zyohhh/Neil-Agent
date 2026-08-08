@@ -72,7 +72,7 @@ def _platform(*, ubr: int = 1) -> PlatformFingerprint:
 
 def _subject(
     *,
-    assurance: str = "candidate-job-only-not-certified",
+    assurance: str = "candidate-restricted-low-integrity-job-not-certified",
     runner_binary_sha256: str | None = None,
 ) -> EvidenceSubject:
     return EvidenceSubject(
@@ -249,7 +249,7 @@ def _run(
 
 def _aggregate(
     *,
-    assurance: str = "candidate-job-only-not-certified",
+    assurance: str = "candidate-restricted-low-integrity-job-not-certified",
 ) -> SandboxEvidenceAggregate:
     subject = _subject(assurance=assurance)
     return verify_evidence_runs(
@@ -331,7 +331,7 @@ def test_required_manifest_is_fixed_sorted_and_self_hashed() -> None:
     manifest = required_test_manifest()
 
     assert manifest.nodeids == REQUIRED_WINDOWS_SANDBOX_TESTS
-    assert len(manifest.nodeids) == 8
+    assert len(manifest.nodeids) == 14
     assert manifest.canonical_bytes() == required_test_manifest().canonical_bytes()
 
 
@@ -804,7 +804,9 @@ def test_three_unique_consistent_passes_create_non_certifying_aggregate() -> Non
     aggregate = verify_evidence_runs(runs)
 
     assert aggregate.repeat_ids == ("repeat-0", "repeat-1", "repeat-2")
-    assert aggregate.subject.security_assurance == ("candidate-job-only-not-certified")
+    assert aggregate.subject.security_assurance == (
+        "candidate-restricted-low-integrity-job-not-certified"
+    )
     assert aggregate.evidence_started_at == _START
     assert aggregate.evidence_finished_at == _START + timedelta(
         minutes=2,

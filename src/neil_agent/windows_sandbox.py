@@ -24,6 +24,7 @@ import os
 import stat
 import subprocess
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -53,6 +54,11 @@ from .sandbox_guest import (
     SandboxGuestRequest,
     parse_guest_request,
     parse_guest_result,
+)
+from .sandbox_lease import (
+    HandleLease,
+    HandleLeaseFactory,
+    acquire_bounded_tree_lease,
 )
 from .sandbox_snapshot import inspect_prepared_snapshot
 
@@ -440,7 +446,13 @@ class BoundedSubprocessCliRunner:
 class WsbHostExecutor:
     """Execute the candidate WSB host sequence without exposing a general tool."""
 
-    __slots__ = ("_environment", "_raw_observer", "_runner", "_wsb_executable")
+    __slots__ = (
+        "_environment",
+        "_lease_factory",
+        "_raw_observer",
+        "_runner",
+        "_wsb_executable",
+    )
 
     def __init__(
         self,
@@ -448,6 +460,7 @@ class WsbHostExecutor:
         *,
         cli_runner: WsbCliRunner | None = None,
         raw_observer: WsbRawObserver | None = None,
+        lease_factory: HandleLeaseFactory = acquire_bounded_tree_lease,
     ) -> None:
         if not isinstance(wsb_executable, Path) or not wsb_executable.is_absolute():
             raise ValueError("wsb executable must be an absolute Path")
@@ -456,6 +469,7 @@ class WsbHostExecutor:
         self._wsb_executable = _validate_wsb_executable(wsb_executable)
         self._runner = cli_runner or BoundedSubprocessCliRunner()
         self._raw_observer = raw_observer
+        self._lease_factory = lease_factory
         self._environment = _minimal_environment()
 
     def execute(
@@ -468,113 +482,197 @@ class WsbHostExecutor:
 
         if cancel is not None and cancel.is_set():
             raise WsbHostExecutionError("Windows Sandbox 执行在启动前已取消。")
+        try:
+            return self._execute_with_leases(plan, cancel=cancel)
+        except WsbHostExecutionError:
+            raise
+        except SandboxError as error:
+            raise WsbHostExecutionError(
+                "Windows Sandbox handle lease failed closed."
+            ) from error
+
+    def _execute_with_leases(
+        self,
+        plan: WsbExecutionPlan,
+        *,
+        cancel: CancellationSignal | None,
+    ) -> WsbExecutionResult:
         paths = _validate_plan_paths(plan)
         request = _validate_control_bundle(plan, paths.control)
-        output = _create_output_directory(paths.temporary_root)
-        config = _build_start_config(paths.snapshot, paths.control)
-        deadline = monotonic() + plan.timeout_seconds
-        cleanup_required = False
-        primary_error: BaseException | None = None
-        try:
-            cleanup_required = True
-            self._invoke(
-                "start",
-                (
+        with ExitStack() as leases:
+            snapshot_lease = leases.enter_context(
+                self._lease_factory(
+                    paths.snapshot,
+                    max_entries=MAX_TREE_ENTRIES,
+                    max_total_bytes=MAX_TREE_BYTES,
+                )
+            )
+            control_lease = leases.enter_context(
+                self._lease_factory(
+                    paths.control,
+                    expected_names=frozenset(
+                        {WSB_RUNNER_FILENAME, WSB_REQUEST_FILENAME}
+                    ),
+                    max_entries=2,
+                    max_total_bytes=MAX_RUNNER_BYTES + MAX_REQUEST_JSON_BYTES,
+                )
+            )
+            _validate_held_inputs(
+                plan,
+                request,
+                paths,
+                snapshot_lease,
+                control_lease,
+            )
+            output = _create_output_directory(paths.temporary_root)
+            output_root_lease = leases.enter_context(
+                self._lease_factory(
+                    output,
+                    writable_root=True,
+                    max_entries=1,
+                    max_total_bytes=MAX_RESULT_JSON_BYTES,
+                )
+            )
+            config = _build_start_config(paths.snapshot, paths.control)
+            deadline = monotonic() + plan.timeout_seconds
+            cleanup_required = False
+            primary_error: BaseException | None = None
+            result_lease: HandleLease | None = None
+            try:
+                cleanup_required = True
+                self._invoke(
                     "start",
-                    "--id",
-                    str(plan.instance_id),
-                    "--config",
-                    config,
-                    "--raw",
-                ),
-                plan,
-                deadline,
-                cancel,
-            )
-            _validate_snapshot_binding(plan, paths.snapshot)
-            if _validate_control_bundle(plan, paths.control) != request:
-                raise WsbHostExecutionError(
-                    "guest request changed after the sandbox was started."
+                    (
+                        "start",
+                        "--id",
+                        str(plan.instance_id),
+                        "--config",
+                        config,
+                        "--raw",
+                    ),
+                    plan,
+                    deadline,
+                    cancel,
                 )
-            self._invoke(
-                "runner",
-                _exec_arguments(plan.instance_id, WSB_RUNNER_COMMAND),
-                plan,
-                deadline,
-                cancel,
-                require_exit_code=True,
-            )
+                _validate_held_inputs(
+                    plan,
+                    request,
+                    paths,
+                    snapshot_lease,
+                    control_lease,
+                )
+                self._invoke(
+                    "runner",
+                    _exec_arguments(plan.instance_id, WSB_RUNNER_COMMAND),
+                    plan,
+                    deadline,
+                    cancel,
+                    require_exit_code=True,
+                )
 
-            # The trusted runner exits zero only after its complete guest Job is
-            # empty.  No writable host mapping exists before this point.
-            _validate_snapshot_binding(plan, paths.snapshot)
-            if _validate_control_bundle(plan, paths.control) != request:
-                raise WsbHostExecutionError(
-                    "guest request changed before writable result sharing."
+                # The trusted runner exits only after the untrusted Job is
+                # empty. No writable host mapping exists before this point.
+                _validate_held_inputs(
+                    plan,
+                    request,
+                    paths,
+                    snapshot_lease,
+                    control_lease,
                 )
-            _require_empty_output(output)
-            self._invoke(
-                "share",
-                (
+                output_root_lease.validate()
+                _require_empty_output(output)
+                self._invoke(
                     "share",
-                    "--id",
-                    str(plan.instance_id),
-                    "--host-path",
-                    str(output),
-                    "--sandbox-path",
-                    WSB_GUEST_EXPORT,
-                    "--allow-write",
-                    "--raw",
-                ),
-                plan,
-                deadline,
-                cancel,
-            )
-            if _validate_control_bundle(plan, paths.control) != request:
-                raise WsbHostExecutionError(
-                    "guest request changed before result export."
+                    (
+                        "share",
+                        "--id",
+                        str(plan.instance_id),
+                        "--host-path",
+                        str(output),
+                        "--sandbox-path",
+                        WSB_GUEST_EXPORT,
+                        "--allow-write",
+                        "--raw",
+                    ),
+                    plan,
+                    deadline,
+                    cancel,
                 )
-            self._invoke(
-                "exporter",
-                _exec_arguments(plan.instance_id, WSB_EXPORTER_COMMAND),
-                plan,
-                deadline,
-                cancel,
-                require_exit_code=True,
-            )
-            _validate_snapshot_binding(plan, paths.snapshot)
-            if _validate_control_bundle(plan, paths.control) != request:
-                raise WsbHostExecutionError(
-                    "guest request changed after result export."
+                _validate_held_inputs(
+                    plan,
+                    request,
+                    paths,
+                    snapshot_lease,
+                    control_lease,
                 )
-        except BaseException as error:  # cleanup must also cover interrupts.
-            primary_error = error
-        finally:
-            if cleanup_required:
-                try:
-                    self._invoke_stop(plan)
-                    self._confirm_instance_absent(plan)
-                except BaseException as stop_error:
-                    raise WsbHostExecutionError(
-                        "Windows Sandbox stop 未被严格确认，执行结果已拒绝。"
-                    ) from stop_error
+                self._invoke(
+                    "exporter",
+                    _exec_arguments(plan.instance_id, WSB_EXPORTER_COMMAND),
+                    plan,
+                    deadline,
+                    cancel,
+                    require_exit_code=True,
+                )
+                output_root_lease.validate()
+                result_lease = leases.enter_context(
+                    self._lease_factory(
+                        output,
+                        expected_names=frozenset({WSB_RESULT_FILENAME}),
+                        max_entries=1,
+                        max_total_bytes=MAX_RESULT_JSON_BYTES,
+                    )
+                )
+                _validate_held_inputs(
+                    plan,
+                    request,
+                    paths,
+                    snapshot_lease,
+                    control_lease,
+                )
+            except BaseException as error:  # cleanup must cover interrupts.
+                primary_error = error
+            finally:
+                if cleanup_required:
+                    stop_error: BaseException | None = None
+                    try:
+                        self._invoke_stop(plan)
+                    except BaseException as error:
+                        stop_error = error
+                    try:
+                        self._confirm_instance_absent(plan)
+                    except BaseException as error:
+                        if stop_error is None:
+                            stop_error = error
+                    if stop_error is not None:
+                        raise WsbHostExecutionError(
+                            "Windows Sandbox stop 未被严格确认，执行结果已拒绝。"
+                        ) from stop_error
 
-        if primary_error is not None:
-            if isinstance(primary_error, WsbHostExecutionError):
-                raise primary_error
-            raise WsbHostExecutionError(
-                "Windows Sandbox 主机执行失败，未返回结果。"
-            ) from primary_error
+            if primary_error is not None:
+                if isinstance(primary_error, WsbHostExecutionError):
+                    raise primary_error
+                raise WsbHostExecutionError(
+                    "Windows Sandbox 主机执行失败，未返回结果。"
+                ) from primary_error
+            if result_lease is None:
+                raise WsbHostExecutionError("sealed guest result lease is missing.")
 
-        # Result bytes are untrusted until the explicit instance has stopped.
-        # Revalidate every immutable input after stop before opening the
-        # writable export for the first time.
-        _validate_snapshot_binding(plan, paths.snapshot)
-        if _validate_control_bundle(plan, paths.control) != request:
-            raise WsbHostExecutionError(
-                "guest request changed before the stopped result was read."
+            # Hold every identity through stop/list and read the result from
+            # its existing file handle, never from a replaceable path.
+            _validate_held_inputs(
+                plan,
+                request,
+                paths,
+                snapshot_lease,
+                control_lease,
             )
-        return _load_result(output, plan, request)
+            output_root_lease.validate()
+            result_lease.validate()
+            raw = result_lease.read_file(
+                WSB_RESULT_FILENAME,
+                MAX_RESULT_JSON_BYTES,
+            )
+            return _load_result_bytes(raw, plan, request)
 
     def _invoke(
         self,
@@ -827,16 +925,11 @@ def _validate_list_completion(
     return frozenset(instance_ids)
 
 
-def _load_result(
-    output: Path,
+def _load_result_bytes(
+    raw: bytes,
     plan: WsbExecutionPlan,
     request: SandboxGuestRequest,
 ) -> WsbExecutionResult:
-    _validate_directory(output, "output directory")
-    entries = tuple(output.iterdir())
-    if len(entries) != 1 or entries[0].name != WSB_RESULT_FILENAME:
-        raise WsbHostExecutionError("输出目录必须只包含一个固定结果文件。")
-    raw = _read_regular_file(entries[0], MAX_RESULT_JSON_BYTES)
     try:
         guest_result = parse_guest_result(raw, request=request)
     except SandboxGuestError as error:
@@ -860,6 +953,27 @@ def _load_result(
         result_hash=guest_result.result_hash,
         job_terminated=True,
     )
+
+
+def _validate_held_inputs(
+    plan: WsbExecutionPlan,
+    request: SandboxGuestRequest,
+    paths: _ValidatedPaths,
+    snapshot_lease: HandleLease,
+    control_lease: HandleLease,
+) -> None:
+    try:
+        snapshot_lease.validate()
+        control_lease.validate()
+    except SandboxError as error:
+        raise WsbHostExecutionError(
+            "immutable Windows Sandbox input lease changed or failed."
+        ) from error
+    _validate_snapshot_binding(plan, paths.snapshot)
+    if _validate_control_bundle(plan, paths.control) != request:
+        raise WsbHostExecutionError(
+            "guest request changed while immutable handles were held."
+        )
 
 
 def _validate_plan_paths(plan: WsbExecutionPlan) -> _ValidatedPaths:

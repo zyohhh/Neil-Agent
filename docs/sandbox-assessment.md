@@ -100,7 +100,7 @@ Object 或 restricted token 单独只能管理生命周期/资源，不能提供
 
 ### 当前 Windows 候选实现边界
 
-仓库现在包含四层彼此约束的候选构件：
+仓库现在包含五层彼此约束的候选构件：
 
 1. `sandbox.py` 保留平台无关契约、只读探测和 fail-closed 公共边界；
    `WindowsSandboxBackend.run()` 仍拒绝执行。
@@ -108,24 +108,31 @@ Object 或 restricted token 单独只能管理生命周期/资源，不能提供
    manifest 与 SHA-256；Windows 遍历期间用不共享 delete 的目录/文件句柄
    阻止 junction、reparse point、硬链接和并发替换。
 3. `sandbox_guest.py` 与固定 C# runner 定义 canonical 请求/结果协议，绑定
-   run/request/instance 身份；子进程以 suspended 状态创建，STARTUPINFOEX
-   仅继承三个标准流句柄，分配带进程数、进程/Job 内存和
-   `KILL_ON_JOB_CLOSE` 的 Job 后才恢复。stdout/stderr 在读取时共享有界预算；
-   超时、取消和洪泛终止完整 Job，并查询 `ActiveProcesses == 0` 后才写入
-   `job_terminated=true`。
-4. `windows_sandbox.py` 只接受真实 `wsb.exe`、显式 UUID、固定 guest 命令和
+   run/request/instance 身份。可信 runner 保持原身份并独占中完整性结果目录；
+   不可信命令使用去除特权的 restricted primary token 和 Low Integrity，借助
+   `CreateProcessAsUser` 以 suspended 状态创建。STARTUPINFOEX 仅继承三个标准流
+   句柄，分配带进程数、进程/Job 内存和 `KILL_ON_JOB_CLOSE` 的 Job 后才恢复。
+   stdout/stderr 在读取时共享有界预算；超时、取消和洪泛终止完整 Job，并查询
+   `ActiveProcesses == 0` 后才写入 `job_terminated=true`。
+4. `sandbox_lease.py` 为 snapshot、control 和 export 建立有条目/字节上限的
+   执行期树租约。Windows 对每个既有对象持有不共享 write/delete 的真实句柄，
+   每次复核同时比较持有句柄和当前路径 identity；export 根在写入阶段只允许新增
+   结果但不能替换根，exporter 退出后立即封存唯一结果文件。新条目、身份变化、
+   超限或任一句柄关闭失败都会拒绝本次结果。
+5. `windows_sandbox.py` 只接受真实 `wsb.exe`、显式 UUID、固定 guest 命令和
    有界 `--raw` JSON；按 start → execute → late share → export → stop →
-   list-confirm → parse-result 顺序执行。结果在实例停止前不会读取；stop 后还
-   必须从 `wsb list --raw` 确认目标 UUID 消失。任一阶段、结果绑定、输入
-   manifest 复核或清理确认失败都会拒绝结果，没有宿主 subprocess fallback。
+   seal-result → stop → list-confirm → parse-result 顺序执行。结果在实例停止前
+   不会读取；stop 后还必须从 `wsb list --raw` 确认目标 UUID 消失，随后从已封存
+   的同一文件句柄读取。即使 stop 自身失败也仍独立尝试 list 确认；任一阶段、
+   结果绑定、租约、输入 manifest 复核或清理确认失败都会拒绝结果，没有宿主
+   subprocess fallback。
 
-这些构件的安全保证字符串仍是
-`candidate-job-only-not-certified`。固定 runner 与不可信子进程目前处于同一
-guest SYSTEM 身份，普通结果 SHA-256 不能阻止同身份进程写入或注入 runner；
-WMI、SCM、Task Scheduler 等 broker 路径也可能在 Job 之外创建进程。
-snapshot/control 的多次复扫能发现持续变化，但没有跨完整执行生命周期持有
-禁止 write/delete/rename 的句柄，因此仍不能排除临时替换后恢复的 ABA。
-这些是独立复核确认的接入前 P0，不会被 stop 后读取或更多单元测试降级。
+这些构件的安全保证字符串升级为
+`candidate-restricted-low-integrity-job-not-certified`。固定攻击集现在包括受限令牌/
+完整性级别、runner `OpenProcess` 写权限、结果/control 伪造、SCM、Task Scheduler、
+WMI broker、Job breakaway、聚合 Job 内存、guest tree ready 后取消，以及完整
+生命周期句柄租约。它们仍必须在一次性 Windows 11 Pro/Enterprise 24H2+ WSB
+runner 上重复执行并接受独立审查；本机单元测试和直接 Job 测试不能替代该证据。
 
 真实 `wsb.exe --raw` schema、网络隔离和资源终止语义也尚未在目标平台执行，
 没有可接受的独立安全审查记录。因此候选执行器没有接入
@@ -171,6 +178,12 @@ PID 和 network namespace 构造最小文件系统，并组合 seccomp。它是�
 - 输出洪泛、单进程/聚合 Job 内存和进程数量分别被限制，宿主工作区不发生
   修改，不能用先触发的单进程上限代替聚合 Job 内存证据。
 - junction/reparse point 与并发替换不能逃出快照。
+- 不可信命令实际处于 restricted/Low Integrity token，不能写 control/结果、以
+  写权限打开 runner，或通过 SCM、Task Scheduler、WMI 和 breakaway 在 Job 外
+  创建进程。
+- snapshot/control/export 的既有文件在完整执行期不能写入、删除、重命名或替换；
+  新条目与句柄关闭失败必须 fail-closed，结果必须从 stop 前封存的同一 identity
+  句柄读取。
 
 平台组件不可用时，普通 CI 可以 skip 这些真实隔离测试；安全发布任务必须
 提供 `SANDBOX_REQUIRED=1` 一类的强制模式，使 skip 变为失败。

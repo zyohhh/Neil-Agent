@@ -63,7 +63,7 @@ class RunCommandApprovalBinding(BaseModel):
     backend: Literal["windows-sandbox"] = WINDOWS_SANDBOX_BACKEND
     backend_version: Literal[1] = WINDOWS_SANDBOX_BACKEND_VERSION
     guest_protocol_version: Literal[2] = GUEST_PROTOCOL_VERSION
-    runner_version: Literal[2] = GUEST_RUNNER_VERSION
+    runner_version: Literal[3] = GUEST_RUNNER_VERSION
     network_policy: Literal["deny"] = NETWORK_POLICY
     workspace_policy: Literal["read-only-snapshot"] = WORKSPACE_POLICY
     environment_policy: Literal["fixed-empty"] = ENVIRONMENT_POLICY
