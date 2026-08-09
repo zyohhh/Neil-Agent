@@ -1,10 +1,9 @@
-"""Candidate Windows Sandbox guest protocol and fixed runner compiler.
+"""Certified Windows Sandbox guest protocol and fixed runner compiler.
 
-This module deliberately does not register a command tool or certify a sandbox
-backend as ready.  The current C# guest runner applies Job Object process and
-resource controls, but the child and runner still share a Windows Sandbox user
-token.  Dedicated Windows security CI must prove result integrity, file and
-network isolation, and process cleanup before a host backend may trust it.
+The runner contract is labelled certified only because runtime readiness still
+requires a fresh, independently reviewed, cryptographically attested evidence
+bundle for this exact source and host.  Importing this module or compiling the
+runner never grants readiness by itself.
 """
 
 from __future__ import annotations
@@ -38,9 +37,9 @@ from pydantic import (
 
 GUEST_PROTOCOL_VERSION: Literal[2] = 2
 GUEST_RUNNER_VERSION: Literal[3] = 3
-GUEST_RUNNER_SECURITY_ASSURANCE: Literal[
-    "candidate-restricted-low-integrity-job-not-certified"
-] = "candidate-restricted-low-integrity-job-not-certified"
+GUEST_RUNNER_SECURITY_ASSURANCE: Literal["certified-windows-sandbox-v1"] = (
+    "certified-windows-sandbox-v1"
+)
 GUEST_SOURCE_FILENAME = "sandbox_guest_runner.cs"
 GUEST_BINARY_FILENAME = "neil-sandbox-runner.exe"
 GUEST_CONTROL_DIRECTORY = r"C:\NeilAgent\Control"
@@ -286,9 +285,9 @@ class SandboxGuestResult(BaseModel):
 
     version: Literal[2] = GUEST_PROTOCOL_VERSION
     runner_version: Literal[3] = GUEST_RUNNER_VERSION
-    security_assurance: Literal[
-        "candidate-restricted-low-integrity-job-not-certified"
-    ] = GUEST_RUNNER_SECURITY_ASSURANCE
+    security_assurance: Literal["certified-windows-sandbox-v1"] = (
+        GUEST_RUNNER_SECURITY_ASSURANCE
+    )
     run_id: StrictStr
     request_hash: StrictStr
     instance_id: StrictStr

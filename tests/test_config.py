@@ -86,3 +86,18 @@ def test_sandbox_backend_rejects_unknown_values() -> None:
             deepseek_api_key="test-key",
             sandbox_backend="subprocess",  # type: ignore[arg-type]
         )
+
+
+def test_sandbox_certification_settings_load_as_explicit_pins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SANDBOX_CERTIFICATION_ROOT", str(tmp_path))
+    monkeypatch.setenv("SANDBOX_TRUSTED_REVIEWER", "independent-reviewer")
+    monkeypatch.setenv("SANDBOX_TRUSTED_REVIEW_SHA256", "a" * 64)
+
+    settings = Settings(_env_file=None, deepseek_api_key="test-key")
+
+    assert settings.sandbox_certification_root == tmp_path
+    assert settings.sandbox_trusted_reviewer == "independent-reviewer"
+    assert settings.sandbox_trusted_review_sha256 == "a" * 64

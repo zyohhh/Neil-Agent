@@ -42,7 +42,9 @@ def _certification(
         backend=backend,
         git_commit_sha="1" * 40,
         evidence_sha256="2" * 64,
+        provenance_sha256="a" * 64,
         independent_review_sha256="3" * 64,
+        certification_sha256="b" * 64,
         executable_sha256="4" * 64,
         runner_source_sha256="5" * 64,
         runner_binary_sha256="6" * 64,
@@ -189,7 +191,9 @@ def test_result_has_explicit_timeout_and_cancel_semantics() -> None:
         ("backend", ""),
         ("git_commit_sha", "1" * 39),
         ("evidence_sha256", "A" * 64),
+        ("provenance_sha256", "A" * 64),
         ("independent_review_sha256", "2" * 63),
+        ("certification_sha256", "B" * 64),
         ("executable_sha256", "not-a-digest"),
         ("runner_source_sha256", "3" * 65),
         ("runner_binary_sha256", ""),
@@ -209,7 +213,9 @@ def test_sandbox_certification_rejects_unbound_or_noncanonical_evidence(
         "backend": "windows-sandbox",
         "git_commit_sha": "1" * 40,
         "evidence_sha256": "2" * 64,
+        "provenance_sha256": "a" * 64,
         "independent_review_sha256": "3" * 64,
+        "certification_sha256": "b" * 64,
         "executable_sha256": "4" * 64,
         "runner_source_sha256": "5" * 64,
         "runner_binary_sha256": "6" * 64,
@@ -436,7 +442,7 @@ def test_detected_but_incomplete_backend_also_fails_closed(
         ),
     )
 
-    with pytest.raises(SandboxError, match="执行通道尚未完成"):
+    with pytest.raises(SandboxError, match="未通过当前运行时认证"):
         backend.run(RunSpec(executable=_absolute_executable(tmp_path)))
 
 

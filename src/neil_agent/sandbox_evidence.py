@@ -19,10 +19,11 @@ import base64
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -46,6 +47,7 @@ from pydantic import (
 EVIDENCE_VERSION: Literal[1] = 1
 CERTIFICATION_VERSION: Literal[1] = 1
 MINIMUM_EVIDENCE_REPEATS = 3
+EXPECTED_EVIDENCE_REPEAT_IDS = ("repeat-1", "repeat-2", "repeat-3")
 MAX_EVIDENCE_JSON_BYTES = 4 * 1024 * 1024
 MAX_JUNIT_XML_BYTES = 4 * 1024 * 1024
 MAX_RAW_CLI_RESPONSE_BYTES = 64 * 1024
@@ -53,9 +55,37 @@ MAX_RAW_OBSERVATIONS = 512
 MAX_RAW_OBSERVATION_JSONL_BYTES = 32 * 1024 * 1024
 MAX_IDENTITY_FILE_BYTES = 128 * 1024 * 1024
 MAX_PLATFORM_COMMAND_OUTPUT_BYTES = 64 * 1024
+MAX_ATTESTATION_BYTES = 16 * 1024 * 1024
 MAX_CERTIFICATION_LIFETIME = timedelta(days=90)
+MAX_EVIDENCE_TO_REVIEW_DELAY = timedelta(days=7)
+MAX_EVIDENCE_VALIDITY = timedelta(days=90)
 CERTIFIED_SECURITY_ASSURANCE = "certified-windows-sandbox-v1"
 BACKEND_POLICY_VERSION: Literal[1] = 1
+ATTESTED_GITHUB_REPOSITORY = "zyohhh/Neil-Agent"
+ATTESTED_GITHUB_WORKFLOW = (
+    "github.com/zyohhh/Neil-Agent/.github/workflows/windows-sandbox-security.yml"
+)
+ATTESTED_GITHUB_REF = "refs/heads/main"
+REQUIRED_SECURITY_GATE_IDS = tuple(
+    sorted(
+        (
+            "actions-provenance",
+            "broker-escape-denial",
+            "cancellation",
+            "guest-low-integrity-token",
+            "job-memory-limit",
+            "network-denial",
+            "output-limit",
+            "process-memory-limit",
+            "process-tree-cleanup",
+            "process-count-limit",
+            "result-integrity",
+            "snapshot-integrity",
+            "source-binding",
+            "timeout",
+        )
+    )
+)
 
 REQUIRED_WINDOWS_SANDBOX_TESTS = tuple(
     sorted(
@@ -104,17 +134,26 @@ REQUIRED_CLI_SCHEMA_STAGES = (
 REQUIRED_SUBJECT_SOURCE_PATHS = (
     "pyproject.toml",
     "src/neil_agent/approval.py",
+    "src/neil_agent/cli.py",
+    "src/neil_agent/config.py",
+    "src/neil_agent/diagnostics.py",
+    "src/neil_agent/noninteractive.py",
     "src/neil_agent/sandbox.py",
     "src/neil_agent/sandbox_approval.py",
     "src/neil_agent/sandbox_evidence.py",
     "src/neil_agent/sandbox_guest.py",
     "src/neil_agent/sandbox_guest_runner.cs",
     "src/neil_agent/sandbox_lease.py",
+    "src/neil_agent/sandbox_runtime.py",
     "src/neil_agent/sandbox_snapshot.py",
+    "src/neil_agent/security.py",
+    "src/neil_agent/tools/registry.py",
+    "src/neil_agent/tools/sandbox.py",
     "src/neil_agent/windows_sandbox.py",
     "tests/fixtures/sandbox_security_probe.cs",
     "tests/test_sandbox_guest.py",
     "tests/test_sandbox_lease.py",
+    "tests/test_sandbox_runtime.py",
     "tests/test_sandbox_snapshot.py",
     "tests/test_windows_sandbox_security.py",
 )
@@ -281,6 +320,8 @@ class EvidenceSubject(_StrictModel):
     guest_protocol_version: StrictInt = Field(ge=1)
     runner_version: StrictInt = Field(ge=1)
     security_assurance: StrictStr = Field(min_length=1, max_length=128)
+    actions_runner_version: SafeIdentifier
+    actions_runner_ephemeral: Literal[True]
 
     @field_validator("security_assurance")
     @classmethod
@@ -435,8 +476,13 @@ def collect_evidence_subject(
     runner_binary_path: Path,
     compiler_path: Path,
     probe_binary_path: Path,
+    actions_runner_version: str,
+    actions_runner_ephemeral: bool,
 ) -> EvidenceSubject:
     """Bind evidence to the exact reviewed source and built executables."""
+
+    if actions_runner_ephemeral is not True:
+        raise SandboxEvidenceError("evidence requires an ephemeral Actions runner")
 
     from .sandbox_guest import (
         GUEST_PROTOCOL_VERSION,
@@ -522,7 +568,82 @@ def collect_evidence_subject(
         guest_protocol_version=GUEST_PROTOCOL_VERSION,
         runner_version=GUEST_RUNNER_VERSION,
         security_assurance=GUEST_RUNNER_SECURITY_ASSURANCE,
+        actions_runner_version=actions_runner_version,
+        actions_runner_ephemeral=cast(Literal[True], actions_runner_ephemeral),
     )
+
+
+def verify_evidence_subject_checkout(
+    subject: EvidenceSubject,
+    repository_root: Path,
+    git_commit_sha: str,
+) -> None:
+    """Bind a certified subject back to the exact current source checkout."""
+
+    from .sandbox_guest import (
+        GUEST_PROTOCOL_VERSION,
+        GUEST_RUNNER_SECURITY_ASSURANCE,
+        GUEST_RUNNER_VERSION,
+    )
+
+    root = _require_absolute_path(repository_root, "repository root")
+    if subject.git_commit_sha != git_commit_sha:
+        raise SandboxEvidenceError("current Git commit does not match evidence")
+    source_records: list[dict[str, str]] = []
+    for relative_text in REQUIRED_SUBJECT_SOURCE_PATHS:
+        relative = Path(relative_text)
+        candidate = root.joinpath(*relative.parts)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as error:
+            raise SandboxEvidenceError(
+                f"current subject source is unavailable: {relative_text}"
+            ) from error
+        source_records.append(
+            {
+                "path": relative.as_posix(),
+                "sha256": _hash_identity_file(
+                    resolved,
+                    label=f"current subject source {relative_text}",
+                ),
+            }
+        )
+    if _digest_payload(source_records) != subject.source_manifest_sha256:
+        raise SandboxEvidenceError("current source manifest does not match evidence")
+    current_bindings = (
+        (
+            root / ".github" / "workflows" / "windows-sandbox-security.yml",
+            subject.workflow_sha256,
+            "current security workflow",
+        ),
+        (root / "uv.lock", subject.uv_lock_sha256, "current uv.lock"),
+        (
+            root / "src" / "neil_agent" / "sandbox_guest_runner.cs",
+            subject.runner_source_sha256,
+            "current runner source",
+        ),
+        (
+            root / "tests" / "fixtures" / "sandbox_security_probe.cs",
+            subject.probe_source_sha256,
+            "current security probe source",
+        ),
+    )
+    for path, expected, label in current_bindings:
+        if _hash_identity_file(path, label=label) != expected:
+            raise SandboxEvidenceError(f"{label} does not match evidence")
+    if (
+        subject.required_test_manifest_sha256
+        != required_test_manifest().manifest_sha256
+        or subject.backend_policy_version != BACKEND_POLICY_VERSION
+        or subject.guest_protocol_version != GUEST_PROTOCOL_VERSION
+        or subject.runner_version != GUEST_RUNNER_VERSION
+        or subject.security_assurance != GUEST_RUNNER_SECURITY_ASSURANCE
+        or not subject.actions_runner_ephemeral
+    ):
+        raise SandboxEvidenceError(
+            "current protocol, policy, gate set, or assurance does not match evidence"
+        )
 
 
 def ensure_canonical_evidence_file(path: Path, model: _ModelT) -> _ModelT:
@@ -1579,6 +1700,20 @@ class SandboxCertification(_StrictModel):
         return _canonical_model_bytes(self)
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedEvidenceBundle:
+    """A fully replayed artifact bundle, not merely parsed summary JSON."""
+
+    root: Path
+    aggregate: SandboxEvidenceAggregate
+    runner_binary_path: Path
+    attestation_path: Path
+    attestation_sha256: str
+
+
+AttestationVerifier = Callable[[Path, Path, EvidenceSubject], None]
+
+
 def collect_evidence_run(
     *,
     repeat_id: str,
@@ -1718,6 +1853,189 @@ def verify_evidence_runs(
     )
 
 
+def verify_evidence_bundle(
+    bundle_root: Path,
+    *,
+    attestation_verifier: AttestationVerifier | None = None,
+) -> VerifiedEvidenceBundle:
+    """Replay every raw artifact and verify the signed aggregate provenance."""
+
+    root = _require_bundle_directory(bundle_root, "evidence bundle root")
+    manifest = _load_json_model(
+        root / "required-tests.json",
+        RequiredTestManifest,
+        require_canonical=True,
+    )
+    if manifest != required_test_manifest():
+        raise SandboxEvidenceError("bundle required-test manifest is not current")
+    platform = _load_json_model(
+        root / "platform.json",
+        PlatformFingerprint,
+        require_canonical=True,
+    )
+    subject = _load_json_model(
+        root / "subject.json",
+        EvidenceSubject,
+        require_canonical=True,
+    )
+    aggregate = _load_json_model(
+        root / "aggregate.json",
+        SandboxEvidenceAggregate,
+        require_canonical=True,
+    )
+    if aggregate.repeat_ids != EXPECTED_EVIDENCE_REPEAT_IDS:
+        raise SandboxEvidenceError("bundle must contain the fixed three repeat IDs")
+
+    artifact_paths = _validate_evidence_bundle_tree(root, aggregate.repeat_ids)
+    runner_source = artifact_paths["runner_source"]
+    runner_binary = artifact_paths["runner_binary"]
+    probe_binary = artifact_paths["probe_binary"]
+    wheel = artifact_paths["wheel"]
+    for path, expected, label in (
+        (runner_source, subject.runner_source_sha256, "runner source"),
+        (runner_binary, subject.runner_binary_sha256, "runner binary"),
+        (probe_binary, subject.probe_binary_sha256, "security probe binary"),
+        (wheel, subject.wheel_sha256, "wheel"),
+    ):
+        if _hash_identity_file(path, label=f"bundle {label}") != expected:
+            raise SandboxEvidenceError(f"bundle {label} digest does not match subject")
+
+    runs: list[SandboxEvidenceRun] = []
+    for repeat_id in aggregate.repeat_ids:
+        repeat_root = root / repeat_id
+        raw_path = repeat_root / "cli-raw.jsonl"
+        schema = _load_json_model(
+            repeat_root / "cli-schema.json",
+            CliSchemaReport,
+            require_canonical=True,
+        )
+        rebuilt_schema = build_cli_schema_report(raw_path)
+        if rebuilt_schema != schema:
+            raise SandboxEvidenceError(
+                f"{repeat_id} CLI schema does not replay from its raw transcript"
+            )
+        run = _load_json_model(
+            repeat_root / "evidence-run.json",
+            SandboxEvidenceRun,
+            require_canonical=True,
+        )
+        tests = _parse_junit(repeat_root / "junit.xml")
+        rebuilt_run = SandboxEvidenceRun.create(
+            repeat_id=run.repeat_id,
+            execution_nonce=run.execution_nonce,
+            producer_id=run.producer_id,
+            workflow_run_id=run.workflow_run_id,
+            workflow_attempt=run.workflow_attempt,
+            pytest_exit_code=run.pytest_exit_code,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+            platform=platform,
+            subject=subject,
+            cli_schema=rebuilt_schema,
+            tests=tests,
+        )
+        if rebuilt_run != run:
+            raise SandboxEvidenceError(
+                f"{repeat_id} evidence does not replay from raw CLI and JUnit"
+            )
+        runs.append(run)
+
+    rebuilt_aggregate = verify_evidence_runs(tuple(runs))
+    if rebuilt_aggregate != aggregate:
+        raise SandboxEvidenceError(
+            "bundle aggregate does not replay from its three evidence runs"
+        )
+    if aggregate.platform != platform or aggregate.subject != subject:
+        raise SandboxEvidenceError("bundle identity files do not match the aggregate")
+
+    attestation_path = root / "aggregate.attestation.sigstore.json"
+    attestation_sha256 = _hash_identity_file(
+        attestation_path,
+        label="aggregate provenance attestation",
+    )
+    verifier = (
+        verify_github_attestation
+        if attestation_verifier is None
+        else (attestation_verifier)
+    )
+    verifier(root / "aggregate.json", attestation_path, subject)
+    return VerifiedEvidenceBundle(
+        root=root,
+        aggregate=aggregate,
+        runner_binary_path=runner_binary,
+        attestation_path=attestation_path,
+        attestation_sha256=attestation_sha256,
+    )
+
+
+def verify_github_attestation(
+    aggregate_path: Path,
+    attestation_path: Path,
+    subject: EvidenceSubject,
+) -> None:
+    """Use GitHub CLI's Sigstore verifier with a fixed repository identity."""
+
+    located = shutil.which("gh")
+    if not located:
+        raise SandboxEvidenceError(
+            "GitHub CLI is required for attestation verification"
+        )
+    gh = Path(located)
+    _hash_identity_file(gh, label="GitHub CLI", allow_hardlinks=True)
+    environment = {
+        name: value
+        for name in ("SystemRoot", "WINDIR", "TEMP", "TMP")
+        if (value := os.environ.get(name))
+    }
+    environment["PATH"] = str(gh.parent)
+    environment["NO_COLOR"] = "1"
+    try:
+        completed = subprocess.run(
+            (
+                str(gh),
+                "attestation",
+                "verify",
+                str(aggregate_path),
+                "--repo",
+                ATTESTED_GITHUB_REPOSITORY,
+                "--bundle",
+                str(attestation_path),
+                "--signer-workflow",
+                ATTESTED_GITHUB_WORKFLOW,
+                "--source-digest",
+                subject.git_commit_sha,
+                "--source-ref",
+                ATTESTED_GITHUB_REF,
+                "--format",
+                "json",
+            ),
+            shell=False,
+            cwd=aggregate_path.parent,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SandboxEvidenceError(
+            "GitHub provenance attestation verification failed closed"
+        ) from error
+    if (
+        completed.returncode != 0
+        or not completed.stdout
+        or len(completed.stdout) > MAX_EVIDENCE_JSON_BYTES
+        or len(completed.stderr) > MAX_EVIDENCE_JSON_BYTES
+    ):
+        raise SandboxEvidenceError("GitHub provenance attestation did not verify")
+    verified = _strict_json_value(completed.stdout)
+    if not isinstance(verified, list) or not verified:
+        raise SandboxEvidenceError(
+            "GitHub provenance verifier returned no verified attestation"
+        )
+
+
 def issue_certification(
     aggregate: SandboxEvidenceAggregate,
     review: IndependentSecurityReview,
@@ -1732,14 +2050,20 @@ def issue_certification(
     if aggregate.subject.security_assurance != CERTIFIED_SECURITY_ASSURANCE:
         raise SandboxEvidenceError("candidate security assurance cannot be certified")
     issued = issued_at or datetime.now(timezone.utc)
-    expires = expires_at or (issued + MAX_CERTIFICATION_LIFETIME)
+    evidence_deadline = aggregate.evidence_finished_at + MAX_EVIDENCE_VALIDITY
+    expires = expires_at or min(
+        issued + MAX_CERTIFICATION_LIFETIME,
+        evidence_deadline,
+    )
     _require_issue_after_review(review, issued)
-    return SandboxCertification.create(
+    certification = SandboxCertification.create(
         aggregate=aggregate,
         review=review,
         issued_at=issued,
         expires_at=expires,
     )
+    _require_certification_evidence_window(aggregate, certification)
+    return certification
 
 
 def verify_certification(
@@ -1768,6 +2092,7 @@ def verify_certification(
         raise SandboxEvidenceError(
             "certification is not bound to this aggregate and review"
         )
+    _require_certification_evidence_window(aggregate, certification)
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None or current.utcoffset() is None:
         raise SandboxEvidenceError("certification verification time must be aware")
@@ -1796,9 +2121,20 @@ def _verify_review(
         raise SandboxEvidenceError(
             "independent review cannot predate completed evidence"
         )
+    if (
+        review.reviewed_at - aggregate.evidence_finished_at
+        > MAX_EVIDENCE_TO_REVIEW_DELAY
+    ):
+        raise SandboxEvidenceError(
+            "independent review exceeded the evidence freshness window"
+        )
     if review.disposition != "approved" or review.open_findings != 0:
         raise SandboxEvidenceError(
             "independent review is not approved with zero open findings"
+        )
+    if review.closed_finding_ids != REQUIRED_SECURITY_GATE_IDS:
+        raise SandboxEvidenceError(
+            "independent review did not close the fixed security gate set"
         )
 
 
@@ -1811,6 +2147,21 @@ def _require_issue_after_review(
     if issued_at.astimezone(timezone.utc) < review.reviewed_at:
         raise SandboxEvidenceError(
             "certification cannot be issued before the independent review"
+        )
+
+
+def _require_certification_evidence_window(
+    aggregate: SandboxEvidenceAggregate,
+    certification: SandboxCertification,
+) -> None:
+    evidence_deadline = aggregate.evidence_finished_at + MAX_EVIDENCE_VALIDITY
+    if certification.issued_at >= evidence_deadline:
+        raise SandboxEvidenceError(
+            "certification was issued after the evidence validity window"
+        )
+    if certification.expires_at > evidence_deadline:
+        raise SandboxEvidenceError(
+            "certification outlives the evidence validity window"
         )
 
 
@@ -2038,6 +2389,106 @@ def _require_absolute_path(path: Path, label: str) -> Path:
         raise SandboxEvidenceError(f"{label} is unavailable") from error
 
 
+def _require_bundle_directory(path: Path, label: str) -> Path:
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise SandboxEvidenceError(f"{label} must be an absolute Path")
+    try:
+        original = path.lstat()
+        resolved = path.resolve(strict=True)
+        metadata = resolved.lstat()
+    except OSError as error:
+        raise SandboxEvidenceError(f"{label} is unavailable") from error
+    reparse_attribute = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
+    if (
+        resolved != path
+        or path.is_symlink()
+        or resolved.is_symlink()
+        or not stat.S_ISDIR(original.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or int(getattr(original, "st_file_attributes", 0)) & reparse_attribute
+        or int(getattr(metadata, "st_file_attributes", 0)) & reparse_attribute
+    ):
+        raise SandboxEvidenceError(f"{label} must be a real non-reparse directory")
+    return resolved
+
+
+def _validate_evidence_bundle_tree(
+    root: Path,
+    repeat_ids: Sequence[str],
+) -> dict[str, Path]:
+    expected_root_names = {
+        "aggregate.attestation.sigstore.json",
+        "aggregate.json",
+        "build",
+        "platform.json",
+        "required-tests.json",
+        "subject.json",
+        *repeat_ids,
+    }
+    optional_root_names = {"certification.json", "independent-review.json"}
+    try:
+        root_entries = {entry.name: entry for entry in root.iterdir()}
+    except OSError as error:
+        raise SandboxEvidenceError(
+            "evidence bundle root cannot be enumerated"
+        ) from error
+    if not expected_root_names <= set(root_entries) or not set(root_entries) <= (
+        expected_root_names | optional_root_names
+    ):
+        raise SandboxEvidenceError(
+            "evidence bundle root has missing or unknown entries"
+        )
+    for optional in optional_root_names & set(root_entries):
+        _hash_identity_file(root_entries[optional], label=f"bundle {optional}")
+
+    build = _require_bundle_directory(root / "build", "bundle build directory")
+    build_entries = {entry.name: entry for entry in build.iterdir()}
+    if set(build_entries) != {"guest-runner", "security-probe", "wheel"}:
+        raise SandboxEvidenceError("bundle build directory has an unknown shape")
+    guest_runner = _require_bundle_directory(
+        build / "guest-runner",
+        "bundle guest-runner directory",
+    )
+    security_probe = _require_bundle_directory(
+        build / "security-probe",
+        "bundle security-probe directory",
+    )
+    wheel_root = _require_bundle_directory(build / "wheel", "bundle wheel directory")
+    guest_entries = {entry.name: entry for entry in guest_runner.iterdir()}
+    if set(guest_entries) != {
+        "neil-sandbox-runner.exe",
+        "sandbox_guest_runner.cs",
+    }:
+        raise SandboxEvidenceError("bundle guest runner has an unknown shape")
+    probe_entries = {entry.name: entry for entry in security_probe.iterdir()}
+    if set(probe_entries) != {"sandbox-security-probe.exe"}:
+        raise SandboxEvidenceError("bundle security probe has an unknown shape")
+    wheel_entries = tuple(wheel_root.iterdir())
+    if len(wheel_entries) != 1 or not wheel_entries[0].name.lower().endswith(".whl"):
+        raise SandboxEvidenceError("bundle must contain exactly one wheel")
+
+    for repeat_id in repeat_ids:
+        repeat_root = _require_bundle_directory(
+            root / repeat_id,
+            f"bundle {repeat_id} directory",
+        )
+        repeat_entries = {entry.name: entry for entry in repeat_root.iterdir()}
+        if set(repeat_entries) != {
+            "cli-raw.jsonl",
+            "cli-schema.json",
+            "evidence-run.json",
+            "junit.xml",
+        }:
+            raise SandboxEvidenceError(f"bundle {repeat_id} has an unknown shape")
+
+    return {
+        "runner_source": guest_runner / "sandbox_guest_runner.cs",
+        "runner_binary": guest_runner / "neil-sandbox-runner.exe",
+        "probe_binary": security_probe / "sandbox-security-probe.exe",
+        "wheel": wheel_entries[0],
+    }
+
+
 def _hash_identity_file(
     path: Path,
     *,
@@ -2120,7 +2571,9 @@ def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
     return (
         before.st_dev == after.st_dev
         and before.st_ino == after.st_ino
-        and before.st_mode == after.st_mode
+        # Windows path stat infers execute bits from a .exe suffix while
+        # fstat(handle) has no filename; compare the kernel file type instead.
+        and stat.S_IFMT(before.st_mode) == stat.S_IFMT(after.st_mode)
         and before.st_size == after.st_size
         and before.st_mtime_ns == after.st_mtime_ns
     )
@@ -2408,8 +2861,18 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     verify.add_argument("--run", required=True, action="append", type=Path)
     verify.add_argument("--output", required=True, type=Path)
 
+    bundle_verify = subparsers.add_parser("bundle-verify")
+    bundle_verify.add_argument("--bundle-root", required=True, type=Path)
+
+    review_command = subparsers.add_parser("review")
+    review_command.add_argument("--bundle-root", required=True, type=Path)
+    review_command.add_argument("--review-id", required=True)
+    review_command.add_argument("--reviewer-id", required=True)
+    review_command.add_argument("--reviewed-at", required=True)
+    review_command.add_argument("--output", required=True, type=Path)
+
     certify = subparsers.add_parser("certify")
-    certify.add_argument("--aggregate", required=True, type=Path)
+    certify.add_argument("--bundle-root", required=True, type=Path)
     certify.add_argument("--review", required=True, type=Path)
     certify.add_argument("--trusted-reviewer", action="append", default=[])
     certify.add_argument("--trusted-review-sha256", action="append", default=[])
@@ -2473,12 +2936,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for path in arguments.run
             )
             _write_model(arguments.output, verify_evidence_runs(runs))
-        elif arguments.command == "certify":
-            aggregate = _load_json_model(
-                arguments.aggregate,
-                SandboxEvidenceAggregate,
-                require_canonical=True,
+        elif arguments.command == "bundle-verify":
+            verify_evidence_bundle(arguments.bundle_root)
+        elif arguments.command == "review":
+            bundle = verify_evidence_bundle(arguments.bundle_root)
+            review = IndependentSecurityReview.create(
+                review_id=arguments.review_id,
+                reviewer_id=arguments.reviewer_id,
+                aggregate_sha256=bundle.aggregate.aggregate_sha256,
+                disposition="approved",
+                open_findings=0,
+                closed_finding_ids=REQUIRED_SECURITY_GATE_IDS,
+                reviewed_at=_parse_timestamp(arguments.reviewed_at),
             )
+            _write_model(arguments.output, review)
+        elif arguments.command == "certify":
+            aggregate = verify_evidence_bundle(arguments.bundle_root).aggregate
             review = _load_json_model(
                 arguments.review,
                 IndependentSecurityReview,

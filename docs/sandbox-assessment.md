@@ -201,16 +201,24 @@ skip、xfail、xpass、error 或 failure 都会使任务失败。该 runner 应�
 一次性、无仓库外凭据的 Windows 11 Pro/Enterprise 24H2 或更高版本机器；
 不能把普通开发机上的 skip 结果当作发布证据。
 
-聚合证据仍不是认证。认证必须绑定独立 reviewer、零开放问题、显式 trust
-pins 和有效期；默认空 trust 配置必然拒绝。运行时 `ready` 也不能由布尔值
-打开，而必须同时满足本机能力与经验证认证。当前 probe 从不注入认证引用。
+aggregate 随后由固定 commit 的 `actions/attest` 生成 SLSA/Sigstore provenance；
+上传前 verifier 会从三轮 raw JSONL、真实 JUnit、schema、run、构建产物重新
+推导 aggregate，并验证固定 repository/workflow/ref/commit。artifact 存在或
+上传成功仍不等于认证。
+
+认证必须绑定独立 reviewer、固定十四项 gate 全部关闭、零开放问题、显式 trust
+pins 和有效期；review 最晚在证据完成后 7 天内完成，证书不能晚于证据完成后
+90 天。默认空 trust 配置必然拒绝。运行时 `ready` 不能由布尔值打开：verifier
+还会将完整 bundle 与当前 commit、源码 manifest、OS/WSB/runner/compiler hashes
+及协议版本重新绑定。只有全部通过才向 `/doctor` 投影 ready 并注册需要逐次审批
+的 `run_command`；该工具只接受相对 `.exe` 和 argv，所有 guest 修改丢弃。
 
 ## 开放通用命令前的硬门槛
 
-1. 至少一个 Windows 或 Linux 执行后端在目标平台通过上述真实隔离测试，
-   并有独立安全审查记录。
+1. Windows Sandbox 后端必须使用上述目标平台 artifact、Sigstore provenance、
+   独立审查 pin 和未过期认证；没有这些材料时工具保持不存在。
 2. 审批预览绑定真实可执行文件、argv、逻辑 cwd、后端/策略版本、网络与
-   文件权限、资源上限、runner 源码/二进制和确定性快照摘要；host 必须从
+   文件权限、资源上限、认证摘要、runner 源码/二进制和确定性快照摘要；host 必须从
    实际 guest request 重新计算 binding，而不是信任调用者提供的摘要。任一
    变化都要求重新批准。
 3. 通用能力只接受 argv，不接受 shell 字符串；只在交互审批或非交互 v2

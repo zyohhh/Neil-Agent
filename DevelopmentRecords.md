@@ -1231,3 +1231,83 @@ CLI 展示修改预览并等待用户输入 y/yes
    运行时能力；随后才接入 backend 与 `/doctor`。
    以上门禁全部通过后再注册只接受 executable + argv、丢弃全部 guest 修改的
    最小 `run_command`；否则继续保持固定命令白名单。
+
+## 2026-08-09：Windows Sandbox 证据重放、运行时认证与最小命令接入
+
+### 完整证据与供应链 provenance
+
+- 强制 workflow 继续在受保护 `main`、专用 Windows x64 environment 上串行执行
+  三轮同构建测试；新增受保护的 `SANDBOX_ACTIONS_RUNNER_VERSION` 和
+  `SANDBOX_ACTIONS_RUNNER_EPHEMERAL=1`，runner 版本与一次性声明进入 subject，
+  缺失或非一次性配置直接失败。
+- 使用固定 commit 的 `actions/attest` 为 replay-bound `aggregate.json` 生成
+  SLSA/Sigstore provenance，并把本地 bundle 保存为
+  `aggregate.attestation.sigstore.json`。上传前调用 GitHub CLI，严格校验固定
+  repository、signer workflow、`main` ref 与 source commit；attestation 失败
+  不能进入认证，但 `always()` artifact 仍保留失败现场。
+- 新增完整 `bundle-verify`：不信任 summary，而是从三轮 `cli-raw.jsonl` 重建
+  schema、从真实 JUnit 重建测试结果、重建每个 evidence run 和 aggregate；同时
+  重新哈希唯一 wheel、runner 源码/二进制与 security probe。未知目录/文件、
+  symlink/reparse point、hardlink、非 canonical JSON、raw/JUnit 篡改和 identity
+  混用全部 fail-closed。
+- 修正 Windows 对 `.exe` 的 path `stat` 会按后缀推导 execute bits、但
+  `fstat(handle)` 不会推导造成的身份误判：稳定性比较改为比较内核文件类型，
+  保留 device/inode/size/mtime 绑定。
+
+### 独立审查、新鲜度与运行时能力
+
+- 固定十四项 security gate 成为认证契约；approved review 必须关闭完整、精确的
+  gate 集，reviewer 不能是 evidence producer，reviewer ID 与 review digest
+  必须通过仓库外渠道 pin。新增 `review` CLI，生成 review 前也会完整重放 bundle
+  和 Sigstore attestation。
+- evidence 完成到独立 review 的最大间隔固定为 7 天；证书自身最长 90 天，并且
+  绝不能晚于原始 evidence 完成后 90 天。`certify` 改为接收 bundle root，在签发
+  前重新执行完整重放，不再只信任单独传入的 aggregate。
+- 新增 `sandbox_runtime.py`，它是 production backend 获得 runtime
+  certification 的唯一映射路径。每次执行前重新验证 raw bundle、attestation、
+  pinned review、证书时效，并与当前 Git commit、受控源码 manifest、Windows
+  build/edition、WSB feature/Authenticode/file hash、runner source/binary、C#
+  compiler、framework reference、policy/protocol 和固定 gate 集逐项比较。
+- runtime 配置要求同时提供 `SANDBOX_CERTIFICATION_ROOT`、
+  `SANDBOX_TRUSTED_REVIEWER` 与 `SANDBOX_TRUSTED_REVIEW_SHA256`。缺失配置报告
+  `certification_required`；存在但重放、签名或当前宿主绑定失败则报告
+  `certification_invalid`，两者都不能变成 ready。
+
+### backend、doctor 与最小 run_command
+
+- `WindowsSandboxBackend` 已接入认证后的 `WsbHostExecutor`：为每次调用重新建立
+  approval binding、guest request、只读 snapshot/control 与独立 transport，
+  使用固定 runner 执行并映射有界 terminal result。任一准备、执行、stop/list、
+  句柄租约或结果验证失败都拒绝结果，不存在宿主进程回退。
+- `/doctor` 和 Security Shield 现在能区分缺少认证、认证无效与全部 gate ready；
+  ready 仍由 certification 加强制能力组合推导，不能由调用方布尔值打开。
+- 新增条件注册的 `run_command`。只有启动时 backend 已 ready 才进入工具表；
+  非交互 read-only/v1 模式始终不注册。工具只接受工作区相对 `.exe` 与 argv，
+  固定逻辑 cwd、禁网、空 guest 环境和过滤后的只读快照，逐次 approval preview
+  绑定 snapshot/认证/runner/协议/资源上限，执行前再次比较 preview；认证轮换
+  会令旧批准失效，所有 guest 修改统一丢弃。
+- 当前开发机仍没有可用 `wsb.exe`，因此没有生成或伪造 aggregate、review、
+  certification 或 ready 状态；目标 runner 实际运行与独立 review 是部署/发布
+  操作门禁。没有这些真实材料时，本机继续只暴露原有固定命令白名单。
+
+### 验证
+
+- Ruff lint 与全仓库 75 个文件格式检查通过；mypy 对 39 个源文件检查通过。
+- pytest 全量为 576 项通过、19 项目标平台条件跳过；新增完整 bundle 成功重放、
+  raw 篡改拒绝、7 天 review/90 天 evidence 边界、精确 gate 集、runtime 缺省拒绝、
+  backend 结果映射和 `run_command` 条件注册/丢弃修改回归。
+- 安全 workflow 的两个 PowerShell run block 经 AST 解析无语法错误；5 个内置
+  离线评测全部通过。全部验证未调用真实 DeepSeek API，目标 WSB skip 不计为
+  认证。
+
+## 下一阶段计划
+
+1. 设计受控 guest 产物导出协议：只允许调用前声明的相对输出路径，生成有界、
+   自哈希的 export manifest，拒绝 reparse point、hardlink、敏感文件、未知新增项
+   和超限内容；首步只预览，不写回工作区。
+2. 在现有文件检查点机制上实现二次批准的导入事务：把 certification、run/result、
+   export manifest、逐文件 hash 与 bounded diff 全部纳入 approval binding，批准后
+   再复核并原子应用；失败时完整回滚，不允许覆盖审批后变化的文件。
+3. 将导入流程接入非交互 v2 request/approve、metadata-only audit 与离线评测，
+   覆盖审批重放、证书轮换、工作区竞态、部分写入失败和恢复一致性；v1 与
+   read-only 模式继续禁止导入。

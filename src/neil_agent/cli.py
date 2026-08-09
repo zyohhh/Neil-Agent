@@ -53,7 +53,8 @@ from .session import (
     normalize_session_title,
 )
 from .task import TaskTracker
-from .tools import FileSystemTools, ShellTools, ToolRegistry
+from .sandbox import SandboxCapabilities, WindowsSandboxBackend
+from .tools import FileSystemTools, SandboxCommandTools, ShellTools, ToolRegistry
 
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
@@ -326,6 +327,13 @@ def run(console: Console) -> None:
         max_output_chars=settings.max_command_output_chars,
     )
     shell_tools.register(registry)
+    if settings.sandbox_backend == "windows-sandbox":
+        SandboxCommandTools(
+            filesystem_tools.root,
+            _windows_sandbox_backend(settings),
+            timeout_seconds=settings.command_timeout,
+            max_output_bytes=settings.max_command_output_chars,
+        ).register_if_ready(registry)
     renderer = TerminalRenderer(console)
     task_tracker = TaskTracker(change_handler=renderer.show_plan)
     task_tracker.register(registry)
@@ -450,6 +458,11 @@ def run(console: Console) -> None:
                     filesystem_tools.root,
                     audit_log_enabled=settings.audit_log_enabled,
                     sandbox_backend=settings.sandbox_backend,
+                    sandbox_probe=(
+                        _windows_sandbox_backend(settings).probe
+                        if settings.sandbox_backend == "windows-sandbox"
+                        else None
+                    ),
                     audit_probe=audit_sink.inspect if audit_sink is not None else None,
                 )
             continue
@@ -880,6 +893,7 @@ def _show_permissions(
     *,
     audit_log_enabled: bool = False,
     sandbox_backend: str = "disabled",
+    sandbox_probe: Callable[[], SandboxCapabilities] | None = None,
     audit_probe: Callable[[], AuditLogStatus] | None = None,
 ) -> None:
     """Explain enforceable local boundaries without exposing hidden prompts."""
@@ -891,6 +905,7 @@ def _show_permissions(
         },
         sandbox_backend=sandbox_backend,
         audit_enabled=audit_log_enabled,
+        sandbox_probe=sandbox_probe,
         audit_probe=audit_probe,
     )
 
@@ -938,7 +953,20 @@ def _observe_security(
         },
         sandbox_backend=settings.sandbox_backend,
         audit_enabled=settings.audit_log_enabled,
+        sandbox_probe=(
+            _windows_sandbox_backend(settings).probe
+            if settings.sandbox_backend == "windows-sandbox"
+            else None
+        ),
         audit_probe=audit_probe,
+    )
+
+
+def _windows_sandbox_backend(settings: Settings) -> WindowsSandboxBackend:
+    return WindowsSandboxBackend(
+        certification_root=settings.sandbox_certification_root,
+        trusted_reviewer=settings.sandbox_trusted_reviewer,
+        trusted_review_sha256=settings.sandbox_trusted_review_sha256,
     )
 
 

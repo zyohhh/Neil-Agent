@@ -1,7 +1,7 @@
-"""Stable approval identity for a future shell-free sandbox command tool.
+"""Stable approval identity for the shell-free sandbox command tool.
 
-This module only models and renders an approval.  It deliberately does not
-register ``run_command`` or make the Windows Sandbox backend ready.
+This module only models and renders approvals; readiness still comes solely
+from the runtime evidence verifier.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ class RunCommandApprovalBinding(BaseModel):
     argv: tuple[StrictStr, ...] = Field(max_length=MAX_ARGUMENTS)
     logical_cwd: StrictStr = "."
     snapshot_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    certification_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     runner_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     runner_binary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     backend: Literal["windows-sandbox"] = WINDOWS_SANDBOX_BACKEND
@@ -149,6 +150,7 @@ class RunCommandApprovalBinding(BaseModel):
                 f"Argv (canonical JSON): {argv_json}",
                 f"Logical cwd: {cwd_json}",
                 f"Snapshot manifest SHA-256: {self.snapshot_manifest_sha256}",
+                f"Certification SHA-256: {self.certification_sha256}",
                 f"Runner source SHA-256: {self.runner_source_sha256}",
                 f"Runner binary SHA-256: {self.runner_binary_sha256}",
                 f"Approval binding version: {self.version}",

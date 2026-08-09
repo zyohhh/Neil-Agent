@@ -15,6 +15,7 @@ from neil_agent.sandbox_evidence import (
     CERTIFIED_SECURITY_ASSURANCE,
     MINIMUM_EVIDENCE_REPEATS,
     REQUIRED_CLI_SCHEMA_STAGES,
+    REQUIRED_SECURITY_GATE_IDS,
     REQUIRED_WINDOWS_SANDBOX_TESTS,
     CliExecutionIdentity,
     CliSchemaEntry,
@@ -36,6 +37,7 @@ from neil_agent.sandbox_evidence import (
     main,
     required_test_manifest,
     verify_certification,
+    verify_evidence_bundle,
     verify_evidence_runs,
 )
 from neil_agent.windows_sandbox import (
@@ -92,6 +94,8 @@ def _subject(
         guest_protocol_version=1,
         runner_version=1,
         security_assurance=assurance,
+        actions_runner_version="2.331.0",
+        actions_runner_ephemeral=True,
     )
 
 
@@ -272,7 +276,7 @@ def _review(
         aggregate_sha256=aggregate.aggregate_sha256,
         disposition=disposition,  # type: ignore[arg-type]
         open_findings=open_findings,
-        closed_finding_ids=("SEC-1", "SEC-2"),
+        closed_finding_ids=REQUIRED_SECURITY_GATE_IDS,
         reviewed_at=reviewed_at or (_START + timedelta(hours=1)),
     )
 
@@ -308,6 +312,82 @@ def _write_junit(
         f"{''.join(cases)}</testsuite></testsuites>",
         encoding="utf-8",
     )
+
+
+def _write_canonical(path: Path, model: object) -> None:
+    model_dump = getattr(model, "model_dump")
+    path.write_bytes(
+        json.dumps(
+            model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
+def _build_complete_bundle(root: Path) -> None:
+    root.mkdir()
+    build = root / "build"
+    guest = build / "guest-runner"
+    probe = build / "security-probe"
+    wheel = build / "wheel"
+    guest.mkdir(parents=True)
+    probe.mkdir()
+    wheel.mkdir()
+    runner_source = b"runner-source"
+    runner_binary = b"runner-binary"
+    probe_binary = b"probe-binary"
+    wheel_binary = b"wheel-binary"
+    (guest / "sandbox_guest_runner.cs").write_bytes(runner_source)
+    (guest / "neil-sandbox-runner.exe").write_bytes(runner_binary)
+    (probe / "sandbox-security-probe.exe").write_bytes(probe_binary)
+    (wheel / "neil_agent.whl").write_bytes(wheel_binary)
+    subject_payload = _subject(
+        assurance=CERTIFIED_SECURITY_ASSURANCE,
+    ).model_dump(mode="python")
+    subject_payload.update(
+        {
+            "wheel_sha256": sha256(wheel_binary).hexdigest(),
+            "runner_source_sha256": sha256(runner_source).hexdigest(),
+            "runner_binary_sha256": sha256(runner_binary).hexdigest(),
+            "probe_binary_sha256": sha256(probe_binary).hexdigest(),
+        }
+    )
+    subject = EvidenceSubject.model_validate(subject_payload)
+    platform = _platform()
+    _write_canonical(root / "required-tests.json", required_test_manifest())
+    _write_canonical(root / "platform.json", platform)
+    _write_canonical(root / "subject.json", subject)
+    runs = []
+    for index in range(1, 4):
+        repeat = root / f"repeat-{index}"
+        repeat.mkdir()
+        raw = repeat / "cli-raw.jsonl"
+        _record_complete_raw_cli_run(raw, index=index)
+        schema = build_cli_schema_report(raw)
+        junit = repeat / "junit.xml"
+        _write_junit(junit)
+        run = collect_evidence_run(
+            repeat_id=f"repeat-{index}",
+            execution_nonce=f"{index:032x}",
+            producer_id="github-actions:zyohhh/Neil-Agent",
+            workflow_run_id=100,
+            workflow_attempt=1,
+            pytest_exit_code=0,
+            started_at=_START + timedelta(minutes=index),
+            finished_at=_START + timedelta(minutes=index, seconds=30),
+            platform=platform,
+            subject=subject,
+            cli_schema=schema,
+            junit_path=junit,
+        )
+        _write_canonical(repeat / "cli-schema.json", schema)
+        _write_canonical(repeat / "evidence-run.json", run)
+        runs.append(run)
+    _write_canonical(root / "aggregate.json", verify_evidence_runs(tuple(runs)))
+    (root / "aggregate.attestation.sigstore.json").write_bytes(b"{}")
 
 
 def _collect_junit(junit_path: Path) -> OutcomeSummary:
@@ -976,6 +1056,26 @@ def test_evidence_producer_cannot_approve_its_own_aggregate() -> None:
         issue_certification(aggregate, review, trust_pins=pins)
 
 
+def test_review_must_close_the_exact_fixed_gate_set() -> None:
+    aggregate = _aggregate(assurance=CERTIFIED_SECURITY_ASSURANCE)
+    review = IndependentSecurityReview.create(
+        review_id="e" * 32,
+        reviewer_id="security-reviewer",
+        aggregate_sha256=aggregate.aggregate_sha256,
+        disposition="approved",
+        open_findings=0,
+        closed_finding_ids=REQUIRED_SECURITY_GATE_IDS[:-1],
+        reviewed_at=_START + timedelta(hours=1),
+    )
+    pins = ReviewTrustPins(
+        reviewer_ids=frozenset({review.reviewer_id}),
+        review_sha256s=frozenset({review.review_sha256}),
+    )
+
+    with pytest.raises(SandboxEvidenceError, match="fixed security gate set"):
+        issue_certification(aggregate, review, trust_pins=pins)
+
+
 def test_exact_pinned_independent_review_can_issue_and_verify() -> None:
     aggregate = _aggregate(assurance=CERTIFIED_SECURITY_ASSURANCE)
     review = _review(aggregate)
@@ -1069,6 +1169,82 @@ def test_independent_review_cannot_predate_completed_evidence() -> None:
             trust_pins=pins,
             issued_at=aggregate.evidence_finished_at + timedelta(hours=1),
             expires_at=aggregate.evidence_finished_at + timedelta(days=1),
+        )
+
+
+def test_independent_review_must_be_completed_within_seven_days() -> None:
+    aggregate = _aggregate(assurance=CERTIFIED_SECURITY_ASSURANCE)
+    review = _review(
+        aggregate,
+        reviewed_at=aggregate.evidence_finished_at + timedelta(days=7, seconds=1),
+    )
+    pins = ReviewTrustPins(
+        reviewer_ids=frozenset({review.reviewer_id}),
+        review_sha256s=frozenset({review.review_sha256}),
+    )
+
+    with pytest.raises(SandboxEvidenceError, match="freshness window"):
+        issue_certification(
+            aggregate,
+            review,
+            trust_pins=pins,
+            issued_at=review.reviewed_at,
+            expires_at=review.reviewed_at + timedelta(days=1),
+        )
+
+
+def test_certification_cannot_outlive_underlying_evidence() -> None:
+    aggregate = _aggregate(assurance=CERTIFIED_SECURITY_ASSURANCE)
+    review = _review(aggregate)
+    pins = ReviewTrustPins(
+        reviewer_ids=frozenset({review.reviewer_id}),
+        review_sha256s=frozenset({review.review_sha256}),
+    )
+
+    with pytest.raises(SandboxEvidenceError, match="outlives"):
+        issue_certification(
+            aggregate,
+            review,
+            trust_pins=pins,
+            issued_at=review.reviewed_at,
+            expires_at=aggregate.evidence_finished_at + timedelta(days=90, seconds=1),
+        )
+
+
+def test_complete_bundle_replays_raw_junit_and_attested_aggregate(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / "bundle").resolve()
+    _build_complete_bundle(root)
+    verified_calls: list[tuple[Path, Path]] = []
+
+    verified = verify_evidence_bundle(
+        root,
+        attestation_verifier=lambda aggregate, attestation, subject: (
+            verified_calls.append((aggregate, attestation))
+        ),
+    )
+
+    assert verified.aggregate.repeat_ids == ("repeat-1", "repeat-2", "repeat-3")
+    assert verified.runner_binary_path.name == "neil-sandbox-runner.exe"
+    assert verified_calls == [
+        (
+            root / "aggregate.json",
+            root / "aggregate.attestation.sigstore.json",
+        )
+    ]
+
+
+def test_complete_bundle_rejects_tampered_raw_transcript(tmp_path: Path) -> None:
+    root = (tmp_path / "bundle").resolve()
+    _build_complete_bundle(root)
+    raw = root / "repeat-1" / "cli-raw.jsonl"
+    raw.write_bytes(raw.read_bytes() + b"\n")
+
+    with pytest.raises(SandboxEvidenceError):
+        verify_evidence_bundle(
+            root,
+            attestation_verifier=lambda aggregate, attestation, subject: None,
         )
 
 
@@ -1413,6 +1589,11 @@ def test_security_workflow_repeats_derives_schema_and_always_uploads() -> None:
     assert '"neil_agent.sandbox_evidence",' in workflow
     assert '"verify"' in workflow
     assert "SANDBOX_EVIDENCE_RAW_JSONL" in workflow
+    assert "SANDBOX_ACTIONS_RUNNER_VERSION" in workflow
+    assert "SANDBOX_ACTIONS_RUNNER_EPHEMERAL" in workflow
+    assert "sandbox_evidence bundle-verify" in workflow
+    assert "actions/attest@a1948c3f048ba23858d222213b7c278aabede763" in workflow
+    assert "aggregate.attestation.sigstore.json" in workflow
     assert "if: always()" in workflow
     assert (
         "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f" in workflow

@@ -1,9 +1,8 @@
-"""Fail-closed contracts and preparation for OS-isolated command execution.
+"""Fail-closed contracts and certified OS-isolated command execution.
 
-This module deliberately does not expose an Agent tool.  The Windows Sandbox
-backend can currently probe the local installation and build a restrictive
-``.wsb`` configuration, but it will not launch a process until a bounded,
-headless result channel and process-tree cancellation have been implemented.
+The backend remains inert unless an independently pinned evidence bundle is
+fully replayed and bound to the current source and Windows host. Tool exposure
+is handled separately and only after :attr:`SandboxCapabilities.ready`.
 """
 
 from __future__ import annotations
@@ -17,11 +16,19 @@ import ctypes
 from ctypes import wintypes
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, Literal, Protocol
+from uuid import uuid4
 from xml.etree import ElementTree
 
 from .errors import SandboxError
+
+if TYPE_CHECKING:
+    from .sandbox_approval import RunCommandApprovalBinding
+    from .sandbox_snapshot import SnapshotManifest
+    from .windows_sandbox import WsbExecutionPlan, WsbExecutionResult
 
 WorkspaceMode = Literal["none", "read-only-snapshot"]
 NetworkMode = Literal["deny"]
@@ -388,16 +395,17 @@ class SandboxCertification:
     """Runtime reference to one externally verified sandbox evidence bundle.
 
     This value validates shape only; constructing it is not evidence
-    verification.  Evidence expiry, review trust, provenance, current-host
-    identity, and source bindings must be checked by the future integration
-    layer before it creates this reference.  Production probing does not
-    currently create one.
+    verification. Production code creates it only inside the runtime verifier
+    after checking expiry, review trust, provenance, current-host identity,
+    source bindings, and the fixed gate set.
     """
 
     backend: str
     git_commit_sha: str
     evidence_sha256: str
+    provenance_sha256: str
     independent_review_sha256: str
+    certification_sha256: str
     executable_sha256: str
     runner_source_sha256: str
     runner_binary_sha256: str
@@ -416,7 +424,9 @@ class SandboxCertification:
             raise ValueError("sandbox certification Git commit SHA is invalid")
         for label, value in (
             ("evidence", self.evidence_sha256),
+            ("provenance", self.provenance_sha256),
             ("independent review", self.independent_review_sha256),
+            ("certification", self.certification_sha256),
             ("executable", self.executable_sha256),
             ("runner source", self.runner_source_sha256),
             ("runner binary", self.runner_binary_sha256),
@@ -658,27 +668,65 @@ class SandboxBackend(Protocol):
 ExecutableLocator = Callable[[str], str | None]
 
 
+class RuntimeCertificationMaterial(Protocol):
+    @property
+    def certification(self) -> SandboxCertification: ...
+
+    @property
+    def runner_binary_path(self) -> Path: ...
+
+    @property
+    def expires_at(self) -> datetime: ...
+
+
+RuntimeCertificationLoader = Callable[[Path], RuntimeCertificationMaterial]
+
+
+class HostExecutor(Protocol):
+    def execute(
+        self,
+        plan: WsbExecutionPlan,
+        *,
+        cancel: CancellationSignal | None = None,
+    ) -> WsbExecutionResult: ...
+
+
+HostExecutorFactory = Callable[[Path], HostExecutor]
+
+
 class WindowsSandboxBackend:
-    """Read-only probe and restrictive preparation for Windows Sandbox.
+    """Certified Windows Sandbox backend with no host-process fallback."""
 
-    Windows Sandbox is interactive and currently lacks the audited, bounded
-    response transport needed by Neil Agent.  Detection and XML generation are
-    useful building blocks, but ``run`` intentionally rejects every invocation
-    instead of silently falling back to an ordinary host process.
-    """
-
-    __slots__ = ("_locator", "_platform_name")
+    __slots__ = (
+        "_host_executor_factory",
+        "_locator",
+        "_platform_name",
+        "_runtime_certification_root",
+        "_runtime_loader",
+        "_runtime_review_sha256",
+        "_runtime_reviewer",
+    )
 
     def __init__(
         self,
         *,
         platform_name: str | None = None,
         executable_locator: ExecutableLocator | None = None,
+        runtime_loader: RuntimeCertificationLoader | None = None,
+        host_executor_factory: HostExecutorFactory | None = None,
+        certification_root: Path | None = None,
+        trusted_reviewer: str | None = None,
+        trusted_review_sha256: str | None = None,
     ) -> None:
         self._platform_name = os.name if platform_name is None else platform_name
         self._locator = (
             shutil.which if executable_locator is None else executable_locator
         )
+        self._runtime_loader = runtime_loader
+        self._host_executor_factory = host_executor_factory
+        self._runtime_certification_root = certification_root
+        self._runtime_reviewer = trusted_reviewer
+        self._runtime_review_sha256 = trusted_review_sha256
 
     def probe(self) -> SandboxCapabilities:
         """Locate Windows Sandbox without launching it or creating files."""
@@ -709,14 +757,39 @@ class WindowsSandboxBackend:
                 workspace_modes=("none", "read-only-snapshot"),
                 network_modes=("deny",),
             )
+        try:
+            material = self._load_runtime(cli_executable)
+        except (SandboxError, ValueError) as error:
+            reason_code = (
+                "certification_required"
+                if error.__class__.__name__ == "SandboxRuntimeCertificationUnavailable"
+                else "certification_invalid"
+            )
+            return SandboxCapabilities(
+                backend=WINDOWS_SANDBOX_BACKEND,
+                available=True,
+                reason_code=reason_code,
+                summary=(
+                    "已检测到 Windows Sandbox CLI，但没有可用于当前运行时的认证证据。"
+                ),
+                executable=cli_executable,
+                workspace_modes=("none", "read-only-snapshot"),
+                network_modes=("deny",),
+            )
         return SandboxCapabilities(
             backend=WINDOWS_SANDBOX_BACKEND,
             available=True,
-            reason_code="certification_required",
-            summary=("已检测到 Windows Sandbox CLI，但尚无匹配当前构建的认证证据。"),
+            reason_code="ready",
+            summary="Windows Sandbox 认证、宿主绑定和全部强制门禁均已验证。",
             executable=cli_executable,
-            workspace_modes=("none", "read-only-snapshot"),
+            certification=material.certification,
+            workspace_modes=("read-only-snapshot",),
             network_modes=("deny",),
+            supports_cancellation=True,
+            supports_timeout=True,
+            supports_output_limit=True,
+            supports_memory_limit=True,
+            supports_process_limit=True,
         )
 
     def build_config_xml(self, spec: RunSpec) -> str:
@@ -763,18 +836,208 @@ class WindowsSandboxBackend:
         spec: RunSpec,
         *,
         cancel: CancellationSignal | None = None,
+        approved_preview: str | None = None,
     ) -> SandboxResult:
-        """Reject execution until the backend can enforce the whole contract."""
+        """Execute only after revalidating certification and every local binding."""
 
-        del spec, cancel
-        capabilities = self.probe()
-        if not capabilities.available:
-            raise SandboxError(
-                "Windows Sandbox 不可用，命令已拒绝；不会退化为普通宿主进程。"
-            )
-        raise SandboxError(
-            "Windows Sandbox 执行通道尚未完成，命令已拒绝；不会退化为普通宿主进程。"
+        cli_executable = self._require_certified_cli()
+        material = self._load_runtime(cli_executable)
+        manifest, snapshot, executable, binding = self._execution_binding(
+            spec,
+            material,
         )
+        if (
+            approved_preview is not None
+            and binding.render_preview() != approved_preview
+        ):
+            raise SandboxError(
+                "Windows Sandbox 认证或执行边界在批准后发生变化，命令已拒绝。"
+            )
+
+        from .sandbox_guest import (
+            GUEST_BINARY_FILENAME,
+            GUEST_REQUEST_FILENAME,
+            MAX_ACTIVE_PROCESSES as GUEST_MAX_ACTIVE_PROCESSES,
+            MAX_JOB_MEMORY_BYTES,
+            MAX_OUTPUT_BYTES as GUEST_MAX_OUTPUT_BYTES,
+            MAX_PROCESS_MEMORY_BYTES,
+            MAX_TIMEOUT_MS,
+            SandboxGuestRequest,
+        )
+        from .windows_sandbox import WsbExecutionPlan, WsbHostExecutor
+
+        timeout_ms = min(round(spec.limits.timeout_seconds * 1_000), MAX_TIMEOUT_MS)
+        if spec.limits.max_output_bytes > GUEST_MAX_OUTPUT_BYTES:
+            raise SandboxError("Windows Sandbox 输出上限超过已认证 guest 协议边界。")
+        if spec.limits.max_processes > GUEST_MAX_ACTIVE_PROCESSES:
+            raise SandboxError("Windows Sandbox 进程上限超过已认证 guest 协议边界。")
+        job_memory = min(spec.limits.max_memory_bytes, MAX_JOB_MEMORY_BYTES)
+        process_memory = min(job_memory, MAX_PROCESS_MEMORY_BYTES)
+        instance_id = uuid4()
+        run_id = uuid4()
+        request = SandboxGuestRequest.create(
+            run_id=run_id.hex,
+            instance_id=instance_id.hex,
+            snapshot_manifest_sha256=manifest.digest,
+            runner_source_sha256=material.certification.runner_source_sha256,
+            approval_binding_sha256=binding.digest,
+            executable=executable,
+            argv=spec.argv,
+            cwd=spec.working_directory,
+            environment={},
+            timeout_ms=timeout_ms,
+            max_output_bytes=spec.limits.max_output_bytes,
+            active_process_limit=spec.limits.max_processes,
+            process_memory_bytes=process_memory,
+            job_memory_bytes=job_memory,
+        )
+        try:
+            with TemporaryDirectory(prefix="neil-agent-wsb-run-") as temporary:
+                root = Path(temporary).resolve(strict=True)
+                control = root / "control"
+                transport = root / "transport"
+                control.mkdir()
+                transport.mkdir()
+                shutil.copyfile(
+                    material.runner_binary_path,
+                    control / GUEST_BINARY_FILENAME,
+                )
+                with (control / GUEST_REQUEST_FILENAME).open("xb") as stream:
+                    stream.write(request.canonical_bytes())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                plan = WsbExecutionPlan(
+                    instance_id=instance_id,
+                    run_id=run_id,
+                    request_hash=request.request_hash,
+                    snapshot_directory=snapshot,
+                    control_directory=control,
+                    temporary_root=transport,
+                    snapshot_manifest_sha256=manifest.digest,
+                    certification_sha256=(material.certification.certification_sha256),
+                    runner_source_sha256=(material.certification.runner_source_sha256),
+                    runner_sha256=material.certification.runner_binary_sha256,
+                    approval_binding_version=request.approval_binding_version,
+                    approval_binding_sha256=binding.digest,
+                    timeout_seconds=max(60.0, spec.limits.timeout_seconds + 30.0),
+                )
+                factory = self._host_executor_factory
+                executor = (
+                    WsbHostExecutor(cli_executable)
+                    if factory is None
+                    else factory(cli_executable)
+                )
+                result = executor.execute(plan, cancel=cancel)
+        except SandboxError:
+            raise
+        except (OSError, ValueError) as error:
+            raise SandboxError(
+                "Windows Sandbox 执行准备失败，未启动宿主回退进程。"
+            ) from error
+        return _map_wsb_result(result)
+
+    def preview(self, spec: RunSpec) -> str:
+        """Render the exact approval boundary for one prepared snapshot."""
+
+        cli_executable = self._require_certified_cli()
+        material = self._load_runtime(cli_executable)
+        _, _, _, binding = self._execution_binding(spec, material)
+        return binding.render_preview()
+
+    def _load_runtime(self, cli_executable: Path) -> RuntimeCertificationMaterial:
+        if self._runtime_loader is not None:
+            return self._runtime_loader(cli_executable)
+        from .sandbox_evidence import ReviewTrustPins
+        from .sandbox_runtime import load_runtime_certification
+
+        pins = None
+        if (
+            self._runtime_reviewer is not None
+            or self._runtime_review_sha256 is not None
+        ):
+            pins = ReviewTrustPins(
+                reviewer_ids=(
+                    frozenset({self._runtime_reviewer})
+                    if self._runtime_reviewer is not None
+                    else frozenset()
+                ),
+                review_sha256s=(
+                    frozenset({self._runtime_review_sha256})
+                    if self._runtime_review_sha256 is not None
+                    else frozenset()
+                ),
+            )
+        return load_runtime_certification(
+            cli_executable,
+            certification_root=self._runtime_certification_root,
+            trust_pins=pins,
+        )
+
+    def _require_certified_cli(self) -> Path:
+        capabilities = self.probe()
+        if not capabilities.ready or capabilities.executable is None:
+            raise SandboxError(
+                "Windows Sandbox 未通过当前运行时认证，命令已拒绝；不会退化为宿主进程。"
+            )
+        return capabilities.executable
+
+    def _execution_binding(
+        self,
+        spec: RunSpec,
+        material: RuntimeCertificationMaterial,
+    ) -> tuple[SnapshotManifest, Path, str, RunCommandApprovalBinding]:
+        from .sandbox_approval import RunCommandApprovalBinding
+        from .sandbox_guest import (
+            MAX_ACTIVE_PROCESSES as GUEST_MAX_ACTIVE_PROCESSES,
+            MAX_JOB_MEMORY_BYTES,
+            MAX_OUTPUT_BYTES as GUEST_MAX_OUTPUT_BYTES,
+            MAX_PROCESS_MEMORY_BYTES,
+            MAX_TIMEOUT_MS,
+        )
+        from .sandbox_snapshot import inspect_prepared_snapshot
+
+        if (
+            spec.policy.workspace_mode != "read-only-snapshot"
+            or spec.policy.network != "deny"
+            or spec.policy.environment
+            or spec.workspace_snapshot is None
+        ):
+            raise SandboxError("认证执行只允许无环境变量的只读快照和禁网策略。")
+        snapshot = self._validated_snapshot(spec)
+        if snapshot is None:
+            raise SandboxError("认证执行缺少只读工作区快照。")
+        try:
+            executable_path = spec.executable.resolve(strict=True)
+            relative = executable_path.relative_to(snapshot)
+        except (OSError, ValueError) as error:
+            raise SandboxError("可执行文件必须位于已准备的只读快照内。") from error
+        if not executable_path.is_file() or _is_reparse_point(executable_path):
+            raise SandboxError("快照可执行文件不是安全普通文件。")
+        executable = str(PurePosixPath(*relative.parts)).replace("/", "\\")
+        manifest = inspect_prepared_snapshot(snapshot)
+        timeout_ms = min(round(spec.limits.timeout_seconds * 1_000), MAX_TIMEOUT_MS)
+        if (
+            spec.limits.timeout_seconds * 1_000 > MAX_TIMEOUT_MS
+            or spec.limits.max_output_bytes > GUEST_MAX_OUTPUT_BYTES
+            or spec.limits.max_processes > GUEST_MAX_ACTIVE_PROCESSES
+        ):
+            raise SandboxError("命令限制超过已认证 guest 协议边界。")
+        job_memory = min(spec.limits.max_memory_bytes, MAX_JOB_MEMORY_BYTES)
+        binding = RunCommandApprovalBinding(
+            executable=executable,
+            argv=spec.argv,
+            logical_cwd=spec.working_directory,
+            snapshot_manifest_sha256=manifest.digest,
+            certification_sha256=material.certification.certification_sha256,
+            runner_source_sha256=material.certification.runner_source_sha256,
+            runner_binary_sha256=material.certification.runner_binary_sha256,
+            timeout_ms=timeout_ms,
+            max_output_bytes=spec.limits.max_output_bytes,
+            active_process_limit=spec.limits.max_processes,
+            process_memory_bytes=min(job_memory, MAX_PROCESS_MEMORY_BYTES),
+            job_memory_bytes=job_memory,
+        )
+        return manifest, snapshot, executable, binding
 
     def _find_component(self, name: str) -> Path | None:
         located = self._locator(name)
@@ -822,6 +1085,34 @@ class WindowsSandboxBackend:
         if not resolved_working.is_dir() or _is_reparse_point(resolved_working):
             raise SandboxError("沙箱工作目录必须是真实普通目录。")
         return resolved
+
+
+def _map_wsb_result(result: WsbExecutionResult) -> SandboxResult:
+    if result.job_terminated is not True:
+        raise SandboxError("Windows Sandbox 未确认完整进程树终止，结果已拒绝。")
+    if result.status == "exited":
+        reason: TerminationReason = (
+            "succeeded" if result.exit_code == 0 else "exit_nonzero"
+        )
+        exit_code = result.exit_code
+    else:
+        reason_by_status: dict[str, TerminationReason] = {
+            "timeout": "timed_out",
+            "cancelled": "cancelled",
+            "output_limit": "output_limit",
+            "resource_limit": "resource_limit",
+            "runner_error": "backend_error",
+        }
+        reason = reason_by_status.get(result.status, "backend_error")
+        exit_code = None
+    return SandboxResult(
+        backend=WINDOWS_SANDBOX_BACKEND,
+        termination_reason=reason,
+        exit_code=exit_code,
+        stdout=result.stdout.decode("utf-8", errors="replace"),
+        stderr=result.stderr.decode("utf-8", errors="replace"),
+        elapsed_seconds=result.duration_ms / 1_000,
+    )
 
 
 def _validate_bounded_integer(

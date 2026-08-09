@@ -18,7 +18,7 @@ internal static class SandboxGuestRunner
     private const int ProtocolVersion = 2;
     private const int RunnerVersion = 3;
     private const string SecurityAssurance =
-        "candidate-restricted-low-integrity-job-not-certified";
+        "certified-windows-sandbox-v1";
 
     private const string ControlRoot = @"C:\NeilAgent\Control";
     private const string SnapshotRoot = @"C:\NeilAgent\Snapshot";

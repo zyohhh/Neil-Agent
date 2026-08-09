@@ -322,6 +322,13 @@ def evidence_raw_observer(
             runner_binary_path=guest_runner.binary_path,
             compiler_path=guest_runner.compiler_path,
             probe_binary_path=security_probe,
+            actions_runner_version=os.environ.get(
+                "SANDBOX_ACTIONS_RUNNER_VERSION",
+                "",
+            ),
+            actions_runner_ephemeral=(
+                os.environ.get("SANDBOX_ACTIONS_RUNNER_EPHEMERAL") == "1"
+            ),
         )
         ensure_canonical_evidence_file(platform_path, platform)
         ensure_canonical_evidence_file(subject_path, subject)
@@ -404,6 +411,7 @@ def _execute_probe(
             executable="probe.exe",
             argv=(mode, *arguments),
             snapshot_manifest_sha256=snapshot.manifest.digest,
+            certification_sha256="c" * 64,
             runner_source_sha256=guest_runner.source_sha256,
             runner_binary_sha256=guest_runner.binary_sha256,
             timeout_ms=timeout_ms,
@@ -435,6 +443,7 @@ def _execute_probe(
             control_directory=control.resolve(),
             temporary_root=temporary_root.resolve(),
             snapshot_manifest_sha256=snapshot.manifest.digest,
+            certification_sha256=approval_binding.certification_sha256,
             runner_source_sha256=guest_runner.source_sha256,
             runner_sha256=guest_runner.binary_sha256,
             approval_binding_version=request.approval_binding_version,

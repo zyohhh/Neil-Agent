@@ -31,7 +31,8 @@ from .instructions import ProjectInstructionManager
 from .llm import LLMClient
 from .schemas import ActivityEvent, TokenUsage
 from .session import SessionStore
-from .tools import FileSystemTools, ShellTools, ToolRegistry
+from .sandbox import WindowsSandboxBackend
+from .tools import FileSystemTools, SandboxCommandTools, ShellTools, ToolRegistry
 
 OutputFormat = Literal["text", "json", "stream-json"]
 ProtocolVersion = Literal[1, 2]
@@ -317,6 +318,17 @@ def run_noninteractive(
         else:
             filesystem.register(registry)
             shell.register(registry)
+            if settings.sandbox_backend == "windows-sandbox":
+                SandboxCommandTools(
+                    filesystem.root,
+                    WindowsSandboxBackend(
+                        certification_root=settings.sandbox_certification_root,
+                        trusted_reviewer=settings.sandbox_trusted_reviewer,
+                        trusted_review_sha256=(settings.sandbox_trusted_review_sha256),
+                    ),
+                    timeout_seconds=settings.command_timeout,
+                    max_output_bytes=settings.max_command_output_chars,
+                ).register_if_ready(registry)
         instruction_manager = ProjectInstructionManager(
             filesystem.root,
             _instruction_target(filesystem.root),

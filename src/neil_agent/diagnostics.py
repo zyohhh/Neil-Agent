@@ -20,6 +20,7 @@ _SANDBOX_REASON_SUMMARIES = {
     "executable_not_found": "未找到 Windows Sandbox 可执行文件",
     "cli_executable_required": "缺少可认证的 Windows Sandbox CLI",
     "certification_required": "缺少匹配当前构建的安全认证证据",
+    "certification_invalid": "认证证据未通过完整重放或当前宿主绑定",
     "execution_channel_unavailable": "受控执行与结果回传通道尚未就绪",
     "ready": "全部强制安全门禁已就绪",
 }
@@ -116,7 +117,11 @@ def _check_sandbox(settings: Settings) -> DiagnosticCheck:
         )
 
     try:
-        capabilities = WindowsSandboxBackend().probe()
+        capabilities = WindowsSandboxBackend(
+            certification_root=settings.sandbox_certification_root,
+            trusted_reviewer=settings.sandbox_trusted_reviewer,
+            trusted_review_sha256=settings.sandbox_trusted_review_sha256,
+        ).probe()
     except (SandboxError, OSError, ValueError):
         return DiagnosticCheck(
             name="OS 沙箱",

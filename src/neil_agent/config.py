@@ -119,6 +119,21 @@ class Settings(BaseSettings):
             "Fail-closed OS sandbox backend for explicitly enabled general commands."
         ),
     )
+    sandbox_certification_root: Path | None = Field(
+        default=None,
+        description="Absolute root of a reviewed Windows Sandbox evidence bundle.",
+    )
+    sandbox_trusted_reviewer: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Out-of-band pinned independent reviewer identity.",
+    )
+    sandbox_trusted_review_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="Out-of-band pinned independent review SHA-256.",
+    )
     audit_log_enabled: bool = Field(
         default=False,
         description="Write metadata-only lifecycle events to a local JSONL log.",

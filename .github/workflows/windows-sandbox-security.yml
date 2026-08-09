@@ -15,6 +15,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 concurrency:
   group: windows-sandbox-security
@@ -35,6 +37,8 @@ jobs:
       PYTHONUTF8: "1"
       SANDBOX_REQUIRED: "1"
       SANDBOX_EVIDENCE_REQUIRED: "1"
+      SANDBOX_ACTIONS_RUNNER_VERSION: ${{ vars.SANDBOX_ACTIONS_RUNNER_VERSION }}
+      SANDBOX_ACTIONS_RUNNER_EPHEMERAL: ${{ vars.SANDBOX_ACTIONS_RUNNER_EPHEMERAL }}
     steps:
       - name: Check out the reviewed revision
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -82,6 +86,12 @@ jobs:
           $env:SANDBOX_EVIDENCE_BUILD_ROOT = $buildRoot
           $env:SANDBOX_EVIDENCE_PLATFORM_JSON = Join-Path $evidenceRoot "platform.json"
           $env:SANDBOX_EVIDENCE_SUBJECT_JSON = Join-Path $evidenceRoot "subject.json"
+          if (-not $env:SANDBOX_ACTIONS_RUNNER_VERSION) {
+            throw "The protected environment must pin the Actions runner version."
+          }
+          if ($env:SANDBOX_ACTIONS_RUNNER_EPHEMERAL -ne "1") {
+            throw "The security runner must be declared ephemeral."
+          }
 
           $wheelRoot = Join-Path $buildRoot "wheel"
           New-Item -ItemType Directory -Path $wheelRoot | Out-Null
@@ -96,6 +106,8 @@ jobs:
           }
           $env:SANDBOX_EVIDENCE_WHEEL = $wheels[0].FullName
           $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 `
+            -Value "venv_python=$venvPython"
           uv pip install --python $venvPython --offline --no-deps `
             $env:SANDBOX_EVIDENCE_WHEEL
           if ($LASTEXITCODE -ne 0) {
@@ -217,6 +229,33 @@ jobs:
 
           if ($overallFailure) {
             exit 1
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 `
+            -Value "aggregate_path=$aggregate"
+
+      - name: Attest the replay-bound aggregate
+        id: attest
+        if: steps.collect.outcome == 'success'
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.collect.outputs.aggregate_path }}
+
+      - name: Preserve and verify complete bundle provenance
+        if: steps.attest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $attestation = Join-Path `
+            "${{ steps.collect.outputs.evidence_root }}" `
+            "aggregate.attestation.sigstore.json"
+          Copy-Item -LiteralPath "${{ steps.attest.outputs.bundle-path }}" `
+            -Destination $attestation -ErrorAction Stop
+          & "${{ steps.collect.outputs.venv_python }}" -I `
+            -m neil_agent.sandbox_evidence bundle-verify `
+            --bundle-root "${{ steps.collect.outputs.evidence_root }}"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
           }
 
       - name: Upload the complete evidence bundle

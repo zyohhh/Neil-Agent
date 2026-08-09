@@ -140,8 +140,8 @@ _CAPABILITY_GROUPS = (
         "os-command",
         "OS COMMAND",
         "os",
-        ("sandbox_run_command",),
-        "no Agent execution tool exposed",
+        ("run_command",),
+        "certified sandbox only · explicit executable + argv",
     ),
 )
 _SANDBOX_REASON_LABELS = {
@@ -149,6 +149,7 @@ _SANDBOX_REASON_LABELS = {
     "executable_not_found": "BACKEND NOT FOUND",
     "cli_executable_required": "CLI REQUIRED",
     "certification_required": "CERTIFICATION REQUIRED",
+    "certification_invalid": "CERTIFICATION INVALID",
     "execution_channel_unavailable": "EXECUTION CHANNEL UNAVAILABLE",
     "capability_incomplete": "CAPABILITY GATES INCOMPLETE",
     "ready": "ALL GATES READY",
@@ -1129,7 +1130,7 @@ def _project_os_boundary(
             reason,
             (
                 "certification and mandatory capability gates are bound",
-                "no Agent OS-command tool is exposed in this phase",
+                "only the approval-bound sandbox command tool may be exposed",
             ),
         )
     status: BoundaryStatus = "incomplete" if capabilities.available else "unavailable"

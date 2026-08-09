@@ -1,8 +1,7 @@
-"""Candidate host executor for the Windows Sandbox ``wsb.exe`` CLI.
+"""Host executor for the Windows Sandbox ``wsb.exe`` CLI.
 
-The executor in this module is intentionally not registered as an Agent tool
-and does not change the readiness of :mod:`neil_agent.sandbox`.  It models the
-host-side sequence needed by a future audited guest runner:
+This bounded state machine is reachable from the Agent only through the
+separately certified backend and approval-bound command tool:
 
 1. start an explicitly named instance with read-only snapshot/control mappings;
 2. execute one fixed runner command and wait for its zero exit status;
@@ -147,6 +146,7 @@ class WsbExecutionPlan:
     control_directory: Path
     temporary_root: Path
     snapshot_manifest_sha256: str
+    certification_sha256: str
     runner_source_sha256: str
     runner_sha256: str
     approval_binding_version: Literal[1]
@@ -163,6 +163,7 @@ class WsbExecutionPlan:
             "snapshot manifest SHA-256",
             self.snapshot_manifest_sha256,
         )
+        _validate_digest("certification SHA-256", self.certification_sha256)
         _validate_digest("runner source SHA-256", self.runner_source_sha256)
         _validate_digest("runner SHA-256", self.runner_sha256)
         if (
@@ -1030,6 +1031,7 @@ def _validate_control_bundle(
             argv=request.argv,
             logical_cwd=request.cwd,
             snapshot_manifest_sha256=plan.snapshot_manifest_sha256,
+            certification_sha256=plan.certification_sha256,
             runner_source_sha256=plan.runner_source_sha256,
             runner_binary_sha256=plan.runner_sha256,
             timeout_ms=request.timeout_ms,

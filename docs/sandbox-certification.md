@@ -1,8 +1,9 @@
 # Windows Sandbox 目标平台证据契约
 
-本契约只负责保存和验证候选执行链的真实平台证据，不改变
-`WindowsSandboxBackend` 的状态，不注册 `run_command`，也不把一次测试成功解释为
-认证。
+本契约把真实平台证据、独立审查和运行时能力严格分层。单轮测试、三轮
+aggregate，甚至未经 pin 的 certification 都不会改变 `WindowsSandboxBackend`
+状态；只有完整 bundle 重新推导、GitHub Sigstore provenance、独立 review pin、
+证书时效与当前宿主身份全部通过，才会映射为 ready。
 
 ## 工作流输入
 
@@ -20,6 +21,10 @@ revision 构建的唯一 wheel，并以 Python isolated mode 运行测试。它�
 - `SANDBOX_EVIDENCE_RAW_JSONL`：当前 repeat 的真实 CLI 原始响应；
 - `SANDBOX_EVIDENCE_REPEAT_ID` 和
   `SANDBOX_EVIDENCE_EXECUTION_NONCE`：当前重复运行身份。
+- `SANDBOX_ACTIONS_RUNNER_VERSION`：受保护 environment 显式记录的 runner
+  版本；
+- `SANDBOX_ACTIONS_RUNNER_EPHEMERAL=1`：专用 runner 的一次性声明，其他值
+  直接失败。
 
 上传步骤在测试失败时也会保存本次新建目录用于诊断；artifact 存在本身不表示
 证据有效，只有严格 `verify` 生成且随后通过独立审查的 aggregate 才能进入认证
@@ -103,7 +108,30 @@ skip、xfail 和 xpass 即使出现在报告中，也不能通过 `verify`。
 - failed/error/skipped/xfailed/xpassed 全为零；
 - platform、subject 和规范化 CLI schema 完全一致。
 
-输出的 `aggregate.json` 只是结构化测试证据，不是认证。
+输出的 `aggregate.json` 只是结构化测试证据，不是认证。workflow 随后使用固定
+commit 的 `actions/attest` 为该文件生成 SLSA provenance，把 Sigstore bundle
+保存为 `aggregate.attestation.sigstore.json`，并立即执行 `bundle-verify`。GitHub
+CLI 必须校验固定仓库、固定 workflow、`main` ref 和 subject commit；失败时仍
+上传诊断 artifact，但该 artifact 不可认证。
+
+## 完整 bundle 重放
+
+`bundle-verify` 不信任 aggregate 的摘要结论。它要求固定三轮目录和唯一构建
+产物，并逐项执行：
+
+- 从每轮 `cli-raw.jsonl` 重新推导 schema，比较完整 transcript 与 response
+  hashes；
+- 重新解析真实 JUnit，比较 testcase、结果计数和原文件 hash；
+- 由 raw schema、JUnit、platform、subject 与时间重新创建每个 evidence run，
+  再重新创建 aggregate；
+- 重新哈希唯一 wheel、runner 源码/二进制和 security probe；
+- 拒绝未知目录、未知文件、hardlink、symlink/reparse point、非 canonical JSON
+  和任何 identity 差异；
+- 使用本地 `gh attestation verify --bundle` 验证 Sigstore 签名、固定 signer
+  workflow、source digest 与 source ref。
+
+因此，复制旧 aggregate、替换 raw/JUnit、混合三轮 artifact 或只伪造 summary
+都不能通过。
 
 ## 独立审查与认证
 
@@ -113,11 +141,45 @@ skip、xfail 和 xpass 即使出现在报告中，也不能通过 `verify`。
 - review 精确绑定 aggregate，结论为 approved，open findings 为零；
 - reviewer 不是任一 evidence producer；
 - reviewer ID 和 review SHA-256 都由宿主显式、独立 pin；
-- review 不早于三轮证据全部完成；certification 签发时间不早于 review，且
-  有效期不超过 90 天；
-- subject 的安全保证已经从 candidate 升级为
-  `certified-windows-sandbox-v1`。
+- review 不早于三轮证据全部完成，且最迟在证据完成后 7 天内完成；
+- review 必须关闭固定十四项 security gate，不能用自定义或不完整集合替代；
+- certification 签发时间不早于 review，单张证书最长 90 天，并且绝不能晚于
+  原始证据完成后的第 90 天；
+- subject 的安全保证为 `certified-windows-sandbox-v1`。
 
-当前代码仍使用 candidate assurance，因此即使人工提供 trust pin 也不能签发。
-本模块没有接入 `/doctor`、backend 或工具注册表；后续接入还必须独立验证认证
-有效期、本机 OS/WSB 指纹和所有运行产物 hash。
+独立 reviewer 应先在下载后的绝对 bundle 根执行：
+
+```powershell
+python -I -m neil_agent.sandbox_evidence review `
+  --bundle-root C:\absolute\evidence `
+  --review-id <32-lowercase-hex> `
+  --reviewer-id <independent-id> `
+  --reviewed-at <UTC-ISO8601> `
+  --output C:\absolute\evidence\independent-review.json
+```
+
+review digest 通过仓库外渠道 pin 后，再以 `certify --bundle-root ... --review ...`
+签发 `certification.json`。`review` 与 `certify` 都会先完整重放 bundle 和
+attestation，不接受单独传入的 aggregate。
+
+## 运行时映射与最小工具
+
+启用时设置以下三项，缺一即 fail-closed：
+
+```text
+SANDBOX_BACKEND=windows-sandbox
+SANDBOX_CERTIFICATION_ROOT=C:\absolute\evidence
+SANDBOX_TRUSTED_REVIEWER=<independent-id>
+SANDBOX_TRUSTED_REVIEW_SHA256=<64-lowercase-hex>
+```
+
+每次执行前 verifier 都重新检查完整 bundle、Sigstore provenance、review pin 和
+证书时间，并把 evidence 与当前 Git commit、相关源码 manifest、Windows build/
+edition、WSB feature/Authenticode/file hash、runner source/binary、compiler、
+framework reference、策略/协议版本和固定 gate 集逐项比较。任一变化都会让
+`/doctor` 报告 `certification_invalid`。
+
+只有 ready 时才注册 `run_command`。它只接受工作区相对 `.exe` 和 argv，固定
+使用过滤后的只读快照、禁网、空 guest 环境、资源/输出/取消/完整进程树门禁，
+所有 guest 修改均丢弃；不接受 shell 字符串，也不会回退到宿主进程。非交互
+read-only/v1 模式仍不注册该工具。

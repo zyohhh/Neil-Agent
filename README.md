@@ -71,17 +71,21 @@ uv run neil-agent -p "更新版本号" --protocol-version 2 --permission-mode ap
 `.neil-agent/audit/events.jsonl`，只记录有界元数据，不记录 prompt、thinking、工具参数/正文或 API Key；`AUDIT_LOG_MAX_BYTES` 控制单文件轮转上限。审计写入使用操作系统文件锁串行化检查、轮转和追加，锁等待超时会明确失败，进程崩溃后锁由内核释放。`/doctor` 只读报告审计文件大小、记录数、格式与锁状态，不显示日志正文。
 
 `SANDBOX_BACKEND` 默认为 `disabled`；也可显式选择
-`windows-sandbox` 只读探测 Windows Sandbox 平台能力。该设置不会开放通用
-命令，后端不可用或能力不完整时会 fail-closed，现有质量检查与 Git 命令仍
-保持固定白名单。`/doctor` 不启动沙箱或修改系统，只显示结构化能力状态。
-仓库已包含过滤只读快照、restricted/Low Integrity 固定 guest runner、执行期
-句柄租约和 `wsb.exe` 两阶段结果导出的候选实现，但它尚未接入 Agent 工具，
-也不代表后端已经通过真实平台认证。
+`windows-sandbox` 启用认证探测。单独设置该值不会开放通用命令；还必须提供
+`SANDBOX_CERTIFICATION_ROOT`、`SANDBOX_TRUSTED_REVIEWER` 和
+`SANDBOX_TRUSTED_REVIEW_SHA256`，并让完整 raw bundle、GitHub Sigstore
+provenance、独立 review、证书时效及当前 commit/OS/WSB/runner hashes 全部
+匹配。后端不可用、证据缺失或任一绑定不一致时会 fail-closed，现有质量检查与
+Git 命令仍保持固定白名单。`/doctor` 只显示结构化能力状态。
 专用 Windows 安全任务使用 `SANDBOX_REQUIRED=1`，缺少组件或任何隔离用例
 未通过都会失败；它还要求同一构建重复三轮，记录平台/产物/JUnit 与真实
 `--raw` 调用 transcript，并实际安装和测试唯一 wheel 后生成 canonical
 aggregate。aggregate 本身不是认证，默认空的独立审查 trust pins 不能使后端
-ready。普通开发机可以跳过真实平台用例。
+ready。workflow 还要求受保护 environment 声明一次性 runner 及其版本，用固定
+commit 的 `actions/attest` 签署 aggregate，再从 raw transcript、真实 JUnit 和
+构建产物完整重放 bundle。普通开发机可以跳过真实平台用例；skip 绝不产生
+认证。只有 ready 时才条件注册最小 `run_command`，它只接收工作区相对 `.exe`
+与 argv，使用只读禁网快照并丢弃全部 guest 修改，不接受 shell 字符串。
 完整策略、候选边界和开放门禁见
 [`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)，证据格式与审查
 流程见 [`docs/sandbox-certification.md`](docs/sandbox-certification.md)。

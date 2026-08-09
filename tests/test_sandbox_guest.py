@@ -217,9 +217,7 @@ def test_result_round_trip_is_bound_bounded_and_job_confirmed() -> None:
     assert result.stdout == b"hello"
     assert result.stderr == b"warning"
     assert result.job_terminated is True
-    assert result.security_assurance == (
-        "candidate-restricted-low-integrity-job-not-certified"
-    )
+    assert result.security_assurance == ("certified-windows-sandbox-v1")
     assert result.result_hash == _digest(result.hash_payload())
 
 
