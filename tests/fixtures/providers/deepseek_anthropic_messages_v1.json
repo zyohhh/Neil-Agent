@@ -1,0 +1,305 @@
+{
+  "fixture_version": 1,
+  "provider": "deepseek",
+  "wire_protocol": "anthropic-messages",
+  "source": {
+    "kind": "synthetic-characterization",
+    "live_capture": false,
+    "sanitized": true,
+    "sdk": "anthropic"
+  },
+  "settings": {
+    "model": "deepseek-contract-model",
+    "max_tokens": 256
+  },
+  "cases": {
+    "complete_text": {
+      "input": {
+        "system_prompt": "Answer from the repository only.",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Summarize the repository."
+          }
+        ]
+      },
+      "wire_request": {
+        "model": "deepseek-contract-model",
+        "max_tokens": 256,
+        "system": "Answer from the repository only.",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Summarize the repository."
+          }
+        ],
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "wire_response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Neil Agent is a local coding agent."
+          }
+        ],
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 8,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 2
+        }
+      },
+      "contract": {
+        "result": "Neil Agent is a local coding agent.",
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 8,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 2
+        }
+      }
+    },
+    "stream_text": {
+      "input": {
+        "system_prompt": "Be concise.",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Say hello."
+          }
+        ],
+        "tools": [],
+        "thinking_enabled": false
+      },
+      "wire_request": {
+        "model": "deepseek-contract-model",
+        "max_tokens": 256,
+        "system": "Be concise.",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Say hello."
+          }
+        ],
+        "thinking": {
+          "type": "disabled"
+        },
+        "tools": []
+      },
+      "wire_stream": {
+        "text_deltas": [
+          "hello",
+          " world"
+        ],
+        "final_message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "hello world"
+            }
+          ],
+          "usage": {
+            "input_tokens": 5,
+            "output_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      },
+      "contract": {
+        "text_deltas": [
+          "hello",
+          " world"
+        ],
+        "response": {
+          "content": "hello world",
+          "thinking": [],
+          "tool_calls": [],
+          "usage": {
+            "input_tokens": 5,
+            "output_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    "stream_tool_call": {
+      "input": {
+        "system_prompt": "Use repository tools when needed.",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Inspect README and then inspect pyproject."
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "thinking": [
+              {
+                "thinking": "Read the first file.",
+                "signature": "sanitized-signature-1"
+              }
+            ],
+            "tool_calls": [
+              {
+                "id": "call-read-1",
+                "name": "read_file",
+                "arguments": {
+                  "path": "README.md"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": "",
+            "tool_results": [
+              {
+                "tool_call_id": "call-read-1",
+                "content": "sanitized README contents",
+                "is_error": false
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "read_file",
+            "description": "Read one workspace file.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "thinking_enabled": true
+      },
+      "wire_request": {
+        "model": "deepseek-contract-model",
+        "max_tokens": 256,
+        "system": "Use repository tools when needed.",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Inspect README and then inspect pyproject."
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "Read the first file.",
+                "signature": "sanitized-signature-1"
+              },
+              {
+                "type": "tool_use",
+                "id": "call-read-1",
+                "name": "read_file",
+                "input": {
+                  "path": "README.md"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "call-read-1",
+                "content": "sanitized README contents",
+                "is_error": false
+              }
+            ]
+          }
+        ],
+        "thinking": {
+          "type": "enabled",
+          "budget_tokens": 1024
+        },
+        "tools": [
+          {
+            "name": "read_file",
+            "description": "Read one workspace file.",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ]
+      },
+      "wire_stream": {
+        "text_deltas": [],
+        "final_message": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "Read the second file.",
+              "signature": "sanitized-signature-2"
+            },
+            {
+              "type": "tool_use",
+              "id": "call-read-2",
+              "name": "read_file",
+              "input": {
+                "path": "pyproject.toml"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 31,
+            "output_tokens": 7,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 4
+          }
+        }
+      },
+      "contract": {
+        "text_deltas": [],
+        "response": {
+          "content": "",
+          "thinking": [
+            {
+              "thinking": "Read the second file.",
+              "signature": "sanitized-signature-2"
+            }
+          ],
+          "tool_calls": [
+            {
+              "id": "call-read-2",
+              "name": "read_file",
+              "arguments": {
+                "path": "pyproject.toml"
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 31,
+            "output_tokens": 7,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 4
+          }
+        }
+      }
+    }
+  }
+}
