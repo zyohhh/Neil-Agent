@@ -971,7 +971,10 @@ class Agent:
         messages: Sequence[Message],
     ) -> str:
         serialized = json.dumps(
-            [message.to_api_dict() for message in messages],
+            [
+                message.model_dump(mode="json", exclude_defaults=True)
+                for message in messages
+            ],
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,

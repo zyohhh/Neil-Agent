@@ -3,13 +3,21 @@
 import pytest
 from pydantic import ValidationError
 
+from neil_agent.providers.anthropic_messages import encode_message
 from neil_agent.schemas import Message, ThinkingContent, ToolCall, ToolResult
 
 
-def test_message_converts_to_api_dict() -> None:
+def test_message_remains_provider_neutral() -> None:
     message = Message(role="user", content="Hello")
 
-    assert message.to_api_dict() == {"role": "user", "content": "Hello"}
+    assert message.model_dump() == {
+        "role": "user",
+        "content": "Hello",
+        "thinking": (),
+        "tool_calls": (),
+        "tool_results": (),
+    }
+    assert not hasattr(message, "to_api_dict")
 
 
 def test_message_rejects_blank_content() -> None:
@@ -37,8 +45,8 @@ def test_tool_messages_convert_to_anthropic_content_blocks() -> None:
         tool_results=(ToolResult(tool_call_id=call.id, content="contents"),),
     )
 
-    assistant_blocks = assistant.to_api_dict()["content"]
-    result_blocks = result.to_api_dict()["content"]
+    assistant_blocks = encode_message(assistant)["content"]
+    result_blocks = encode_message(result)["content"]
     assert assistant_blocks[0]["type"] == "thinking"
     assert assistant_blocks[1]["type"] == "tool_use"
     assert result_blocks[0]["tool_use_id"] == "call-1"

@@ -35,7 +35,7 @@ Provider 适配器负责把 SDK 请求、响应和异常转换到该端口。以
 - 工具调用 ID 在一个响应内必须非空且唯一，并在工具结果往返中保持不变。
 - Provider 适配器不得修改调用方传入的消息或工具序列。
 
-当前 `to_api_dict()` 产生 Anthropic Messages 结构，仅属于 DeepSeek 基线行为。Phase 1 会把这类序列化移到适配器边界，不能将其提升为跨 Provider 契约。
+Phase 1 已移除核心 schema 的 `to_api_dict()`。Anthropic Messages 编码集中在 `providers/anthropic_messages.py`；上下文预算和压缩转录使用 provider-neutral 领域 JSON，不能将任何一家 Provider 的字段提升为跨 Provider 契约。
 
 ## 3. 非流式完成契约
 
@@ -94,7 +94,7 @@ Phase 1 引入统一停止原因时，允许值冻结为：
 | `error` | 请求以已分类错误结束 |
 | `unknown` | 收到尚未映射的 Provider 终止值 |
 
-未知原始值可映射为 `unknown` 并保留在脱敏诊断元数据中，但不能当作 `end_turn`。当前 `ModelResponse` 尚无该字段；Phase 0 只冻结语义，不提前改变 Agent API。
+未知原始值映射为 `unknown`，不能当作 `end_turn`。Phase 1 已将该字段接入 `ModelResponse`；工具调用即使缺少 Provider 原始停止值，也会明确归类为 `tool_call`。
 
 ## 7. Provider 私有状态
 
@@ -107,7 +107,7 @@ Phase 1 引入统一停止原因时，允许值冻结为：
 
 只有生成状态的 Provider 与兼容模型可以读取它。Provider 或模型变化时必须明确丢弃或拒绝；禁止伪造 Claude thinking signature 或把 OpenAI reasoning item 转换成 Anthropic block。
 
-当前 `ThinkingContent` 是 DeepSeek/Anthropic 基线的可回放状态。它将在 Phase 1 的领域边界设计中迁移，而不是被当成所有 Provider 的通用推理格式。
+`ModelResponse.provider_state` 已提供绑定 Provider、模型和 schema version 的不透明槽位。当前 `ThinkingContent` 仍是 DeepSeek/Anthropic 兼容字段，将在 Phase 2 迁移到适配器管理，不能被当成所有 Provider 的通用推理格式。
 
 ## 8. 错误分类决策
 
@@ -125,7 +125,7 @@ Phase 1 的公共异常层必须覆盖：
 | protocol | 否 | 响应结构、事件顺序或工具参数损坏 |
 | provider_internal | 是 | 仅明确的暂时服务端错误可重试 |
 
-在公共异常层落地前，现有 `LLMError` 中文消息继续作为用户边界，SDK 异常不得直接穿透。
+Phase 1 已落地上述公共异常层；所有 `ProviderError` 仍继承 `LLMError`，保持现有用户边界和非交互 `model_error` 错误码兼容，SDK 异常不得直接穿透。
 
 ## 9. Golden fixture 规则
 

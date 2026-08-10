@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+
+from .providers.base import ProviderTurnState, StopReason
 
 MessageRole = Literal["user", "assistant"]
 ActivityStatus = Literal["running", "waiting", "succeeded", "skipped", "failed"]
@@ -22,7 +24,7 @@ class ActivityEvent(BaseModel):
 
 
 class Message(BaseModel):
-    """One API-compatible message, including optional tool content."""
+    """One provider-neutral message, including optional tool content."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -44,21 +46,6 @@ class Message(BaseModel):
             raise ValueError("assistant messages cannot contain tool results")
         return self
 
-    def to_api_dict(self) -> dict[str, Any]:
-        """Convert the message to the shape expected by the model API."""
-
-        if not self.thinking and not self.tool_calls and not self.tool_results:
-            return {"role": self.role, "content": self.content}
-
-        blocks: list[dict[str, Any]] = []
-        blocks.extend(item.to_api_dict() for item in self.thinking)
-        if self.content:
-            blocks.append({"type": "text", "text": self.content})
-        blocks.extend(item.to_api_dict() for item in self.tool_calls)
-        blocks.extend(item.to_api_dict() for item in self.tool_results)
-        return {"role": self.role, "content": blocks}
-
-
 class ThinkingContent(BaseModel):
     """Thinking content that must be replayed during a tool-use turn."""
 
@@ -66,14 +53,6 @@ class ThinkingContent(BaseModel):
 
     thinking: str
     signature: str
-
-    def to_api_dict(self) -> dict[str, str]:
-        return {
-            "type": "thinking",
-            "thinking": self.thinking,
-            "signature": self.signature,
-        }
-
 
 class ToolCall(BaseModel):
     """A tool invocation requested by the model."""
@@ -84,15 +63,6 @@ class ToolCall(BaseModel):
     name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
 
-    def to_api_dict(self) -> dict[str, Any]:
-        return {
-            "type": "tool_use",
-            "id": self.id,
-            "name": self.name,
-            "input": self.arguments,
-        }
-
-
 class ToolResult(BaseModel):
     """The result returned after executing a tool call."""
 
@@ -102,15 +72,6 @@ class ToolResult(BaseModel):
     content: str
     is_error: bool = False
 
-    def to_api_dict(self) -> dict[str, Any]:
-        return {
-            "type": "tool_result",
-            "tool_use_id": self.tool_call_id,
-            "content": self.content,
-            "is_error": self.is_error,
-        }
-
-
 class ToolDefinition(BaseModel):
     """A tool description and JSON input schema exposed to the model."""
 
@@ -119,14 +80,6 @@ class ToolDefinition(BaseModel):
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     input_schema: dict[str, Any]
-
-    def to_api_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-        }
-
 
 class TokenUsage(BaseModel):
     """Server-reported token usage for one or more model requests."""
@@ -173,6 +126,24 @@ class ModelResponse(BaseModel):
     thinking: tuple[ThinkingContent, ...] = ()
     tool_calls: tuple[ToolCall, ...] = ()
     usage: TokenUsage | None = None
+    stop_reason: StopReason = StopReason.UNKNOWN
+    provider_state: ProviderTurnState | None = None
+
+    @field_serializer("provider_state")
+    def serialize_provider_state(
+        self,
+        value: ProviderTurnState | None,
+    ) -> dict[str, Any] | None:
+        """Serialize an immutable private-state mapping without exposing its repr."""
+
+        if value is None:
+            return None
+        return {
+            "provider": value.provider.value,
+            "model": value.model,
+            "schema_version": value.schema_version,
+            "payload": dict(value.payload),
+        }
 
 
 def validate_message_history(messages: Sequence[Message]) -> None:

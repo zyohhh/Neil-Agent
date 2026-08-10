@@ -43,6 +43,7 @@ from .noninteractive import (
     write_startup_error,
 )
 from .schemas import ActivityEvent, ToolCall
+from .providers.factory import create_provider
 from .security import SecurityShield, observe_security_shield
 from .session import (
     SessionHandle,
@@ -338,7 +339,18 @@ def run(console: Console) -> None:
     task_tracker = TaskTracker(change_handler=renderer.show_plan)
     task_tracker.register(registry)
 
-    llm = LLMClient(settings, retry_handler=renderer.show_activity)
+    try:
+        llm = cast(
+            LLMClient,
+            create_provider(
+                settings,
+                retry_handler=renderer.show_activity,
+                deepseek_builder=LLMClient,
+            ),
+        )
+    except NeilAgentError as error:
+        console.print(f"[bold red]Provider 启动失败：[/bold red]{error}")
+        raise SystemExit(1) from None
     agent = Agent(
         llm,
         system_prompt=settings.system_prompt,
@@ -361,7 +373,7 @@ def run(console: Console) -> None:
     )
     _show_welcome(
         console,
-        settings.deepseek_model,
+        settings.selected_model,
         settings.thinking_enabled,
         str(filesystem_tools.root),
         len(registry.definitions),
@@ -780,7 +792,7 @@ def _show_cockpit(
         git_available = False
 
     snapshot = CockpitSnapshot(
-        model=settings.deepseek_model,
+        model=settings.selected_model,
         thinking_enabled=settings.thinking_enabled,
         workspace=filesystem_tools.root,
         session_id=current_session.session_id,
@@ -842,7 +854,7 @@ def _try_show_live_cockpit(
         return run_live_cockpit(
             agent,
             event_bus,
-            model=settings.deepseek_model,
+            model=settings.selected_model,
             workspace=str(workspace),
             security=initial_security,
             security_observer=lambda: _observe_security(
@@ -1776,20 +1788,23 @@ def _confirm_tool_call(console: Console, call: ToolCall, preview: str) -> bool:
 
 def _show_config_error(console: Console, error: ValidationError) -> None:
     message = _config_error_message(error)
-    if message.startswith("未找到 DEEPSEEK_API_KEY"):
-        console.print("[bold red]配置错误：[/bold red]未找到 DEEPSEEK_API_KEY。")
-        console.print("请复制 .env.example 为 .env，并填写你的 DeepSeek API Key。")
+    if message.startswith("未找到 "):
+        console.print(f"[bold red]配置错误：[/bold red]{message}")
+        console.print("请复制 .env.example 为 .env，并填写所选 Provider 的必需配置。")
         return
     console.print(f"[bold red]配置错误：[/bold red]{message}")
 
 
 def _config_error_message(error: ValidationError) -> str:
-    missing_api_key = any(
-        item["type"] == "missing" and item["loc"] == ("deepseek_api_key",)
-        for item in error.errors()
+    required_names = (
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "LLM_MODEL",
     )
-    if missing_api_key:
-        return "未找到 DEEPSEEK_API_KEY。"
+    for name in required_names:
+        if any(name in str(item.get("msg", "")) for item in error.errors()):
+            return f"未找到 {name}。"
     fields = sorted({str(item["loc"][0]) for item in error.errors() if item.get("loc")})
     field_text = "、".join(fields) if fields else "未知字段"
     return f"配置字段无效：{field_text}。请检查 .env；未显示原始值。"

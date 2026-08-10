@@ -72,14 +72,21 @@ def run_diagnostics(
 
 
 def _check_configuration(settings: Settings) -> DiagnosticCheck:
-    secure_endpoint = settings.deepseek_base_url.scheme == "https"
+    endpoint = settings.selected_base_url
+    secure_endpoint = endpoint is None or endpoint.scheme == "https"
+    key_status = (
+        "已配置（值已隐藏）"
+        if settings.selected_api_key is not None
+        else "无需配置"
+    )
     return DiagnosticCheck(
         name="配置",
         status="ok" if secure_endpoint else "warning",
         summary="配置已通过校验" if secure_endpoint else "API 地址未使用 HTTPS",
         details=(
-            "API Key：已配置（值已隐藏）",
-            f"模型：{settings.deepseek_model}",
+            f"Provider：{settings.llm_provider.value}",
+            f"API Key：{key_status}",
+            f"模型：{settings.selected_model}",
             f"请求超时：{settings.request_timeout:g} 秒",
             f"失败重试：最多 {settings.max_retries} 次，"
             f"等待上限 {settings.retry_max_delay:g} 秒",

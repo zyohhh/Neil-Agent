@@ -19,6 +19,13 @@ from neil_agent import llm as llm_module
 from neil_agent.config import Settings
 from neil_agent.errors import LLMError
 from neil_agent.llm import LLMClient
+from neil_agent.providers.base import ProviderId
+from neil_agent.providers.errors import (
+    ProviderAuthenticationError,
+    ProviderConnectionError,
+    ProviderInvalidRequestError,
+    ProviderNotImplementedError,
+)
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -55,6 +62,33 @@ def test_complete_extracts_text_content() -> None:
     request = client.messages.create.call_args.kwargs
     assert request["model"] == "deepseek-v4-flash"
     assert request["thinking"] == {"type": "disabled"}
+
+
+def test_generic_model_override_is_used_by_deepseek_compatibility_path() -> None:
+    client = MagicMock(spec=Anthropic)
+    client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="hello")]
+    )
+    settings = make_settings().model_copy(update={"llm_model": "override-model"})
+    llm = LLMClient(settings, client=cast(Anthropic, client))
+
+    llm.complete(
+        [Message(role="user", content="hi")],
+        system_prompt="Be helpful.",
+    )
+
+    assert client.messages.create.call_args.kwargs["model"] == "override-model"
+
+
+def test_deepseek_compatibility_entry_rejects_other_provider() -> None:
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.OLLAMA,
+        llm_model="local-model",
+    )
+
+    with pytest.raises(ProviderNotImplementedError, match="DeepSeek 兼容入口"):
+        LLMClient(settings)
 
 
 def test_default_sdk_client_disables_hidden_retries(
@@ -247,7 +281,7 @@ def test_authentication_error_is_not_retried() -> None:
         sleeper=delays.append,
     )
 
-    with pytest.raises(LLMError, match="API Key 无效"):
+    with pytest.raises(ProviderAuthenticationError, match="API Key 无效"):
         llm.complete(
             [Message(role="user", content="hello")],
             system_prompt="Be helpful.",
@@ -273,7 +307,7 @@ def test_bad_request_is_not_retried() -> None:
         sleeper=delays.append,
     )
 
-    with pytest.raises(LLMError, match="HTTP 400"):
+    with pytest.raises(ProviderInvalidRequestError, match="HTTP 400"):
         llm.complete(
             [Message(role="user", content="hello")],
             system_prompt="Be helpful.",
@@ -297,7 +331,7 @@ def test_transient_error_stops_after_configured_retry_limit() -> None:
         sleeper=delays.append,
     )
 
-    with pytest.raises(LLMError, match="无法连接"):
+    with pytest.raises(ProviderConnectionError, match="无法连接"):
         llm.complete(
             [Message(role="user", content="hello")],
             system_prompt="Be helpful.",

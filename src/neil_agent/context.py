@@ -296,15 +296,17 @@ class PreparedCompaction:
 
 
 def estimate_message_chars(message: Message) -> int:
-    """Estimate request size from the compact API JSON representation."""
+    """Estimate request size from compact provider-neutral domain JSON."""
 
-    return _json_chars(message.to_api_dict())
+    return _json_chars(message.model_dump(mode="json", exclude_defaults=True))
 
 
 def estimate_message_tokens(message: Message) -> int:
     """Return a conservative model-independent token estimate for one message."""
 
-    return estimate_text_tokens(_json_text(message.to_api_dict()))
+    return estimate_text_tokens(
+        _json_text(message.model_dump(mode="json", exclude_defaults=True))
+    )
 
 
 def estimate_messages_chars(messages: Sequence[Message]) -> int:
@@ -322,13 +324,15 @@ def estimate_messages_tokens(messages: Sequence[Message]) -> int:
 def estimate_tool_result_chars(result: ToolResult) -> int:
     """Estimate one tool-result block without retaining its body."""
 
-    return _json_chars(result.to_api_dict())
+    return _json_chars(result.model_dump(mode="json", exclude_defaults=True))
 
 
 def estimate_tool_result_tokens(result: ToolResult) -> int:
     """Estimate tokens in one tool-result block without retaining its body."""
 
-    return estimate_text_tokens(_json_text(result.to_api_dict()))
+    return estimate_text_tokens(
+        _json_text(result.model_dump(mode="json", exclude_defaults=True))
+    )
 
 
 def estimate_fixed_chars(
@@ -339,7 +343,10 @@ def estimate_fixed_chars(
 
     payload = {
         "system": system_prompt,
-        "tools": [definition.to_api_dict() for definition in tools],
+        "tools": [
+            definition.model_dump(mode="json", exclude_defaults=True)
+            for definition in tools
+        ],
     }
     return _json_chars(payload)
 
@@ -352,7 +359,10 @@ def estimate_fixed_tokens(
 
     payload = {
         "system": system_prompt,
-        "tools": [definition.to_api_dict() for definition in tools],
+        "tools": [
+            definition.model_dump(mode="json", exclude_defaults=True)
+            for definition in tools
+        ],
     }
     return estimate_text_tokens(_json_text(payload))
 

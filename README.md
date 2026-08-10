@@ -38,6 +38,8 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。
 高级上下文断层图、安全盾、时间机器和仓库热力图的增量路线见
 [`docs/visualization-development.md`](docs/visualization-development.md)。
+多 LLM Provider 的协议边界、配置迁移和分阶段实现见
+[`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前运行实现仍为 DeepSeek，其他 Provider 会在适配器注册前 fail closed。
 
 ## 一次性非交互运行
 

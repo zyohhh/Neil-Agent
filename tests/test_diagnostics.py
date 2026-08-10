@@ -8,6 +8,7 @@ from neil_agent.audit import AUDIT_LOCK_FILENAME, JsonlAuditSink, _AuditFileLock
 from neil_agent.config import Settings
 from neil_agent.diagnostics import run_diagnostics
 from neil_agent.errors import ToolError
+from neil_agent.providers.base import ProviderId
 from neil_agent.sandbox import (
     SandboxCapabilities,
     SandboxCertification,
@@ -226,6 +227,32 @@ def test_doctor_warns_for_insecure_endpoint_corrupt_session_and_missing_git(
     assert statuses["Git"] == "warning"
     assert report.warning_count == 3
     assert "git is unavailable" not in repr(report)
+
+
+def test_doctor_reports_selected_local_provider_without_requiring_key(
+    tmp_path: Path,
+) -> None:
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.OLLAMA,
+        llm_model="local-model",
+        workspace_root=tmp_path,
+    )
+
+    report = run_diagnostics(
+        settings,
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    configuration = report.checks[0]
+    assert configuration.status == "warning"
+    assert "Provider：ollama" in configuration.details
+    assert "API Key：无需配置" in configuration.details
+    assert "模型：local-model" in configuration.details
 
 
 def test_doctor_inspects_enabled_audit_without_exposing_records(

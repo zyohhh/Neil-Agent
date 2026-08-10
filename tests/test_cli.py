@@ -15,6 +15,7 @@ from neil_agent.agent import Agent
 from neil_agent.config import Settings
 from neil_agent.errors import SessionError
 from neil_agent.instructions import load_project_instructions
+from neil_agent.providers.base import ProviderId
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -364,6 +365,20 @@ def test_config_error_message_does_not_echo_invalid_raw_value() -> None:
     message = cli._config_error_message(error_info.value)
     assert "deepseek_base_url" in message
     assert secret_value not in message
+
+
+def test_config_error_message_names_only_the_selected_provider_requirement() -> None:
+    with pytest.raises(cli.ValidationError) as error_info:
+        Settings(
+            _env_file=None,
+            llm_provider=ProviderId.OPENAI,
+            llm_model="configured-model",
+        )
+
+    message = cli._config_error_message(error_info.value)
+
+    assert message == "未找到 OPENAI_API_KEY。"
+    assert "DEEPSEEK_API_KEY" not in message
 
 
 def test_context_distinguishes_estimate_from_server_usage() -> None:

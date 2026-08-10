@@ -46,7 +46,10 @@ agent.py
       本进程 Agent 回合级多文件检查点、内容哈希与恢复候选
     ↓
 llm.py
-  DeepSeek Anthropic API、有界重试、流式事件、ToolCall 与 usage 解析
+  DeepSeek 向后兼容入口、流式事件、ToolCall 与 usage 解析
+    ↓
+providers/
+  Provider 身份/能力/错误/重试/工厂，以及 Anthropic Messages 协议编码边界
     ↓
 tools/registry.py
   工具注册、参数绑定、预览和执行分发
@@ -165,7 +168,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 ## 模型请求重试
 
-- Anthropic SDK 客户端固定使用 `max_retries=0`，所有自动重试由 `LLMClient` 统一执行，保证次数、等待和终端状态可观察。
+- Provider SDK 客户端关闭隐藏重试；`providers/retry.py` 提供公共有界策略，当前 DeepSeek `LLMClient` 负责驱动并报告每次重试，保证次数、等待和终端状态可观察。
 - 只把限流、HTTP 408、HTTP 5xx、超时和连接错误视为瞬时失败；鉴权、权限、请求格式及其他 4xx 错误不重试。
 - 等待时间以 `RETRY_BASE_DELAY` 指数增长，并受 `RETRY_MAX_DELAY` 限制；有效的 `Retry-After` 或 `retry-after-ms` 可以提供等待建议，但不能突破本地上限。
 - `MAX_RETRIES` 表示首次请求后的额外尝试次数。达到上限后，最后一个 SDK 异常转换为稳定的中文 `LLMError`。

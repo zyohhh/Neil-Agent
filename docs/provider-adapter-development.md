@@ -5,7 +5,7 @@
 本文档规划 Neil Agent 的多 LLM Provider 协议适配层，仅覆盖 Provider 抽象、协议转换、配置、错误语义和契约测试。
 
 - 开发分支：`feature/provider-runtime`
-- 当前阶段：Phase 0 已完成，准备进入 Phase 1
+- 当前阶段：Phase 1 已完成，准备进入 Phase 2
 - 目标 Provider：DeepSeek、Claude、OpenAI、Ollama、vLLM
 - 暂不纳入：MCP、评测基准、模型路由与自动降级、可视化、Windows Sandbox 后续主线
 
@@ -309,6 +309,14 @@ Provider 初始化时应生成最终能力快照。Agent 请求某项能力前�
 - 保留旧 DeepSeek 启动方式的兼容路径。
 
 交付物：ProviderFactory、能力快照、统一异常、配置回归测试。
+
+完成记录（2026-08-10）：
+
+- 新增 `providers/base.py`、`errors.py`、`retry.py`、`factory.py` 和 `anthropic_messages.py`，落地 Provider 身份、能力快照、停止原因、私有状态、统一错误与重试策略。
+- `Message`、`ToolCall`、`ToolResult` 和 `ToolDefinition` 不再携带 Anthropic `to_api_dict()`；协议编码集中到 Anthropic Messages 适配边界，上下文预算与压缩改用 provider-neutral 领域 JSON。
+- Settings 默认兼容 DeepSeek，同时支持 `LLM_PROVIDER`、`LLM_MODEL`、`LLM_BASE_URL` 及按选中 Provider 条件校验的密钥；Ollama/vLLM 不再要求云 API Key。
+- ProviderFactory 当前仅注册 DeepSeek；选择尚未实现的 Claude/OpenAI/Ollama/vLLM 会在网络请求前 fail closed，不会静默回落。
+- `ModelResponse` 已加入统一 `stop_reason` 和可选 `provider_state`，旧 `LLMClient` 继续作为 DeepSeek 兼容入口。
 
 ### Phase 2：完成 Anthropic Messages 家族（2～3 天）
 

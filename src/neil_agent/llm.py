@@ -4,16 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from time import sleep
-from typing import cast
 
 from anthropic import (
-    APIConnectionError,
     APIError,
-    APIStatusError,
-    APITimeoutError,
     Anthropic,
-    AuthenticationError,
-    RateLimitError,
 )
 from anthropic.types import (
     ContentBlock,
@@ -24,7 +18,29 @@ from anthropic.types import (
 )
 
 from .config import Settings, get_settings
-from .errors import LLMError
+from .providers.anthropic_messages import (
+    encode_messages,
+    encode_tools,
+    normalize_anthropic_error,
+    normalize_stop_reason,
+)
+from .providers.base import (
+    ProviderCapabilities,
+    ProviderDescriptor,
+    ProviderId,
+    WireProtocol,
+)
+from .providers.errors import (
+    ProviderAuthenticationError,
+    ProviderConnectionError,
+    ProviderError,
+    ProviderInternalError,
+    ProviderNotImplementedError,
+    ProviderProtocolError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+)
+from .providers.retry import RetryPolicy
 from .schemas import (
     ActivityEvent,
     Message,
@@ -37,6 +53,20 @@ from .schemas import (
 
 RetryHandler = Callable[[ActivityEvent], None]
 Sleeper = Callable[[float], None]
+DEEPSEEK_DESCRIPTOR = ProviderDescriptor(
+    provider=ProviderId.DEEPSEEK,
+    display_name="DeepSeek",
+    wire_protocol=WireProtocol.ANTHROPIC_MESSAGES,
+    capabilities=ProviderCapabilities(
+        streaming=True,
+        tool_calling=True,
+        parallel_tool_calls=False,
+        reasoning_state=True,
+        structured_output=False,
+        usage_reporting=True,
+        prompt_caching=False,
+    ),
+)
 
 
 class LLMClient:
@@ -50,11 +80,34 @@ class LLMClient:
         sleeper: Sleeper = sleep,
     ) -> None:
         self.settings = settings or get_settings()
+        if self.settings.llm_provider is not ProviderId.DEEPSEEK:
+            raise ProviderNotImplementedError(
+                f"Provider '{self.settings.llm_provider.value}' "
+                "不能通过 DeepSeek 兼容入口启动。",
+                provider=self.settings.llm_provider,
+            )
+        api_key = self.settings.selected_api_key
+        if api_key is None:
+            raise ProviderAuthenticationError(
+                "未配置 DeepSeek API Key。",
+                provider=ProviderId.DEEPSEEK,
+            )
+        base_url = self.settings.selected_base_url
+        if base_url is None:
+            raise ProviderProtocolError(
+                "未配置 DeepSeek API 地址。",
+                provider=ProviderId.DEEPSEEK,
+            )
         self._client = client or Anthropic(
-            api_key=self.settings.deepseek_api_key.get_secret_value(),
-            base_url=str(self.settings.deepseek_base_url).rstrip("/"),
+            api_key=api_key.get_secret_value(),
+            base_url=str(base_url).rstrip("/"),
             timeout=self.settings.request_timeout,
             max_retries=0,
+        )
+        self._retry_policy = RetryPolicy(
+            max_retries=self.settings.max_retries,
+            base_delay=self.settings.retry_base_delay,
+            max_delay=self.settings.retry_max_delay,
         )
         self._retry_handler = retry_handler
         self._sleeper = sleeper
@@ -76,6 +129,12 @@ class LLMClient:
 
         return self._last_usage
 
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        """Return safe metadata and the capabilities of this adapter."""
+
+        return DEEPSEEK_DESCRIPTOR
+
     def complete(
         self,
         messages: Sequence[Message],
@@ -90,16 +149,20 @@ class LLMClient:
         while True:
             try:
                 response = self._client.messages.create(
-                    model=self.settings.deepseek_model,
+                    model=self.settings.selected_model,
                     max_tokens=self.settings.max_tokens,
                     system=system_prompt,
                     messages=self._to_api_messages(messages),
                     thinking=self._thinking_config(),
                 )
                 break
-            except APIError as error:
-                if not self._can_retry(error, retries_done):
-                    raise self._friendly_error(error) from error
+            except APIError as sdk_error:
+                error = normalize_anthropic_error(
+                    sdk_error,
+                    provider=ProviderId.DEEPSEEK,
+                )
+                if not self._retry_policy.can_retry(error, retries_done):
+                    raise error from sdk_error
                 retries_done += 1
                 self._wait_for_retry(error, retries_done)
 
@@ -125,7 +188,7 @@ class LLMClient:
         while True:
             try:
                 with self._client.messages.stream(
-                    model=self.settings.deepseek_model,
+                    model=self.settings.selected_model,
                     max_tokens=self.settings.max_tokens,
                     system=system_prompt,
                     messages=self._to_api_messages(messages),
@@ -138,9 +201,17 @@ class LLMClient:
                             yield text
                     final_message = stream.get_final_message()
                 break
-            except APIError as error:
-                if emitted_text or not self._can_retry(error, retries_done):
-                    raise self._friendly_error(error) from error
+            except APIError as sdk_error:
+                error = normalize_anthropic_error(
+                    sdk_error,
+                    provider=ProviderId.DEEPSEEK,
+                )
+                if not self._retry_policy.can_retry(
+                    error,
+                    retries_done,
+                    output_started=emitted_text,
+                ):
+                    raise error from sdk_error
                 retries_done += 1
                 self._wait_for_retry(error, retries_done)
 
@@ -155,11 +226,11 @@ class LLMClient:
 
     @staticmethod
     def _to_api_messages(messages: Sequence[Message]) -> list[MessageParam]:
-        return [cast(MessageParam, message.to_api_dict()) for message in messages]
+        return encode_messages(messages)
 
     @staticmethod
     def _to_api_tools(tools: Sequence[ToolDefinition]) -> list[ToolParam]:
-        return [cast(ToolParam, tool.to_api_dict()) for tool in tools]
+        return encode_tools(tools)
 
     def _thinking_config(self) -> ThinkingConfigParam:
         if self.settings.thinking_enabled:
@@ -167,17 +238,8 @@ class LLMClient:
             return {"type": "enabled", "budget_tokens": 1024}
         return {"type": "disabled"}
 
-    def _can_retry(self, error: APIError, retries_done: int) -> bool:
-        if retries_done >= self.settings.max_retries:
-            return False
-        if isinstance(error, (RateLimitError, APITimeoutError, APIConnectionError)):
-            return True
-        return isinstance(error, APIStatusError) and (
-            error.status_code == 408 or 500 <= error.status_code <= 599
-        )
-
-    def _wait_for_retry(self, error: APIError, retry_number: int) -> None:
-        delay = self._retry_delay(error, retry_number)
+    def _wait_for_retry(self, error: ProviderError, retry_number: int) -> None:
+        delay = self._retry_policy.delay(error, retry_number)
         self._emit_retry_activity(
             "模型请求暂时失败，等待重试",
             error,
@@ -194,17 +256,10 @@ class LLMClient:
                 )
             )
 
-    def _retry_delay(self, error: APIError, retry_number: int) -> float:
-        server_delay = self._server_retry_delay(error)
-        if server_delay is not None:
-            return min(server_delay, self.settings.retry_max_delay)
-        exponential_delay = self.settings.retry_base_delay * (2 ** (retry_number - 1))
-        return min(exponential_delay, self.settings.retry_max_delay)
-
     def _emit_retry_activity(
         self,
         message: str,
-        error: APIError,
+        error: ProviderError,
         retry_number: int,
         delay: float,
     ) -> None:
@@ -223,38 +278,25 @@ class LLMClient:
         )
 
     @staticmethod
-    def _server_retry_delay(error: APIError) -> float | None:
-        if not isinstance(error, APIStatusError):
-            return None
-        for header, divisor in (("retry-after-ms", 1_000), ("retry-after", 1)):
-            raw_value = error.response.headers.get(header)
-            if raw_value is None:
-                continue
-            try:
-                value = float(raw_value) / divisor
-            except ValueError:
-                continue
-            if value >= 0:
-                return value
-        return None
-
-    @staticmethod
-    def _retry_reason(error: APIError) -> str:
-        if isinstance(error, RateLimitError):
+    def _retry_reason(error: ProviderError) -> str:
+        if isinstance(error, ProviderRateLimitError):
             return "DeepSeek 限流"
-        if isinstance(error, APITimeoutError):
+        if isinstance(error, ProviderTimeoutError):
             return "请求超时"
-        if isinstance(error, APIConnectionError):
+        if isinstance(error, ProviderConnectionError):
             return "连接中断"
-        if isinstance(error, APIStatusError):
+        if isinstance(error, ProviderInternalError) and error.status_code is not None:
             return f"服务端 HTTP {error.status_code}"
-        return "临时 API 错误"
+        return "Provider 临时错误"
 
     @staticmethod
     def _extract_text(content: Iterable[ContentBlock]) -> str:
         text = "".join(block.text for block in content if block.type == "text")
         if not text.strip():
-            raise LLMError("模型返回了空内容，请重新尝试。")
+            raise ProviderProtocolError(
+                "模型返回了空内容，请重新尝试。",
+                provider=ProviderId.DEEPSEEK,
+            )
         return text
 
     @staticmethod
@@ -267,7 +309,10 @@ class LLMClient:
             if block.type == "tool_use"
         )
         if not text.strip() and not tool_calls:
-            raise LLMError("模型返回了空内容，请重新尝试。")
+            raise ProviderProtocolError(
+                "模型返回了空内容，请重新尝试。",
+                provider=ProviderId.DEEPSEEK,
+            )
 
         thinking: tuple[ThinkingContent, ...] = ()
         if tool_calls:
@@ -287,6 +332,10 @@ class LLMClient:
             usage=(
                 LLMClient._to_token_usage(sdk_usage) if sdk_usage is not None else None
             ),
+            stop_reason=normalize_stop_reason(
+                getattr(message, "stop_reason", None),
+                has_tool_calls=bool(tool_calls),
+            ),
         )
 
     @staticmethod
@@ -303,17 +352,3 @@ class LLMClient:
             cache_creation_input_tokens=token_count("cache_creation_input_tokens"),
             cache_read_input_tokens=token_count("cache_read_input_tokens"),
         )
-
-    @staticmethod
-    def _friendly_error(error: APIError) -> LLMError:
-        if isinstance(error, AuthenticationError):
-            return LLMError("DeepSeek API Key 无效，请检查 .env 文件。")
-        if isinstance(error, RateLimitError):
-            return LLMError("DeepSeek 请求过于频繁，请稍后重试。")
-        if isinstance(error, APITimeoutError):
-            return LLMError("DeepSeek 请求超时，请检查网络后重试。")
-        if isinstance(error, APIConnectionError):
-            return LLMError("无法连接 DeepSeek API，请检查网络和 API 地址。")
-        if isinstance(error, APIStatusError):
-            return LLMError(f"DeepSeek API 请求失败（HTTP {error.status_code}）。")
-        return LLMError("DeepSeek API 请求失败，请稍后重试。")

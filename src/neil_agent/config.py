@@ -7,9 +7,14 @@ from typing import Literal, Self
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .providers.base import ProviderId
+
 DEFAULT_SYSTEM_PROMPT = """You are Neil Agent, a helpful local coding assistant.
 Give accurate, practical, and concise answers. Explain unfamiliar programming
 concepts clearly, and say when you are uncertain instead of inventing facts."""
+DEFAULT_DEEPSEEK_BASE_URL = AnyHttpUrl("https://api.deepseek.com/anthropic")
+DEFAULT_OLLAMA_BASE_URL = AnyHttpUrl("http://localhost:11434/v1")
+DEFAULT_VLLM_BASE_URL = AnyHttpUrl("http://localhost:8000/v1")
 
 
 class Settings(BaseSettings):
@@ -26,18 +31,42 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    deepseek_api_key: SecretStr = Field(
+    llm_provider: ProviderId = Field(
+        default=ProviderId.DEEPSEEK,
+        description="Selected model provider; defaults to the legacy DeepSeek path.",
+    )
+    llm_model: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Provider model identifier; overrides the legacy DeepSeek model.",
+    )
+    llm_base_url: AnyHttpUrl | None = Field(
+        default=None,
+        description="Optional endpoint override for the selected provider.",
+    )
+    deepseek_api_key: SecretStr | None = Field(
+        default=None,
         min_length=1,
         description="API key created in the DeepSeek platform.",
     )
     deepseek_base_url: AnyHttpUrl = Field(
-        default=AnyHttpUrl("https://api.deepseek.com/anthropic"),
+        default=DEFAULT_DEEPSEEK_BASE_URL,
         description="DeepSeek Anthropic-compatible API endpoint.",
     )
     deepseek_model: str = Field(
         default="deepseek-v4-flash",
         min_length=1,
         description="DeepSeek model identifier.",
+    )
+    anthropic_api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        description="API key used by the Claude provider.",
+    )
+    openai_api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        description="API key used by the OpenAI provider.",
     )
     system_prompt: str = Field(
         default=DEFAULT_SYSTEM_PROMPT,
@@ -46,7 +75,7 @@ class Settings(BaseSettings):
     )
     thinking_enabled: bool = Field(
         default=False,
-        description="Whether DeepSeek thinking mode is enabled.",
+        description="Whether provider reasoning mode is enabled when supported.",
     )
     max_tokens: int = Field(
         default=8192,
@@ -154,18 +183,84 @@ class Settings(BaseSettings):
             raise ValueError("system prompt must not be blank")
         return value
 
+    @field_validator("llm_model", "deepseek_model")
+    @classmethod
+    def model_name_must_not_be_blank(cls, value: str | None) -> str | None:
+        """Reject model identifiers containing only whitespace."""
+
+        if value is not None and not value.strip():
+            raise ValueError("model identifier must not be blank")
+        return value
+
     @model_validator(mode="after")
-    def retry_delay_is_ordered(self) -> Self:
-        """Keep exponential retry delays within the configured upper bound."""
+    def validate_provider_and_retry_settings(self) -> Self:
+        """Conditionally validate only the selected provider and retry policy."""
 
         if self.retry_base_delay > self.retry_max_delay:
             raise ValueError("retry base delay cannot exceed retry max delay")
+        required_key = {
+            ProviderId.DEEPSEEK: ("DEEPSEEK_API_KEY", self.deepseek_api_key),
+            ProviderId.CLAUDE: ("ANTHROPIC_API_KEY", self.anthropic_api_key),
+            ProviderId.OPENAI: ("OPENAI_API_KEY", self.openai_api_key),
+        }.get(self.llm_provider)
+        if required_key is not None and required_key[1] is None:
+            raise ValueError(
+                f"{required_key[0]} is required when "
+                f"LLM_PROVIDER={self.llm_provider.value}"
+            )
+        if self.llm_provider is not ProviderId.DEEPSEEK and self.llm_model is None:
+            raise ValueError(
+                f"LLM_MODEL is required when LLM_PROVIDER={self.llm_provider.value}"
+            )
         return self
+
+    @property
+    def selected_model(self) -> str:
+        """Return the model identifier for the selected provider."""
+
+        if self.llm_model is not None:
+            return self.llm_model
+        return self.deepseek_model
+
+    @property
+    def selected_base_url(self) -> AnyHttpUrl | None:
+        """Return an explicit or compatibility endpoint for the selected provider."""
+
+        if self.llm_base_url is not None:
+            return self.llm_base_url
+        if self.llm_provider is ProviderId.DEEPSEEK:
+            return self.deepseek_base_url
+        if self.llm_provider is ProviderId.OLLAMA:
+            return DEFAULT_OLLAMA_BASE_URL
+        if self.llm_provider is ProviderId.VLLM:
+            return DEFAULT_VLLM_BASE_URL
+        return None
+
+    @property
+    def selected_api_key(self) -> SecretStr | None:
+        """Return only the selected provider key, never an unrelated secret."""
+
+        return {
+            ProviderId.DEEPSEEK: self.deepseek_api_key,
+            ProviderId.CLAUDE: self.anthropic_api_key,
+            ProviderId.OPENAI: self.openai_api_key,
+            ProviderId.OLLAMA: None,
+            ProviderId.VLLM: None,
+        }[self.llm_provider]
+
+    @property
+    def selected_api_key_required(self) -> bool:
+        """Return whether the selected provider needs a configured API key."""
+
+        return self.llm_provider in {
+            ProviderId.DEEPSEEK,
+            ProviderId.CLAUDE,
+            ProviderId.OPENAI,
+        }
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Load and cache application settings on first use."""
 
-    # The required API key is supplied by the environment or .env at runtime.
-    return Settings()  # type: ignore[call-arg]
+    return Settings()

@@ -13,6 +13,7 @@ from neil_agent.noninteractive import (
     SUPPORTED_ERROR_CODES_V2,
     run_noninteractive,
 )
+from neil_agent.providers.base import ProviderId
 from neil_agent.schemas import (
     Message,
     ModelResponse,
@@ -207,6 +208,30 @@ def test_stream_json_emits_json_lines_in_protocol_order(tmp_path: Path) -> None:
     assert events[-1]["usage"]["total_tokens"] == 10
 
 
+def test_stream_protocol_reports_selected_provider_model(tmp_path: Path) -> None:
+    stdout = StringIO()
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.OLLAMA,
+        llm_model="local-model",
+        workspace_root=tmp_path,
+    )
+
+    exit_code = run_noninteractive(
+        settings,
+        "say hello",
+        output_format="stream-json",
+        stdout=stdout,
+        stderr=StringIO(),
+        llm=OneShotFakeModel(),
+    )
+
+    events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert exit_code == 0
+    assert events[0]["type"] == "session_start"
+    assert events[0]["model"] == "local-model"
+
+
 def test_structured_runtime_error_is_sanitized_and_has_explicit_exit(
     tmp_path: Path,
 ) -> None:
@@ -286,6 +311,31 @@ def test_expected_model_error_has_stable_error_code(tmp_path: Path) -> None:
     payload = json.loads(stdout.getvalue())
     assert exit_code == 1
     assert payload["error_code"] == "model_error"
+
+
+def test_unimplemented_selected_provider_fails_before_network_access(
+    tmp_path: Path,
+) -> None:
+    stdout = StringIO()
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.OLLAMA,
+        llm_model="local-model",
+        workspace_root=tmp_path,
+    )
+
+    exit_code = run_noninteractive(
+        settings,
+        "hello",
+        output_format="json",
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert exit_code == 1
+    assert payload["error_code"] == "model_error"
+    assert "ollama" in payload["error"]
 
 
 def test_stream_protocol_matches_versioned_contract_fixture(tmp_path: Path) -> None:

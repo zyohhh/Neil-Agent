@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from neil_agent.config import Settings
+from neil_agent.providers.base import ProviderId
 
 
 def test_system_prompt_and_thinking_mode_load_from_environment(
@@ -18,6 +19,78 @@ def test_system_prompt_and_thinking_mode_load_from_environment(
 
     assert settings.system_prompt == "You are a patient Python tutor."
     assert settings.thinking_enabled is True
+
+
+def test_legacy_deepseek_configuration_remains_the_default() -> None:
+    settings = Settings(_env_file=None, deepseek_api_key="test-key")
+
+    assert settings.llm_provider is ProviderId.DEEPSEEK
+    assert settings.selected_model == settings.deepseek_model
+    assert settings.selected_base_url == settings.deepseek_base_url
+    assert settings.selected_api_key == settings.deepseek_api_key
+
+
+def test_default_deepseek_provider_still_requires_its_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    with pytest.raises(ValidationError, match="DEEPSEEK_API_KEY is required"):
+        Settings(_env_file=None)
+
+
+def test_local_provider_does_not_require_any_cloud_api_key() -> None:
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.OLLAMA,
+        llm_model="qwen-local",
+    )
+
+    assert settings.deepseek_api_key is None
+    assert settings.selected_api_key is None
+    assert settings.selected_api_key_required is False
+    assert str(settings.selected_base_url) == "http://localhost:11434/v1"
+
+
+def test_cloud_provider_validates_only_its_selected_key() -> None:
+    with pytest.raises(ValidationError, match="OPENAI_API_KEY is required"):
+        Settings(
+            _env_file=None,
+            llm_provider=ProviderId.OPENAI,
+            llm_model="configured-openai-model",
+        )
+
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.OPENAI,
+        llm_model="configured-openai-model",
+        openai_api_key="openai-secret",
+    )
+
+    assert settings.deepseek_api_key is None
+    assert settings.selected_model == "configured-openai-model"
+    assert settings.selected_api_key == settings.openai_api_key
+    assert "openai-secret" not in repr(settings)
+
+
+def test_non_deepseek_provider_requires_explicit_model() -> None:
+    with pytest.raises(ValidationError, match="LLM_MODEL is required"):
+        Settings(
+            _env_file=None,
+            llm_provider=ProviderId.VLLM,
+        )
+
+
+def test_generic_model_and_endpoint_override_deepseek_compatibility_fields() -> None:
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        llm_model="override-model",
+        llm_base_url="https://gateway.example/v1",
+    )
+
+    assert settings.selected_model == "override-model"
+    assert str(settings.selected_base_url) == "https://gateway.example/v1"
 
 
 def test_system_prompt_rejects_whitespace_only_value() -> None:

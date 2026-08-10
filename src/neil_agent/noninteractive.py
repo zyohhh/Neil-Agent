@@ -29,6 +29,7 @@ from .errors import (
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
 from .llm import LLMClient
+from .providers.factory import create_provider
 from .schemas import ActivityEvent, TokenUsage
 from .session import SessionStore
 from .sandbox import WindowsSandboxBackend
@@ -345,7 +346,11 @@ def run_noninteractive(
             )
         session_store = SessionStore(filesystem.root)
         session = session_store.new_session()
-        model = llm or LLMClient(settings, retry_handler=writer.activity)
+        model = llm or create_provider(
+            settings,
+            retry_handler=writer.activity,
+            deepseek_builder=LLMClient,
+        )
         active_hooks = hooks.copy() if hooks is not None else LifecycleHooks()
         if settings.audit_log_enabled:
             JsonlAuditSink(
@@ -369,7 +374,7 @@ def run_noninteractive(
         )
         writer.start(
             session_id=session.session_id,
-            model=settings.deepseek_model,
+            model=settings.selected_model,
             workspace=filesystem.root,
             tools=tuple(definition.name for definition in registry.definitions),
         )
