@@ -34,6 +34,7 @@ from .instructions import (
     prepare_project_instructions_init,
 )
 from .llm import LLMClient
+from .providers.anthropic_runtime import AnthropicMessagesProvider
 from .noninteractive import (
     OutputFormat,
     PermissionMode,
@@ -341,7 +342,7 @@ def run(console: Console) -> None:
 
     try:
         llm = cast(
-            LLMClient,
+            AnthropicMessagesProvider,
             create_provider(
                 settings,
                 retry_handler=renderer.show_activity,
@@ -821,7 +822,7 @@ def _try_show_live_cockpit(
     console: Console,
     settings: Settings,
     agent: Agent,
-    llm: LLMClient,
+    llm: AnthropicMessagesProvider,
     task_tracker: TaskTracker,
     workspace: Path,
     registry: ToolRegistry | None = None,

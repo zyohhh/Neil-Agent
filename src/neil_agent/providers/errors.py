@@ -41,9 +41,7 @@ class ProviderError(LLMError):
             raise ValueError("provider error message must not be blank")
         if status_code is not None and not 100 <= status_code <= 599:
             raise ValueError("provider status code must be a valid HTTP status")
-        if retry_after is not None and (
-            not isfinite(retry_after) or retry_after < 0
-        ):
+        if retry_after is not None and (not isfinite(retry_after) or retry_after < 0):
             raise ValueError("provider retry delay must be finite and non-negative")
         super().__init__(message)
         self.provider = provider

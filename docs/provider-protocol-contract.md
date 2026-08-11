@@ -6,7 +6,7 @@
 - 契约版本：1
 - 冻结日期：2026-08-10
 - 适用范围：`ChatModel` 核心端口与 Provider 适配器
-- 基线实现：DeepSeek Anthropic-compatible `LLMClient`
+- 基线实现：共享 Anthropic Messages runtime、`DeepSeekProvider` 与 `ClaudeProvider`
 
 本文档记录多 Provider 改造前必须保持稳定的 Agent 语义。它描述的是 Neil Agent 内部契约，不是任何一家 Provider API 的复制品。
 
@@ -66,6 +66,7 @@ Phase 1 已移除核心 schema 的 `to_api_dict()`。Anthropic Messages 编码�
 - thinking 只在需要回放工具调用时保留；不能作为用户可见文本输出。
 - 成功结束后 `last_usage` 与终态 `ModelResponse.usage` 相同。
 - 中止或失败的半个响应不能进入 Agent 成功历史。
+- 调用方关闭流迭代器时，适配器必须退出 SDK stream context；取消不得重试，也不得伪造终态 `ModelResponse`。
 
 ## 5. Usage 语义
 
@@ -107,7 +108,9 @@ Phase 1 引入统一停止原因时，允许值冻结为：
 
 只有生成状态的 Provider 与兼容模型可以读取它。Provider 或模型变化时必须明确丢弃或拒绝；禁止伪造 Claude thinking signature 或把 OpenAI reasoning item 转换成 Anthropic block。
 
-`ModelResponse.provider_state` 已提供绑定 Provider、模型和 schema version 的不透明槽位。当前 `ThinkingContent` 仍是 DeepSeek/Anthropic 兼容字段，将在 Phase 2 迁移到适配器管理，不能被当成所有 Provider 的通用推理格式。
+Phase 2 已让 `ModelResponse.provider_state` 和 `Message.provider_state` 承担权威回放状态。Anthropic Messages runtime 会把含普通 `thinking`、`redacted_thinking`、文本和工具调用的完整 assistant content-block 顺序保存在私有状态中，绑定生成它们的 Provider、模型和 schema version；Agent 在工具轮次中原样携带该状态。编码器会先确认私有块与公开文本/工具调用完全一致，并在网络请求前拒绝内容分歧、跨 Provider 或跨模型回放，因此 interleaved thinking 不会被错误重排。
+
+`ThinkingContent` 暂时保留为普通 thinking 块的只读兼容镜像，供现有活动计数和历史数据使用；它不包含 redacted payload，也不是跨 Provider 推理格式。实际回放优先且只信任已绑定的 `provider_state`。私有 payload 在构造时递归冻结，序列化时转换为 JSON-safe 副本，避免调用方在请求之间篡改签名块。
 
 ## 8. 错误分类决策
 
@@ -133,6 +136,7 @@ Phase 1 已落地上述公共异常层；所有 `ProviderError` 仍继承 `LLMEr
 
 ```text
 tests/fixtures/providers/deepseek_anthropic_messages_v1.json
+tests/fixtures/providers/claude_anthropic_messages_v1.json
 ```
 
 该 fixture 是从当前适配器行为整理出的脱敏合成 characterization 数据，不声称来自真实在线响应。它固定以下行为：
@@ -142,6 +146,8 @@ tests/fixtures/providers/deepseek_anthropic_messages_v1.json
 - thinking 与工具调用的回放；
 - 工具定义的 Anthropic `input_schema` 映射；
 - 工具调用 ID 和缓存 token 统计。
+- Claude 原生请求在关闭 thinking 时省略该字段，在开启时区分 adaptive 与手动预算模式；
+- Claude 多工具调用 ID、普通 thinking、redacted thinking 及绑定状态的往返。
 
 fixture 必须带版本、Provider、线协议、来源类型和脱敏标志，且不得包含 API key。SDK 升级或适配器重构导致 fixture 变化时，需要逐字段人工审查；禁止为了让测试通过而无条件重录。
 
@@ -153,7 +159,7 @@ fixture 必须带版本、Provider、线协议、来源类型和脱敏标志，�
 2. 带文本 delta 的流式完成；
 3. 无文本、以工具调用结束的流式完成。
 
-后续 Phase 还需逐步补入取消、超时、部分流失败、非法工具 JSON、停止原因和能力拒绝。Provider 专用测试可以增加能力，但不能放宽公共契约。
+Phase 2 已补入主动取消、部分流失败、重复工具 ID、未知 content block、thinking 私有状态和跨 Provider/模型拒绝。后续 Phase 仍需为新线协议逐步补入超时、非法工具 JSON、完整停止原因和能力拒绝。Provider 专用测试可以增加能力，但不能放宽公共契约。
 
 ## 11. v1 变更规则
 

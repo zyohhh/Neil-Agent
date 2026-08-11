@@ -5,7 +5,7 @@
 本文档规划 Neil Agent 的多 LLM Provider 协议适配层，仅覆盖 Provider 抽象、协议转换、配置、错误语义和契约测试。
 
 - 开发分支：`feature/provider-runtime`
-- 当前阶段：Phase 1 已完成，准备进入 Phase 2
+- 当前阶段：Phase 2 已完成，准备进入 Phase 3
 - 目标 Provider：DeepSeek、Claude、OpenAI、Ollama、vLLM
 - 暂不纳入：MCP、评测基准、模型路由与自动降级、可视化、Windows Sandbox 后续主线
 
@@ -21,19 +21,19 @@
 
 “本地模型”是部署方式，不是一种独立协议。Ollama 和 vLLM 可以共享 OpenAI-compatible 适配器，但不能默认它们完整实现 OpenAI 的全部语义。
 
-## 2. 当前代码基础与问题
+## 2. 当前代码基础与剩余问题
 
-现有架构已经具备正确的依赖方向：`Agent` 依赖 `ChatModel` Protocol，而不是依赖具体 SDK。这一边界应继续保留。
+现有架构保持了正确的依赖方向：`Agent` 依赖 `ChatModel` Protocol，而不是具体 SDK。Phase 0～2 已完成 Provider 身份/能力/错误/重试契约、条件配置、Anthropic Messages 编解码边界，以及 DeepSeek/Claude 两套运行实现。
 
-当前需要解耦的部分包括：
+当前剩余工作包括：
 
-1. `src/neil_agent/llm.py` 中的 `LLMClient` 实际是 DeepSeek 的具体实现，名称却表现为通用客户端。
-2. `src/neil_agent/schemas.py` 中多种领域对象直接提供 Anthropic 风格的 `to_api_dict()`，协议序列化泄漏进了核心模型。
-3. 配置启动时要求 `DEEPSEEK_API_KEY`，即使用户选择其他 Provider 也无法独立启动。
-4. 重试、错误映射和流式状态与当前 SDK 行为耦合，难以验证不同 Provider 是否具有一致的 Agent 语义。
-5. 推理内容、工具调用和 usage 等能力没有显式声明，容易形成静默降级。
+1. OpenAI Responses 尚未形成独立编解码与流式状态机，不能通过 Anthropic 结构模拟。
+2. Ollama 与 vLLM 尚未建立保守的独立 capability profile 和请求前能力拒绝。
+3. `/doctor` 尚未完整展示脱敏的 Provider、模型、endpoint 与能力快照。
+4. DeepSeek/Claude 目前只有离线合成 fixture；受控在线 smoke test 仍需显式凭据、费用确认和单独记录。
+5. 旧 `LLMClient` 仍作为 DeepSeek 兼容 facade，后续需要给出明确迁移期限。
 
-因此，本阶段的核心不是“多写几个 SDK wrapper”，而是建立稳定的核心语义与协议边界。
+后续阶段继续围绕稳定核心语义和真实协议差异推进，不为目录整齐复制 SDK wrapper。
 
 ## 3. 设计目标
 
@@ -326,6 +326,16 @@ Provider 初始化时应生成最终能力快照。Agent 请求某项能力前�
 - 验证工具调用 ID、thinking 私有状态和取消语义。
 
 交付物：DeepSeek/Claude 两套可选 Provider，共享一套可审计的协议核心。
+
+完成记录（2026-08-11）：
+
+- 新增共享 `AnthropicMessagesProvider` runtime，将请求构造、消息与工具编码、完成/流式累积、usage、停止原因、错误归一化和有界重试从旧 `LLMClient` 中抽离；`LLMClient` 仅保留为 DeepSeek 兼容 facade。
+- 新增独立 `DeepSeekProvider` 与 `ClaudeProvider` profile，并在 `ProviderFactory` 中同时注册。DeepSeek 保留兼容 endpoint 与 thinking 开关；Claude 使用原生 endpoint，关闭 thinking 时省略字段，开启时支持 adaptive 与显式手动预算。
+- `Message.provider_state` 与 `ModelResponse.provider_state` 现在保存递归冻结、绑定 Provider/模型/schema version 的完整 Anthropic assistant content-block 顺序。普通 thinking、redacted-thinking 与 interleaved tool block 可跨工具轮次和会话 JSON 原样往返；公开内容不一致、跨 Provider 或模型回放会在网络前 fail closed。
+- 新增 Claude v1 脱敏合成 golden fixture，覆盖非流式文本、文本流、并行工具 ID、thinking/redacted-thinking 与 usage；DeepSeek fixture 同步纳入权威私有状态。
+- 新增主动关闭流的取消回归：SDK stream context 必须释放，不重试、不更新 usage、不产生伪造终态；同时覆盖重复工具 ID、未知 content block 与 Claude endpoint override。
+- 全量 pytest 为 624 项通过、19 项目标 Windows 平台条件跳过；Ruff lint/format、mypy 48 个源文件和 5 个内置离线评测全部通过。
+- 默认离线测试与评测未调用真实 DeepSeek/Claude API；在线 smoke test 仍需显式凭据、费用确认与单独记录。
 
 ### Phase 3：完成 OpenAI Responses（3～4 天）
 

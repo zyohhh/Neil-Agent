@@ -13,6 +13,7 @@ DEFAULT_SYSTEM_PROMPT = """You are Neil Agent, a helpful local coding assistant.
 Give accurate, practical, and concise answers. Explain unfamiliar programming
 concepts clearly, and say when you are uncertain instead of inventing facts."""
 DEFAULT_DEEPSEEK_BASE_URL = AnyHttpUrl("https://api.deepseek.com/anthropic")
+DEFAULT_CLAUDE_BASE_URL = AnyHttpUrl("https://api.anthropic.com")
 DEFAULT_OLLAMA_BASE_URL = AnyHttpUrl("http://localhost:11434/v1")
 DEFAULT_VLLM_BASE_URL = AnyHttpUrl("http://localhost:8000/v1")
 
@@ -76,6 +77,14 @@ class Settings(BaseSettings):
     thinking_enabled: bool = Field(
         default=False,
         description="Whether provider reasoning mode is enabled when supported.",
+    )
+    claude_thinking_mode: Literal["adaptive", "enabled"] = Field(
+        default="adaptive",
+        description="Claude reasoning mode: adaptive or a fixed manual budget.",
+    )
+    claude_thinking_budget_tokens: int = Field(
+        default=1024,
+        description="Manual Claude thinking budget; ignored in adaptive mode.",
     )
     max_tokens: int = Field(
         default=8192,
@@ -212,6 +221,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"LLM_MODEL is required when LLM_PROVIDER={self.llm_provider.value}"
             )
+        if (
+            self.llm_provider is ProviderId.CLAUDE
+            and self.thinking_enabled
+            and self.claude_thinking_mode == "enabled"
+        ):
+            if self.claude_thinking_budget_tokens < 1024:
+                raise ValueError("Claude thinking budget must be at least 1024 tokens")
+            if self.claude_thinking_budget_tokens >= self.max_tokens:
+                raise ValueError("Claude thinking budget must be less than max tokens")
         return self
 
     @property
@@ -230,6 +248,8 @@ class Settings(BaseSettings):
             return self.llm_base_url
         if self.llm_provider is ProviderId.DEEPSEEK:
             return self.deepseek_base_url
+        if self.llm_provider is ProviderId.CLAUDE:
+            return DEFAULT_CLAUDE_BASE_URL
         if self.llm_provider is ProviderId.OLLAMA:
             return DEFAULT_OLLAMA_BASE_URL
         if self.llm_provider is ProviderId.VLLM:

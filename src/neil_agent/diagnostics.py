@@ -75,9 +75,7 @@ def _check_configuration(settings: Settings) -> DiagnosticCheck:
     endpoint = settings.selected_base_url
     secure_endpoint = endpoint is None or endpoint.scheme == "https"
     key_status = (
-        "已配置（值已隐藏）"
-        if settings.selected_api_key is not None
-        else "无需配置"
+        "已配置（值已隐藏）" if settings.selected_api_key is not None else "无需配置"
     )
     return DiagnosticCheck(
         name="配置",

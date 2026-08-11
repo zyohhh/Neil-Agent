@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from neil_agent.providers.anthropic_messages import encode_message
+from neil_agent.providers.base import ProviderId, ProviderTurnState
 from neil_agent.schemas import Message, ThinkingContent, ToolCall, ToolResult
 
 
@@ -16,6 +17,7 @@ def test_message_remains_provider_neutral() -> None:
         "thinking": (),
         "tool_calls": (),
         "tool_results": (),
+        "provider_state": None,
     }
     assert not hasattr(message, "to_api_dict")
 
@@ -23,6 +25,18 @@ def test_message_remains_provider_neutral() -> None:
 def test_message_rejects_blank_content() -> None:
     with pytest.raises(ValidationError):
         Message(role="user", content="   ")
+
+
+def test_message_rejects_provider_state_without_tool_calls() -> None:
+    state = ProviderTurnState(
+        provider=ProviderId.CLAUDE,
+        model="claude-test-model",
+        schema_version=1,
+        payload={"content_blocks": ()},
+    )
+
+    with pytest.raises(ValidationError, match="requires assistant tool calls"):
+        Message(role="assistant", content="done", provider_state=state)
 
 
 def test_tool_schemas_are_ready_for_future_tool_loop() -> None:

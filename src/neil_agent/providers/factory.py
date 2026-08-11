@@ -61,12 +61,22 @@ def create_provider(
     *,
     retry_handler: RetryHandler | None = None,
     deepseek_builder: ProviderBuilder | None = None,
+    claude_builder: ProviderBuilder | None = None,
 ) -> ChatModel:
-    """Create the configured runtime using the currently shipped adapters."""
+    """Create the configured runtime using the shipped provider adapters."""
 
     if deepseek_builder is None:
         from ..llm import LLMClient
 
         deepseek_builder = cast(ProviderBuilder, LLMClient)
-    factory = ProviderFactory({ProviderId.DEEPSEEK: deepseek_builder})
+    if claude_builder is None:
+        from .claude import ClaudeProvider
+
+        claude_builder = cast(ProviderBuilder, ClaudeProvider)
+    factory = ProviderFactory(
+        {
+            ProviderId.DEEPSEEK: deepseek_builder,
+            ProviderId.CLAUDE: claude_builder,
+        }
+    )
     return factory.create(settings, retry_handler=retry_handler)

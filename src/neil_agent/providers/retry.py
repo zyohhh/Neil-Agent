@@ -37,9 +37,7 @@ class RetryPolicy:
         """Return whether another attempt is safe and remains within budget."""
 
         return (
-            not output_started
-            and retries_done < self.max_retries
-            and error.retryable
+            not output_started and retries_done < self.max_retries and error.retryable
         )
 
     def delay(self, error: ProviderError, retry_number: int) -> float:

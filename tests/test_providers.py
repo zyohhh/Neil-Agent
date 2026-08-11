@@ -133,10 +133,17 @@ def test_provider_turn_state_is_copied_frozen_and_model_bound() -> None:
 
 
 def test_anthropic_stop_reason_mapping_fails_closed_for_unknown_values() -> None:
-    assert normalize_stop_reason("end_turn", has_tool_calls=False) is StopReason.END_TURN
-    assert normalize_stop_reason("tool_use", has_tool_calls=False) is StopReason.TOOL_CALL
+    assert (
+        normalize_stop_reason("end_turn", has_tool_calls=False) is StopReason.END_TURN
+    )
+    assert (
+        normalize_stop_reason("tool_use", has_tool_calls=False) is StopReason.TOOL_CALL
+    )
     assert normalize_stop_reason(None, has_tool_calls=True) is StopReason.TOOL_CALL
-    assert normalize_stop_reason("max_tokens", has_tool_calls=False) is StopReason.MAX_TOKENS
+    assert (
+        normalize_stop_reason("max_tokens", has_tool_calls=False)
+        is StopReason.MAX_TOKENS
+    )
     assert (
         normalize_stop_reason("new-provider-value", has_tool_calls=False)
         is StopReason.UNKNOWN
@@ -160,10 +167,13 @@ def test_retry_policy_is_bounded_and_stops_after_output() -> None:
     assert policy.can_retry(rate_limit, 2) is False
     assert policy.can_retry(authentication, 0) is False
     assert policy.delay(rate_limit, 1) == 3.0
-    assert policy.delay(
-        ProviderRateLimitError("limited", provider=ProviderId.DEEPSEEK),
-        3,
-    ) == 2.0
+    assert (
+        policy.delay(
+            ProviderRateLimitError("limited", provider=ProviderId.DEEPSEEK),
+            3,
+        )
+        == 2.0
+    )
     assert rate_limit.category is ProviderErrorCategory.RATE_LIMIT
     assert isinstance(rate_limit, LLMError)
 

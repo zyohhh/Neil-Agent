@@ -10,6 +10,7 @@ from neil_agent.agent import COMPACTION_CHECKPOINT_USER, Agent
 from neil_agent.errors import AgentError, LLMError
 from neil_agent.events import EventBus, RuntimeEvent
 from neil_agent.instructions import ProjectInstructionManager
+from neil_agent.providers.base import ProviderId, ProviderTurnState
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -122,6 +123,54 @@ def test_stream_chat_accumulates_server_usage_across_tool_rounds() -> None:
 
     agent.clear()
     assert agent.last_usage is None
+
+
+def test_stream_chat_replays_provider_private_state_during_tool_round() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_value",
+            description="Read a value.",
+            input_schema={"type": "object", "additionalProperties": False},
+        ),
+        lambda: "value",
+    )
+    state = ProviderTurnState(
+        provider=ProviderId.CLAUDE,
+        model="claude-test-model",
+        schema_version=1,
+        payload={
+            "content_blocks": (
+                {
+                    "type": "redacted_thinking",
+                    "data": "sanitized-encrypted-value",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "read_value",
+                    "input": {},
+                },
+            )
+        },
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [
+            ModelResponse(
+                tool_calls=(ToolCall(id="call-1", name="read_value"),),
+                provider_state=state,
+            )
+        ],
+        ["done", ModelResponse(content="done")],
+    ]
+    agent = Agent(model, registry=registry)
+
+    assert "".join(agent.stream_chat("inspect")) == "done"
+
+    replayed_assistant = model.requests[1][1]
+    assert replayed_assistant.role == "assistant"
+    assert replayed_assistant.provider_state == state
 
 
 def test_new_file_scope_is_loaded_before_tool_execution(tmp_path: Path) -> None:

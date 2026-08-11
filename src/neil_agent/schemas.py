@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
@@ -33,6 +33,7 @@ class Message(BaseModel):
     thinking: tuple[ThinkingContent, ...] = ()
     tool_calls: tuple[ToolCall, ...] = ()
     tool_results: tuple[ToolResult, ...] = ()
+    provider_state: ProviderTurnState | None = None
 
     @model_validator(mode="after")
     def validate_content_for_role(self) -> Message:
@@ -42,9 +43,23 @@ class Message(BaseModel):
             raise ValueError("message must contain text or tool content")
         if self.role == "user" and (self.thinking or self.tool_calls):
             raise ValueError("user messages cannot contain thinking or tool calls")
+        if self.role == "user" and self.provider_state is not None:
+            raise ValueError("user messages cannot contain provider state")
         if self.role == "assistant" and self.tool_results:
             raise ValueError("assistant messages cannot contain tool results")
+        if self.provider_state is not None and not self.tool_calls:
+            raise ValueError("provider state requires assistant tool calls")
         return self
+
+    @field_serializer("provider_state")
+    def serialize_provider_state(
+        self,
+        value: ProviderTurnState | None,
+    ) -> dict[str, Any] | None:
+        """Serialize private state through an explicit, JSON-safe boundary."""
+
+        return _serialize_provider_state(value)
+
 
 class ThinkingContent(BaseModel):
     """Thinking content that must be replayed during a tool-use turn."""
@@ -53,6 +68,7 @@ class ThinkingContent(BaseModel):
 
     thinking: str
     signature: str
+
 
 class ToolCall(BaseModel):
     """A tool invocation requested by the model."""
@@ -63,6 +79,7 @@ class ToolCall(BaseModel):
     name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
 
+
 class ToolResult(BaseModel):
     """The result returned after executing a tool call."""
 
@@ -72,6 +89,7 @@ class ToolResult(BaseModel):
     content: str
     is_error: bool = False
 
+
 class ToolDefinition(BaseModel):
     """A tool description and JSON input schema exposed to the model."""
 
@@ -80,6 +98,7 @@ class ToolDefinition(BaseModel):
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     input_schema: dict[str, Any]
+
 
 class TokenUsage(BaseModel):
     """Server-reported token usage for one or more model requests."""
@@ -136,14 +155,28 @@ class ModelResponse(BaseModel):
     ) -> dict[str, Any] | None:
         """Serialize an immutable private-state mapping without exposing its repr."""
 
-        if value is None:
-            return None
-        return {
-            "provider": value.provider.value,
-            "model": value.model,
-            "schema_version": value.schema_version,
-            "payload": dict(value.payload),
-        }
+        return _serialize_provider_state(value)
+
+
+def _serialize_provider_state(
+    value: ProviderTurnState | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "provider": value.provider.value,
+        "model": value.model,
+        "schema_version": value.schema_version,
+        "payload": _provider_state_json_value(value.payload),
+    }
+
+
+def _provider_state_json_value(value: object) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _provider_state_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_provider_state_json_value(item) for item in value]
+    return value
 
 
 def validate_message_history(messages: Sequence[Message]) -> None:

@@ -719,6 +719,7 @@ class Agent:
                 content=model_response.content,
                 thinking=model_response.thinking,
                 tool_calls=model_response.tool_calls,
+                provider_state=model_response.provider_state,
             )
             request_messages.append(assistant_message)
             pending_messages.append(assistant_message)

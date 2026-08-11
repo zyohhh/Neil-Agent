@@ -73,6 +73,17 @@ def test_cloud_provider_validates_only_its_selected_key() -> None:
     assert "openai-secret" not in repr(settings)
 
 
+def test_claude_uses_the_project_owned_native_endpoint_by_default() -> None:
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.CLAUDE,
+        llm_model="configured-claude-model",
+        anthropic_api_key="claude-secret",
+    )
+
+    assert str(settings.selected_base_url) == "https://api.anthropic.com/"
+
+
 def test_non_deepseek_provider_requires_explicit_model() -> None:
     with pytest.raises(ValidationError, match="LLM_MODEL is required"):
         Settings(

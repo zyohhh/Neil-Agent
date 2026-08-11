@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from types import MappingProxyType
 from typing import cast
 
@@ -80,7 +81,7 @@ class ProviderTurnState:
             raise ValueError("provider turn state model must not be blank")
         if self.schema_version < 1:
             raise ValueError("provider turn state schema version must be positive")
-        frozen_payload = MappingProxyType(dict(self.payload))
+        frozen_payload = _freeze_provider_mapping(self.payload)
         object.__setattr__(
             self,
             "payload",
@@ -91,3 +92,28 @@ class ProviderTurnState:
         """Return whether this state is safe to replay for a target model."""
 
         return self.provider is provider and self.model == model
+
+
+def _freeze_provider_mapping(
+    value: Mapping[str, object],
+) -> Mapping[str, object]:
+    frozen: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError("provider turn state keys must be strings")
+        frozen[key] = _freeze_provider_value(item)
+    return MappingProxyType(frozen)
+
+
+def _freeze_provider_value(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("provider turn state numbers must be finite")
+        return value
+    if isinstance(value, Mapping):
+        return _freeze_provider_mapping(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_provider_value(item) for item in value)
+    raise TypeError("provider turn state must contain only JSON-compatible values")

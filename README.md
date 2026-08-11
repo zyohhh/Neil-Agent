@@ -1,6 +1,6 @@
 # Neil-Agent
 
-A local coding agent built from scratch with Python and DeepSeek V4 Flash.
+A local coding agent built from scratch with Python and provider-neutral model boundaries. DeepSeek and Claude are currently supported.
 
 ## 常用命令
 
@@ -39,7 +39,36 @@ Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review
 高级上下文断层图、安全盾、时间机器和仓库热力图的增量路线见
 [`docs/visualization-development.md`](docs/visualization-development.md)。
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
-[`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前运行实现仍为 DeepSeek，其他 Provider 会在适配器注册前 fail closed。
+[`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前可选运行实现为 DeepSeek 和 Claude，尚未实现的 OpenAI、Ollama 与 vLLM 会在网络请求前 fail closed。
+
+## 模型 Provider 配置
+
+DeepSeek 仍是兼容默认值，旧配置可继续使用：
+
+```text
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=<your-key>
+DEEPSEEK_MODEL=deepseek-v4-flash
+```
+
+Claude 使用 Anthropic 原生 Messages API，必须显式提供模型 ID：
+
+```text
+LLM_PROVIDER=claude
+LLM_MODEL=<anthropic-model-id>
+ANTHROPIC_API_KEY=<your-key>
+```
+
+启用 Claude thinking 时，默认采用 `CLAUDE_THINKING_MODE=adaptive`。需要兼容只支持手动 extended thinking 的模型时，可设置 `CLAUDE_THINKING_MODE=enabled` 和 `CLAUDE_THINKING_BUDGET_TOKENS`；手动预算必须至少为 1024 且小于 `MAX_TOKENS`。`LLM_BASE_URL` 仅用于显式 endpoint 覆盖，不设置时 Claude 使用 Anthropic SDK 原生地址。
+
+| Provider | 线协议 | 运行状态 | thinking 私有状态 |
+| --- | --- | --- | --- |
+| DeepSeek | Anthropic Messages compatible | 可用，默认兼容入口 | 签名块绑定 DeepSeek 与模型后回放 |
+| Claude | Anthropic Messages native | 可用 | thinking 与 redacted-thinking 原样绑定并回放 |
+| OpenAI | Responses | 尚未实现，fail closed | Phase 3 |
+| Ollama / vLLM | OpenAI-compatible | 尚未实现，fail closed | Phase 4 |
+
+默认测试使用合成、脱敏 fixture，不访问公网；本阶段未执行付费 Claude 在线 smoke test。
 
 ## 一次性非交互运行
 
