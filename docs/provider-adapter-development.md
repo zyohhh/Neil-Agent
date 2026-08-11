@@ -5,7 +5,7 @@
 本文档规划 Neil Agent 的多 LLM Provider 协议适配层，仅覆盖 Provider 抽象、协议转换、配置、错误语义和契约测试。
 
 - 开发分支：`feature/provider-runtime`
-- 当前阶段：Phase 2 已完成，准备进入 Phase 3
+- 当前阶段：Phase 3 已完成，准备进入 Phase 4
 - 目标 Provider：DeepSeek、Claude、OpenAI、Ollama、vLLM
 - 暂不纳入：MCP、评测基准、模型路由与自动降级、可视化、Windows Sandbox 后续主线
 
@@ -27,11 +27,10 @@
 
 当前剩余工作包括：
 
-1. OpenAI Responses 尚未形成独立编解码与流式状态机，不能通过 Anthropic 结构模拟。
-2. Ollama 与 vLLM 尚未建立保守的独立 capability profile 和请求前能力拒绝。
-3. `/doctor` 尚未完整展示脱敏的 Provider、模型、endpoint 与能力快照。
-4. DeepSeek/Claude 目前只有离线合成 fixture；受控在线 smoke test 仍需显式凭据、费用确认和单独记录。
-5. 旧 `LLMClient` 仍作为 DeepSeek 兼容 facade，后续需要给出明确迁移期限。
+1. Ollama 与 vLLM 尚未建立保守的独立 capability profile 和请求前能力拒绝。
+2. `/doctor` 尚未完整展示脱敏的 Provider、模型、endpoint 与能力快照。
+3. DeepSeek/Claude/OpenAI 目前只有离线合成 fixture；受控在线 smoke test 仍需显式凭据、费用确认和单独记录。
+4. 旧 `LLMClient` 仍作为 DeepSeek 兼容 facade，后续需要给出明确迁移期限。
 
 后续阶段继续围绕稳定核心语义和真实协议差异推进，不为目录整齐复制 SDK wrapper。
 
@@ -345,6 +344,15 @@ Provider 初始化时应生成最终能力快照。Agent 请求某项能力前�
 - 增加 OpenAI fake transport 与可选在线 smoke test。
 
 交付物：OpenAIProvider 及完整契约测试。
+
+完成记录（2026-08-11）：
+
+- 新增原生 `OpenAIProvider` 与独立 `openai_responses.py` 编解码边界，使用官方 Responses API 的 message、function call、function call output、usage 和 SSE 事件，不经过 Chat Completions 或 Anthropic 结构；`ProviderFactory` 已注册 OpenAI，交互与非交互入口继续只依赖 `ChatModel`。
+- 请求固定使用 `store=false`，由项目本地管理上下文。OpenAI 完整 output items 作为 schema 1 私有状态递归冻结并绑定 Provider/模型；reasoning、message 和 function call 保持原顺序回放，公共文本或工具调用不一致、跨 Provider/模型、缺少 encrypted reasoning 均在网络前 fail closed。
+- 流状态机验证 `response.created`、严格递增的 sequence number、唯一终态、可见文本 delta 与终态文本一致，以及 function arguments delta/done 完整一致；文本或函数参数已经开始后禁止透明重试，主动关闭生成器会释放 SDK stream 且不伪造 usage/终态。
+- 停止原因覆盖正常结束、工具调用、输出上限与内容过滤；usage 映射输入/输出、cache read 与 cache write token。SDK/API/SSE 错误统一归一化到项目异常，SDK 内建重试关闭并继续使用公共有界重试策略。
+- 新增基于 OpenAI SDK 2.53.0 的版本化、脱敏合成 fixture，覆盖非流式文本、流式文本、并行 function call、function output、推理状态和缓存 usage；另有默认跳过、必须显式提供开关/凭据/模型且会产生费用的在线 smoke test。本阶段未执行任何付费 OpenAI 请求。
+- 全量 pytest 为 649 项通过、20 项条件跳过（含 19 项真实 Windows 平台用例与 1 项付费 OpenAI smoke）；Ruff lint 与 90 个文件格式检查、mypy 50 个源文件及 5 个内置离线评测全部通过。
 
 ### Phase 4：完成本地 OpenAI-compatible 接入（2～3 天）
 

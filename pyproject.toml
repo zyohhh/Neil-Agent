@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.116.0",
+    "openai>=2.53.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "python-dotenv>=1.2.2",
@@ -39,5 +40,6 @@ dev = [
 
 [tool.pytest.ini_options]
 markers = [
+    "online: paid provider smoke tests that require explicit environment opt-in",
     "windows_sandbox_security: attack-oriented tests that require a real Windows Sandbox installation",
 ]

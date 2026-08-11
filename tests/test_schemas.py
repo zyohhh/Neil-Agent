@@ -27,7 +27,7 @@ def test_message_rejects_blank_content() -> None:
         Message(role="user", content="   ")
 
 
-def test_message_rejects_provider_state_without_tool_calls() -> None:
+def test_assistant_text_can_carry_provider_private_state() -> None:
     state = ProviderTurnState(
         provider=ProviderId.CLAUDE,
         model="claude-test-model",
@@ -35,8 +35,9 @@ def test_message_rejects_provider_state_without_tool_calls() -> None:
         payload={"content_blocks": ()},
     )
 
-    with pytest.raises(ValidationError, match="requires assistant tool calls"):
-        Message(role="assistant", content="done", provider_state=state)
+    message = Message(role="assistant", content="done", provider_state=state)
+
+    assert message.provider_state == state
 
 
 def test_tool_schemas_are_ready_for_future_tool_loop() -> None:

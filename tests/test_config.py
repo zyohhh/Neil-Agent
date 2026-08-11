@@ -70,6 +70,7 @@ def test_cloud_provider_validates_only_its_selected_key() -> None:
     assert settings.deepseek_api_key is None
     assert settings.selected_model == "configured-openai-model"
     assert settings.selected_api_key == settings.openai_api_key
+    assert str(settings.selected_base_url) == "https://api.openai.com/v1"
     assert "openai-secret" not in repr(settings)
 
 

@@ -18,7 +18,7 @@ from rich.status import Status
 from rich.table import Table
 from rich.text import Text
 
-from .agent import Agent
+from .agent import Agent, RetryConfigurableChatModel
 from .audit import AuditLogStatus, JsonlAuditSink
 from .cockpit import CockpitSnapshot, build_cockpit_panel
 from .config import Settings, get_settings
@@ -34,7 +34,6 @@ from .instructions import (
     prepare_project_instructions_init,
 )
 from .llm import LLMClient
-from .providers.anthropic_runtime import AnthropicMessagesProvider
 from .noninteractive import (
     OutputFormat,
     PermissionMode,
@@ -342,7 +341,7 @@ def run(console: Console) -> None:
 
     try:
         llm = cast(
-            AnthropicMessagesProvider,
+            RetryConfigurableChatModel,
             create_provider(
                 settings,
                 retry_handler=renderer.show_activity,
@@ -822,7 +821,7 @@ def _try_show_live_cockpit(
     console: Console,
     settings: Settings,
     agent: Agent,
-    llm: AnthropicMessagesProvider,
+    llm: RetryConfigurableChatModel,
     task_tracker: TaskTracker,
     workspace: Path,
     registry: ToolRegistry | None = None,

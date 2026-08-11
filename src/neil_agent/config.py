@@ -14,6 +14,7 @@ Give accurate, practical, and concise answers. Explain unfamiliar programming
 concepts clearly, and say when you are uncertain instead of inventing facts."""
 DEFAULT_DEEPSEEK_BASE_URL = AnyHttpUrl("https://api.deepseek.com/anthropic")
 DEFAULT_CLAUDE_BASE_URL = AnyHttpUrl("https://api.anthropic.com")
+DEFAULT_OPENAI_BASE_URL = AnyHttpUrl("https://api.openai.com/v1")
 DEFAULT_OLLAMA_BASE_URL = AnyHttpUrl("http://localhost:11434/v1")
 DEFAULT_VLLM_BASE_URL = AnyHttpUrl("http://localhost:8000/v1")
 
@@ -85,6 +86,12 @@ class Settings(BaseSettings):
     claude_thinking_budget_tokens: int = Field(
         default=1024,
         description="Manual Claude thinking budget; ignored in adaptive mode.",
+    )
+    openai_reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = Field(
+        default="medium",
+        description="OpenAI reasoning effort used when thinking is enabled.",
     )
     max_tokens: int = Field(
         default=8192,
@@ -250,6 +257,8 @@ class Settings(BaseSettings):
             return self.deepseek_base_url
         if self.llm_provider is ProviderId.CLAUDE:
             return DEFAULT_CLAUDE_BASE_URL
+        if self.llm_provider is ProviderId.OPENAI:
+            return DEFAULT_OPENAI_BASE_URL
         if self.llm_provider is ProviderId.OLLAMA:
             return DEFAULT_OLLAMA_BASE_URL
         if self.llm_provider is ProviderId.VLLM:

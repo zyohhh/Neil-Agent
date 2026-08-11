@@ -1,6 +1,6 @@
 # Neil-Agent
 
-A local coding agent built from scratch with Python and provider-neutral model boundaries. DeepSeek and Claude are currently supported.
+A local coding agent built from scratch with Python and provider-neutral model boundaries. DeepSeek, Claude, and OpenAI are currently supported.
 
 ## 常用命令
 
@@ -39,7 +39,7 @@ Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review
 高级上下文断层图、安全盾、时间机器和仓库热力图的增量路线见
 [`docs/visualization-development.md`](docs/visualization-development.md)。
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
-[`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前可选运行实现为 DeepSeek 和 Claude，尚未实现的 OpenAI、Ollama 与 vLLM 会在网络请求前 fail closed。
+[`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前可选运行实现为 DeepSeek、Claude 和 OpenAI，尚未实现的 Ollama 与 vLLM 会在网络请求前 fail closed。
 
 ## 模型 Provider 配置
 
@@ -61,14 +61,24 @@ ANTHROPIC_API_KEY=<your-key>
 
 启用 Claude thinking 时，默认采用 `CLAUDE_THINKING_MODE=adaptive`。需要兼容只支持手动 extended thinking 的模型时，可设置 `CLAUDE_THINKING_MODE=enabled` 和 `CLAUDE_THINKING_BUDGET_TOKENS`；手动预算必须至少为 1024 且小于 `MAX_TOKENS`。`LLM_BASE_URL` 仅用于显式 endpoint 覆盖，不设置时 Claude 使用 Anthropic SDK 原生地址。
 
+OpenAI 使用原生 Responses API，不通过 Chat Completions 或 Anthropic content block 模拟。模型 ID 必须显式提供；适配器默认 `store=false`，由本地会话保存并回放完整 output items：
+
+```text
+LLM_PROVIDER=openai
+LLM_MODEL=<openai-model-id>
+OPENAI_API_KEY=<your-key>
+```
+
+`THINKING_ENABLED=true` 时通过 `OPENAI_REASONING_EFFORT` 设置推理强度，默认 `medium`。推理 item 的加密内容会绑定 OpenAI 与模型后保存，用于手动管理的后续 Responses 上下文；跨 Provider 或模型回放会在网络请求前失败。
+
 | Provider | 线协议 | 运行状态 | thinking 私有状态 |
 | --- | --- | --- | --- |
 | DeepSeek | Anthropic Messages compatible | 可用，默认兼容入口 | 签名块绑定 DeepSeek 与模型后回放 |
 | Claude | Anthropic Messages native | 可用 | thinking 与 redacted-thinking 原样绑定并回放 |
-| OpenAI | Responses | 尚未实现，fail closed | Phase 3 |
+| OpenAI | Responses native | 可用 | output items 与 encrypted reasoning 绑定后原样回放 |
 | Ollama / vLLM | OpenAI-compatible | 尚未实现，fail closed | Phase 4 |
 
-默认测试使用合成、脱敏 fixture，不访问公网；本阶段未执行付费 Claude 在线 smoke test。
+默认测试使用合成、脱敏 fixture，不访问公网。OpenAI 在线 smoke test 只有同时设置 `NEIL_AGENT_RUN_OPENAI_SMOKE=1`、`OPENAI_API_KEY` 和 `NEIL_AGENT_OPENAI_SMOKE_MODEL` 才会执行并消耗额度；本阶段未执行付费在线测试。
 
 ## 一次性非交互运行
 

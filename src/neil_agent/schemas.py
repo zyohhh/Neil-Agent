@@ -47,8 +47,6 @@ class Message(BaseModel):
             raise ValueError("user messages cannot contain provider state")
         if self.role == "assistant" and self.tool_results:
             raise ValueError("assistant messages cannot contain tool results")
-        if self.provider_state is not None and not self.tool_calls:
-            raise ValueError("provider state requires assistant tool calls")
         return self
 
     @field_serializer("provider_state")

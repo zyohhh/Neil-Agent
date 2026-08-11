@@ -10,12 +10,14 @@ from typing import cast
 from unittest.mock import MagicMock
 
 from anthropic import Anthropic
+from openai import OpenAI
 
 from neil_agent.agent import ChatModel, UsageReportingChatModel
 from neil_agent.config import Settings
 from neil_agent.llm import LLMClient
 from neil_agent.providers.claude import ClaudeProvider
 from neil_agent.providers.base import ProviderId
+from neil_agent.providers.openai import OpenAIProvider
 from neil_agent.schemas import Message, ModelResponse, TokenUsage, ToolDefinition
 
 FIXTURE_PATH = (
@@ -29,6 +31,9 @@ CLAUDE_FIXTURE_PATH = (
     / "fixtures"
     / "providers"
     / "claude_anthropic_messages_v1.json"
+)
+OPENAI_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "providers" / "openai_responses_v1.json"
 )
 
 
@@ -132,8 +137,10 @@ def _settings(fixture: dict[str, object], *, thinking_enabled: bool) -> Settings
                 "deepseek_model": cast(str, settings["model"]),
             }
         )
-    else:
+    elif fixture["provider"] == ProviderId.CLAUDE:
         values["anthropic_api_key"] = "contract-test-key"
+    else:
+        values["openai_api_key"] = "contract-test-key"
     return Settings.model_validate(values)
 
 
@@ -341,3 +348,98 @@ def test_claude_tool_stream_matches_v1_golden_contract() -> None:
     )
 
     assert client.messages.stream.call_args.kwargs == case["wire_request"]
+
+
+def test_openai_fixture_is_versioned_synthetic_and_secret_free() -> None:
+    raw_fixture = OPENAI_FIXTURE_PATH.read_text(encoding="utf-8")
+    fixture = _fixture(OPENAI_FIXTURE_PATH)
+
+    assert fixture["fixture_version"] == 1
+    assert fixture["provider"] == "openai"
+    assert fixture["wire_protocol"] == "openai-responses"
+    assert _mapping(fixture["source"]) == {
+        "kind": "synthetic-characterization",
+        "live_capture": False,
+        "sanitized": True,
+        "sdk": "openai",
+        "sdk_version": "2.53.0",
+    }
+    assert "api_key" not in raw_fixture.lower()
+    assert "contract-test-key" not in raw_fixture
+
+
+def test_openai_complete_matches_v1_golden_contract() -> None:
+    fixture = _fixture(OPENAI_FIXTURE_PATH)
+    case = _case(fixture, "complete_text")
+    input_payload = _mapping(case["input"])
+    contract = _mapping(case["contract"])
+    client = MagicMock(spec=OpenAI)
+    client.responses.create.return_value = case["wire_response"]
+    model = OpenAIProvider(
+        _settings(fixture, thinking_enabled=False),
+        client=cast(OpenAI, client),
+    )
+
+    assert_complete_contract(
+        model,
+        _messages(input_payload["messages"]),
+        system_prompt=cast(str, input_payload["system_prompt"]),
+        expected_text=cast(str, contract["result"]),
+        expected_usage=TokenUsage.model_validate(contract["usage"]),
+    )
+
+    assert client.responses.create.call_args.kwargs == case["wire_request"]
+
+
+def test_openai_text_stream_matches_v1_golden_contract() -> None:
+    fixture = _fixture(OPENAI_FIXTURE_PATH)
+    case = _case(fixture, "stream_text")
+    input_payload = _mapping(case["input"])
+    wire_stream = _mapping(case["wire_stream"])
+    contract = _mapping(case["contract"])
+    client = MagicMock(spec=OpenAI)
+    manager = MagicMock()
+    manager.__enter__.return_value = iter(_items(wire_stream["events"]))
+    client.responses.create.return_value = manager
+    model = OpenAIProvider(
+        _settings(fixture, thinking_enabled=False),
+        client=cast(OpenAI, client),
+    )
+
+    assert_stream_contract(
+        model,
+        _messages(input_payload["messages"]),
+        system_prompt=cast(str, input_payload["system_prompt"]),
+        tools=_tools(input_payload["tools"]),
+        expected_deltas=cast(list[str], contract["text_deltas"]),
+        expected_response=ModelResponse.model_validate(contract["response"]),
+    )
+
+    assert client.responses.create.call_args.kwargs == case["wire_request"]
+
+
+def test_openai_tool_stream_matches_v1_golden_contract() -> None:
+    fixture = _fixture(OPENAI_FIXTURE_PATH)
+    case = _case(fixture, "stream_tool_call")
+    input_payload = _mapping(case["input"])
+    wire_stream = _mapping(case["wire_stream"])
+    contract = _mapping(case["contract"])
+    client = MagicMock(spec=OpenAI)
+    manager = MagicMock()
+    manager.__enter__.return_value = iter(_items(wire_stream["events"]))
+    client.responses.create.return_value = manager
+    model = OpenAIProvider(
+        _settings(fixture, thinking_enabled=True),
+        client=cast(OpenAI, client),
+    )
+
+    assert_stream_contract(
+        model,
+        _messages(input_payload["messages"]),
+        system_prompt=cast(str, input_payload["system_prompt"]),
+        tools=_tools(input_payload["tools"]),
+        expected_deltas=cast(list[str], contract["text_deltas"]),
+        expected_response=ModelResponse.model_validate(contract["response"]),
+    )
+
+    assert client.responses.create.call_args.kwargs == case["wire_request"]

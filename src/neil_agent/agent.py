@@ -129,6 +129,15 @@ class ChatModel(Protocol):
     ) -> Iterator[str | ModelResponse]: ...
 
 
+class RetryConfigurableChatModel(ChatModel, Protocol):
+    """Chat model whose user-visible retry sink can be replaced at runtime."""
+
+    def replace_retry_handler(
+        self,
+        handler: ActivityHandler | None,
+    ) -> ActivityHandler | None: ...
+
+
 @runtime_checkable
 class UsageReportingChatModel(Protocol):
     """Optional model capability for non-streaming request usage."""

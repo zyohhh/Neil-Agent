@@ -62,6 +62,7 @@ def create_provider(
     retry_handler: RetryHandler | None = None,
     deepseek_builder: ProviderBuilder | None = None,
     claude_builder: ProviderBuilder | None = None,
+    openai_builder: ProviderBuilder | None = None,
 ) -> ChatModel:
     """Create the configured runtime using the shipped provider adapters."""
 
@@ -73,10 +74,15 @@ def create_provider(
         from .claude import ClaudeProvider
 
         claude_builder = cast(ProviderBuilder, ClaudeProvider)
+    if openai_builder is None:
+        from .openai import OpenAIProvider
+
+        openai_builder = cast(ProviderBuilder, OpenAIProvider)
     factory = ProviderFactory(
         {
             ProviderId.DEEPSEEK: deepseek_builder,
             ProviderId.CLAUDE: claude_builder,
+            ProviderId.OPENAI: openai_builder,
         }
     )
     return factory.create(settings, retry_handler=retry_handler)
