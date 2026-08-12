@@ -25,6 +25,7 @@ from .errors import (
     ProviderProtocolError,
     ProviderRateLimitError,
     ProviderTimeoutError,
+    UnsupportedCapabilityError,
 )
 from .openai_responses import (
     encode_messages,
@@ -75,11 +76,16 @@ _PASSIVE_STREAM_EVENTS = frozenset(
 )
 
 
-class OpenAIProvider:
-    """Auditable OpenAI Responses request, stream, state, and retry runtime."""
+class OpenAIResponsesProvider:
+    """Shared auditable runtime for native and compatible Responses endpoints."""
 
     provider_id = ProviderId.OPENAI
     provider_descriptor = OPENAI_DESCRIPTOR
+    requires_api_key = True
+    placeholder_api_key: str | None = None
+    send_store_field = True
+    send_empty_tools = True
+    send_parallel_tool_calls = False
 
     def __init__(
         self,
@@ -91,23 +97,34 @@ class OpenAIProvider:
         client_factory: OpenAIClientFactory | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        if self.settings.llm_provider is not ProviderId.OPENAI:
+        self._descriptor = self._configured_descriptor()
+        if self.settings.llm_provider is not self.provider_id:
             raise ProviderNotImplementedError(
                 f"Provider '{self.settings.llm_provider.value}' cannot be started "
-                "through the OpenAI adapter.",
+                f"through the {self._descriptor.display_name} adapter.",
                 provider=self.settings.llm_provider,
             )
         api_key = self.settings.selected_api_key
-        if api_key is None:
+        if self.requires_api_key and api_key is None:
             raise ProviderAuthenticationError(
-                "未配置 OpenAI API Key。",
-                provider=ProviderId.OPENAI,
+                f"未配置 {self.descriptor.display_name} API Key。",
+                provider=self.provider_id,
+            )
+        client_api_key = (
+            api_key.get_secret_value()
+            if api_key is not None
+            else self.placeholder_api_key
+        )
+        if client_api_key is None:
+            raise ProviderProtocolError(
+                f"{self.descriptor.display_name} adapter 缺少 SDK 鉴权占位值。",
+                provider=self.provider_id,
             )
 
         factory = client_factory or OpenAI
         if client is None:
             client = factory(
-                api_key=api_key.get_secret_value(),
+                api_key=client_api_key,
                 base_url=self._base_url(),
                 timeout=self.settings.request_timeout,
                 max_retries=0,
@@ -126,6 +143,32 @@ class OpenAIProvider:
     def descriptor(self) -> ProviderDescriptor:
         """Return safe metadata and this adapter's capability snapshot."""
 
+        return self._descriptor
+
+    def _configured_descriptor(self) -> ProviderDescriptor:
+        """Freeze one capability snapshot from the selected local profile."""
+
+        capabilities = self.provider_descriptor.capabilities
+        if self.provider_id in {ProviderId.OLLAMA, ProviderId.VLLM}:
+            parallel_tool_calls = (
+                self.provider_id is ProviderId.VLLM
+                and self.settings.local_parallel_tool_calls_enabled
+            )
+            capabilities = ProviderCapabilities(
+                streaming=capabilities.streaming,
+                tool_calling=self.settings.local_tool_calling_enabled,
+                parallel_tool_calls=parallel_tool_calls,
+                reasoning_state=capabilities.reasoning_state,
+                structured_output=capabilities.structured_output,
+                usage_reporting=capabilities.usage_reporting,
+                prompt_caching=capabilities.prompt_caching,
+            )
+            return ProviderDescriptor(
+                provider=self.provider_descriptor.provider,
+                display_name=self.provider_descriptor.display_name,
+                wire_protocol=self.provider_descriptor.wire_protocol,
+                capabilities=capabilities,
+            )
         return self.provider_descriptor
 
     @property
@@ -162,11 +205,17 @@ class OpenAIProvider:
                 model_response = parse_response(
                     response,
                     model=self.settings.selected_model,
+                    provider=self.provider_id,
+                    preserve_state=self.descriptor.capabilities.reasoning_state,
+                    allow_reasoning=self.descriptor.capabilities.reasoning_state,
+                    allow_parallel_tool_calls=(
+                        self.descriptor.capabilities.parallel_tool_calls
+                    ),
                 )
                 if model_response.tool_calls:
                     raise ProviderProtocolError(
                         "非流式完成返回了 function call。",
-                        provider=ProviderId.OPENAI,
+                        provider=self.provider_id,
                     )
                 self._last_usage = model_response.usage
                 return model_response.content
@@ -216,20 +265,21 @@ class OpenAIProvider:
                         )
                         if event_type == "error":
                             raise normalize_stream_error(
-                                self._event_field(event, "code")
+                                self._event_field(event, "code"),
+                                provider=self.provider_id,
                             )
                         if not created:
                             if event_type != "response.created":
                                 raise ProviderProtocolError(
                                     "OpenAI 流在 response.created 之前返回了内容。",
-                                    provider=ProviderId.OPENAI,
+                                    provider=self.provider_id,
                                 )
                             created = True
                             continue
                         if terminal_response is not None:
                             raise ProviderProtocolError(
                                 "OpenAI 流在终态事件后继续返回内容。",
-                                provider=ProviderId.OPENAI,
+                                provider=self.provider_id,
                             )
                         if event_type in {
                             "response.output_text.delta",
@@ -251,7 +301,7 @@ class OpenAIProvider:
                             if item_id in argument_done:
                                 raise ProviderProtocolError(
                                     "OpenAI 流重复结束同一个 function call 参数。",
-                                    provider=ProviderId.OPENAI,
+                                    provider=self.provider_id,
                                 )
                             argument_done[item_id] = arguments
                         elif event_type in {
@@ -263,18 +313,18 @@ class OpenAIProvider:
                             if terminal_response is None:
                                 raise ProviderProtocolError(
                                     "OpenAI 终态事件缺少 response。",
-                                    provider=ProviderId.OPENAI,
+                                    provider=self.provider_id,
                                 )
                             terminal_type = event_type
                         elif event_type not in _PASSIVE_STREAM_EVENTS:
                             raise ProviderProtocolError(
                                 f"OpenAI 流返回了未支持的事件：{event_type}。",
-                                provider=ProviderId.OPENAI,
+                                provider=self.provider_id,
                             )
                 if terminal_response is None or terminal_type is None:
                     raise ProviderProtocolError(
                         "OpenAI 流在没有终态事件时结束。",
-                        provider=ProviderId.OPENAI,
+                        provider=self.provider_id,
                     )
                 self._validate_terminal_type(terminal_response, terminal_type)
                 if terminal_type == "response.failed":
@@ -283,10 +333,16 @@ class OpenAIProvider:
                     parse_response(
                         terminal_response,
                         model=self.settings.selected_model,
+                        provider=self.provider_id,
+                        preserve_state=self.descriptor.capabilities.reasoning_state,
+                        allow_reasoning=self.descriptor.capabilities.reasoning_state,
+                        allow_parallel_tool_calls=(
+                            self.descriptor.capabilities.parallel_tool_calls
+                        ),
                     )
                     raise ProviderProtocolError(
                         "OpenAI failed 终态被错误解析为成功。",
-                        provider=ProviderId.OPENAI,
+                        provider=self.provider_id,
                     )
                 self._validate_argument_deltas(
                     terminal_response,
@@ -296,11 +352,17 @@ class OpenAIProvider:
                 model_response = parse_response(
                     terminal_response,
                     model=self.settings.selected_model,
+                    provider=self.provider_id,
+                    preserve_state=self.descriptor.capabilities.reasoning_state,
+                    allow_reasoning=self.descriptor.capabilities.reasoning_state,
+                    allow_parallel_tool_calls=(
+                        self.descriptor.capabilities.parallel_tool_calls
+                    ),
                 )
                 if "".join(visible_text) != model_response.content:
                     raise ProviderProtocolError(
                         "OpenAI 文本 delta 与终态响应不一致。",
-                        provider=ProviderId.OPENAI,
+                        provider=self.provider_id,
                     )
                 self._last_usage = model_response.usage
                 yield model_response
@@ -325,6 +387,7 @@ class OpenAIProvider:
         system_prompt: str,
         tools: Sequence[ToolDefinition] | None = None,
     ) -> dict[str, Any]:
+        self._validate_capabilities(messages, tools or ())
         request: dict[str, Any] = {
             "model": self.settings.selected_model,
             "max_output_tokens": self.settings.max_tokens,
@@ -332,11 +395,17 @@ class OpenAIProvider:
             "input": encode_messages(
                 messages,
                 model=self.settings.selected_model,
+                provider=self.provider_id,
             ),
-            "store": False,
         }
-        if tools is not None:
-            request["tools"] = encode_tools(tools)
+        if self.send_store_field:
+            request["store"] = False
+        if tools is not None and (tools or self.send_empty_tools):
+            request["tools"] = encode_tools(tools, provider=self.provider_id)
+            if tools and self.send_parallel_tool_calls:
+                request["parallel_tool_calls"] = (
+                    self.descriptor.capabilities.parallel_tool_calls
+                )
         if self.settings.thinking_enabled:
             request["reasoning"] = {
                 "effort": self.settings.openai_reasoning_effort,
@@ -344,12 +413,40 @@ class OpenAIProvider:
             request["include"] = ["reasoning.encrypted_content"]
         return request
 
+    def _validate_capabilities(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDefinition],
+    ) -> None:
+        capabilities = self.descriptor.capabilities
+        if self.settings.thinking_enabled and not capabilities.reasoning_state:
+            raise UnsupportedCapabilityError(
+                f"{self.descriptor.display_name} 当前 profile 未启用 reasoning。",
+                provider=self.provider_id,
+            )
+        if (
+            tools
+            or any(message.tool_calls or message.tool_results for message in messages)
+        ) and not capabilities.tool_calling:
+            raise UnsupportedCapabilityError(
+                f"{self.descriptor.display_name} 当前模型未显式启用工具调用。",
+                provider=self.provider_id,
+            )
+        if (
+            any(message.provider_state is not None for message in messages)
+            and not capabilities.reasoning_state
+        ):
+            raise UnsupportedCapabilityError(
+                f"{self.descriptor.display_name} 当前 profile 不接受私有 turn state。",
+                provider=self.provider_id,
+            )
+
     def _base_url(self) -> str:
         selected = self.settings.selected_base_url
         if selected is None:
             raise ProviderProtocolError(
                 "未配置 OpenAI API 地址。",
-                provider=ProviderId.OPENAI,
+                provider=self.provider_id,
             )
         return str(selected).rstrip("/")
 
@@ -364,35 +461,32 @@ class OpenAIProvider:
             return event.get(field)
         return getattr(event, field, None)
 
-    @classmethod
     def _event_string(
-        cls,
+        self,
         event: object,
         field: str,
         *,
         allow_empty: bool = False,
     ) -> str:
-        value = cls._event_field(event, field)
+        value = self._event_field(event, field)
         if not isinstance(value, str) or (not allow_empty and not value):
             raise ProviderProtocolError(
                 f"OpenAI 流事件缺少有效的 {field} 字段。",
-                provider=ProviderId.OPENAI,
+                provider=self.provider_id,
             )
         return value
 
-    @classmethod
-    def _validate_sequence(cls, event: object, previous: int) -> int:
-        value = cls._event_field(event, "sequence_number")
+    def _validate_sequence(self, event: object, previous: int) -> int:
+        value = self._event_field(event, "sequence_number")
         if isinstance(value, bool) or not isinstance(value, int) or value <= previous:
             raise ProviderProtocolError(
                 "OpenAI 流事件 sequence_number 非严格递增。",
-                provider=ProviderId.OPENAI,
+                provider=self.provider_id,
             )
         return value
 
-    @classmethod
-    def _validate_terminal_type(cls, response: object, event_type: str) -> None:
-        status = cls._event_field(response, "status")
+    def _validate_terminal_type(self, response: object, event_type: str) -> None:
+        status = self._event_field(response, "status")
         expected = {
             "response.completed": "completed",
             "response.incomplete": "incomplete",
@@ -401,61 +495,59 @@ class OpenAIProvider:
         if status != expected:
             raise ProviderProtocolError(
                 "OpenAI 终态事件与 response status 不一致。",
-                provider=ProviderId.OPENAI,
+                provider=self.provider_id,
             )
 
-    @classmethod
     def _validate_argument_deltas(
-        cls,
+        self,
         response: object,
         deltas: Mapping[str, Sequence[str]],
         done: Mapping[str, str],
     ) -> None:
-        output = cls._event_field(response, "output")
+        output = self._event_field(response, "output")
         if not isinstance(output, Sequence) or isinstance(output, (str, bytes)):
             raise ProviderProtocolError(
                 "OpenAI 终态响应缺少有效 output。",
-                provider=ProviderId.OPENAI,
+                provider=self.provider_id,
             )
         terminal: dict[str, str] = {}
         for item in output:
-            if cls._event_field(item, "type") != "function_call":
+            if self._event_field(item, "type") != "function_call":
                 continue
-            item_id = cls._event_string(item, "id")
-            arguments = cls._event_string(item, "arguments")
+            item_id = self._event_string(item, "id")
+            arguments = self._event_string(item, "arguments")
             if item_id in terminal:
                 raise ProviderProtocolError(
                     "OpenAI 终态响应包含重复 function item ID。",
-                    provider=ProviderId.OPENAI,
+                    provider=self.provider_id,
                 )
             terminal[item_id] = arguments
         if set(done) != set(terminal) or not set(deltas).issubset(done):
             raise ProviderProtocolError(
                 "OpenAI function call 参数流缺少完成事件。",
-                provider=ProviderId.OPENAI,
+                provider=self.provider_id,
             )
         for item_id, arguments in done.items():
             if arguments != terminal[item_id]:
                 raise ProviderProtocolError(
                     "OpenAI function call 完成值与终态响应不一致。",
-                    provider=ProviderId.OPENAI,
+                    provider=self.provider_id,
                 )
         for item_id, parts in deltas.items():
             if "".join(parts) != done[item_id]:
                 raise ProviderProtocolError(
                     "OpenAI function call 参数 delta 与完成值不一致。",
-                    provider=ProviderId.OPENAI,
+                    provider=self.provider_id,
                 )
 
-    @staticmethod
-    def _normalize_runtime_error(error: Exception) -> ProviderError:
+    def _normalize_runtime_error(self, error: Exception) -> ProviderError:
         if isinstance(error, ProviderError):
             return error
         if isinstance(error, APIError):
-            return normalize_openai_error(error)
+            return normalize_openai_error(error, provider=self.provider_id)
         return ProviderProtocolError(
             "OpenAI SDK 返回了无法解析的响应。",
-            provider=ProviderId.OPENAI,
+            provider=self.provider_id,
         )
 
     def _wait_for_retry(self, error: ProviderError, retry_number: int) -> None:
@@ -491,10 +583,9 @@ class OpenAIProvider:
             )
         )
 
-    @staticmethod
-    def _retry_reason(error: ProviderError) -> str:
+    def _retry_reason(self, error: ProviderError) -> str:
         if isinstance(error, ProviderRateLimitError):
-            return "OpenAI 限流"
+            return f"{self.descriptor.display_name} 限流"
         if isinstance(error, ProviderTimeoutError):
             return "请求超时"
         if isinstance(error, ProviderConnectionError):
@@ -502,3 +593,7 @@ class OpenAIProvider:
         if isinstance(error, ProviderInternalError) and error.status_code is not None:
             return f"服务端 HTTP {error.status_code}"
         return "Provider 临时错误"
+
+
+class OpenAIProvider(OpenAIResponsesProvider):
+    """Native OpenAI profile over the shared Responses runtime."""

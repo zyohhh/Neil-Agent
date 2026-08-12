@@ -5,7 +5,7 @@
 本文档规划 Neil Agent 的多 LLM Provider 协议适配层，仅覆盖 Provider 抽象、协议转换、配置、错误语义和契约测试。
 
 - 开发分支：`feature/provider-runtime`
-- 当前阶段：Phase 3 已完成，准备进入 Phase 4
+- 当前阶段：Phase 4 已完成，准备进入 Phase 5
 - 目标 Provider：DeepSeek、Claude、OpenAI、Ollama、vLLM
 - 暂不纳入：MCP、评测基准、模型路由与自动降级、可视化、Windows Sandbox 后续主线
 
@@ -23,14 +23,13 @@
 
 ## 2. 当前代码基础与剩余问题
 
-现有架构保持了正确的依赖方向：`Agent` 依赖 `ChatModel` Protocol，而不是具体 SDK。Phase 0～2 已完成 Provider 身份/能力/错误/重试契约、条件配置、Anthropic Messages 编解码边界，以及 DeepSeek/Claude 两套运行实现。
+现有架构保持了正确的依赖方向：`Agent` 依赖 `ChatModel` Protocol，而不是具体 SDK。Phase 0～4 已完成 Provider 身份/能力/错误/重试契约、条件配置、Anthropic Messages 与 OpenAI Responses 编解码边界，以及五套可选运行实现。
 
 当前剩余工作包括：
 
-1. Ollama 与 vLLM 尚未建立保守的独立 capability profile 和请求前能力拒绝。
-2. `/doctor` 尚未完整展示脱敏的 Provider、模型、endpoint 与能力快照。
-3. DeepSeek/Claude/OpenAI 目前只有离线合成 fixture；受控在线 smoke test 仍需显式凭据、费用确认和单独记录。
-4. 旧 `LLMClient` 仍作为 DeepSeek 兼容 facade，后续需要给出明确迁移期限。
+1. `/doctor` 尚未完整展示脱敏的 Provider、模型、endpoint 与能力快照。
+2. 各 Provider 的受控在线 smoke test 仍需对应服务、显式凭据或开关，并单独记录执行环境和日期。
+3. 旧 `LLMClient` 仍作为 DeepSeek 兼容 facade，后续需要给出明确迁移期限。
 
 后续阶段继续围绕稳定核心语义和真实协议差异推进，不为目录整齐复制 SDK wrapper。
 
@@ -362,6 +361,15 @@ Provider 初始化时应生成最终能力快照。Agent 请求某项能力前�
 - 在可用环境中分别执行一次显式开启的本地 smoke test。
 
 交付物：Ollama/vLLM 可配置接入与兼容性说明。
+
+完成记录（2026-08-13）：
+
+- 将原生 OpenAI runtime 提炼为共享 `OpenAIResponsesProvider`，Ollama 与 vLLM 通过独立 profile 复用请求编码、响应解析、严格 SSE 状态机、usage、错误归一化和有界重试；OpenAI 原生 `store=false` 与 reasoning 私有状态语义保持不变。
+- 新增 `OllamaProvider` 与 `VLLMProvider` 并注册到 `ProviderFactory`。两者分别默认使用 `http://localhost:11434/v1` 和 `http://localhost:8000/v1`，无需云密钥；OpenAI SDK 所需占位 key 由适配器内部提供，受保护的本地网关可选配置 `LOCAL_API_KEY`，且 secret 不进入 `repr`。
+- 本地 profile 默认只声明文本完成、流式输出与 usage，不发送 `store`，不接受或保存私有 reasoning state。工具调用必须经 `LOCAL_TOOL_CALLING_ENABLED` 显式开启；vLLM 并行工具调用还需单独开启，Ollama 不声明并行能力。工具定义、工具历史、reasoning、私有状态及超出 profile 的并行响应均 fail closed。
+- 新增 OpenAI-compatible schema v1 脱敏合成 fixture，固定 Ollama/vLLM 的非流式与流式请求/响应契约；覆盖默认 endpoint、无云密钥启动、自定义 endpoint、超时、可选本地 bearer、工具能力与 Provider 错误归属。
+- 增加两个默认跳过的本地在线 smoke test，必须分别通过环境开关和模型名显式启用。当前开发机未假定存在运行中的 Ollama/vLLM 服务，因此本阶段验收以合成 fixture 和离线契约为准，未伪造在线验证记录。
+- 全量 pytest 为 670 项通过、22 项条件跳过；Ruff lint 与 92 个文件格式检查、mypy 51 个源文件及 5 个内置离线评测全部通过。开发机未监听默认 Ollama/vLLM 端口，本阶段未执行本地在线 smoke。
 
 ### Phase 5：集成收口（2 天）
 

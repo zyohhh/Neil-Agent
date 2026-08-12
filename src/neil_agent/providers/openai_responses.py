@@ -56,74 +56,121 @@ def encode_messages(
     messages: Sequence[Message],
     *,
     model: str,
+    provider: ProviderId = ProviderId.OPENAI,
 ) -> list[dict[str, object]]:
     """Encode provider-neutral history as Responses input items."""
 
-    encoded: list[dict[str, object]] = []
-    for message in messages:
-        if message.provider_state is not None:
-            encoded.extend(_private_output_items(message, model=model))
-            continue
-        if message.content:
-            encoded.append({"role": message.role, "content": message.content})
-        encoded.extend(
-            {
-                "type": "function_call",
-                "call_id": call.id,
-                "name": call.name,
-                "arguments": _encode_arguments(call.arguments),
-            }
-            for call in message.tool_calls
-        )
-        encoded.extend(
-            {
-                "type": "function_call_output",
-                "call_id": result.tool_call_id,
-                "output": _encode_tool_output(result.content, is_error=result.is_error),
-            }
-            for result in message.tool_results
-        )
-    return encoded
+    try:
+        encoded: list[dict[str, object]] = []
+        for message in messages:
+            if message.provider_state is not None:
+                encoded.extend(
+                    _private_output_items(message, model=model, provider=provider)
+                )
+                continue
+            if message.content:
+                encoded.append({"role": message.role, "content": message.content})
+            encoded.extend(
+                {
+                    "type": "function_call",
+                    "call_id": call.id,
+                    "name": call.name,
+                    "arguments": _encode_arguments(call.arguments),
+                }
+                for call in message.tool_calls
+            )
+            encoded.extend(
+                {
+                    "type": "function_call_output",
+                    "call_id": result.tool_call_id,
+                    "output": _encode_tool_output(
+                        result.content,
+                        is_error=result.is_error,
+                    ),
+                }
+                for result in message.tool_results
+            )
+        return encoded
+    except ProviderProtocolError as error:
+        raise _rebind_protocol_error(error, provider) from error
 
 
-def encode_tools(tools: Sequence[ToolDefinition]) -> list[dict[str, object]]:
+def encode_tools(
+    tools: Sequence[ToolDefinition],
+    *,
+    provider: ProviderId = ProviderId.OPENAI,
+) -> list[dict[str, object]]:
     """Encode local tools using native Responses function-tool fields."""
 
-    return [
-        {
-            "type": "function",
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": _json_object(tool.input_schema, label="tool schema"),
-            # Existing project schemas are not required to satisfy OpenAI strict mode.
-            "strict": False,
-        }
-        for tool in tools
-    ]
+    try:
+        return [
+            {
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": _json_object(tool.input_schema, label="tool schema"),
+                # Existing schemas need not satisfy OpenAI strict mode.
+                "strict": False,
+            }
+            for tool in tools
+        ]
+    except ProviderProtocolError as error:
+        raise _rebind_protocol_error(error, provider) from error
 
 
 def parse_response(
     response: object,
     *,
     model: str,
+    provider: ProviderId = ProviderId.OPENAI,
+    preserve_state: bool = True,
+    allow_reasoning: bool = True,
+    allow_parallel_tool_calls: bool = True,
 ) -> ModelResponse:
     """Validate a terminal Responses object and normalize it for Agent."""
 
+    try:
+        return _parse_response(
+            response,
+            model=model,
+            provider=provider,
+            preserve_state=preserve_state,
+            allow_reasoning=allow_reasoning,
+            allow_parallel_tool_calls=allow_parallel_tool_calls,
+        )
+    except ProviderProtocolError as error:
+        raise _rebind_protocol_error(error, provider) from error
+
+
+def _parse_response(
+    response: object,
+    *,
+    model: str,
+    provider: ProviderId,
+    preserve_state: bool,
+    allow_reasoning: bool,
+    allow_parallel_tool_calls: bool,
+) -> ModelResponse:
+
     status = _optional_string(_field(response, "status"))
     if status in {"failed", "cancelled"}:
-        raise _terminal_response_error(response, status=status)
+        raise _terminal_response_error(response, status=status, provider=provider)
     if status not in {"completed", "incomplete"}:
         raise ProviderProtocolError(
             "OpenAI Responses 返回了非终态响应。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
 
     output = _required_sequence(_field(response, "output"), "output")
-    parsed = parse_output_items(output)
+    parsed = parse_output_items(
+        output,
+        provider=provider,
+        allow_reasoning=allow_reasoning,
+    )
     if not parsed.text.strip() and not parsed.tool_calls:
         raise ProviderProtocolError(
             "OpenAI Responses 返回了空内容。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
 
     usage_value = _field(response, "usage")
@@ -134,32 +181,65 @@ def parse_response(
         has_tool_calls=bool(parsed.tool_calls),
         refused=parsed.refused,
     )
+    if not allow_parallel_tool_calls and len(parsed.tool_calls) > 1:
+        raise ProviderProtocolError(
+            "当前 Provider profile 不允许并行 function call。",
+            provider=provider,
+        )
+    provider_state = None
+    if preserve_state:
+        provider_state = ProviderTurnState(
+            provider=provider,
+            model=model,
+            schema_version=OPENAI_STATE_SCHEMA_VERSION,
+            payload={"output_items": parsed.output_items},
+        )
     return ModelResponse(
         content=parsed.text,
         tool_calls=parsed.tool_calls,
         usage=usage,
         stop_reason=stop_reason,
-        provider_state=ProviderTurnState(
-            provider=ProviderId.OPENAI,
-            model=model,
-            schema_version=OPENAI_STATE_SCHEMA_VERSION,
-            payload={"output_items": parsed.output_items},
-        ),
+        provider_state=provider_state,
     )
 
 
-def parse_output_items(items: Sequence[object]) -> ParsedOutput:
+def parse_output_items(
+    items: Sequence[object],
+    *,
+    provider: ProviderId = ProviderId.OPENAI,
+    allow_reasoning: bool = True,
+) -> ParsedOutput:
     """Validate only output item kinds generated by this adapter's capabilities."""
+
+    try:
+        return _parse_output_items(
+            items,
+            provider=provider,
+            allow_reasoning=allow_reasoning,
+        )
+    except ProviderProtocolError as error:
+        raise _rebind_protocol_error(error, provider) from error
+
+
+def _parse_output_items(
+    items: Sequence[object],
+    *,
+    provider: ProviderId,
+    allow_reasoning: bool,
+) -> ParsedOutput:
 
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     replay_items: list[dict[str, object]] = []
     refused = False
     for item in items:
-        item_type = _required_string(_field(item, "type"), "output item type")
-        replay_item = _json_object(item, label="output item")
+        try:
+            item_type = _required_string(_field(item, "type"), "output item type")
+            replay_item = _json_object(item, label="output item")
+        except ProviderProtocolError as error:
+            raise _rebind_protocol_error(error, provider) from error
         if item_type == "message":
-            _validate_output_message(item)
+            _validate_output_message(item, provider=provider)
             for part in _required_sequence(_field(item, "content"), "message content"):
                 part_type = _required_string(
                     _field(part, "type"),
@@ -181,16 +261,16 @@ def parse_output_items(items: Sequence[object]) -> ParsedOutput:
                 else:
                     raise ProviderProtocolError(
                         f"OpenAI message 包含未支持的 content part：{part_type}。",
-                        provider=ProviderId.OPENAI,
+                        provider=provider,
                     )
         elif item_type == "function_call":
             status = _optional_string(_field(item, "status"))
             if status not in {None, "completed"}:
                 raise ProviderProtocolError(
                     "OpenAI 返回了未完成的 function call。",
-                    provider=ProviderId.OPENAI,
+                    provider=provider,
                 )
-            _validate_direct_caller(item)
+            _validate_direct_caller(item, provider=provider)
             arguments_text = _required_string(
                 _field(item, "arguments"),
                 "function arguments",
@@ -204,12 +284,12 @@ def parse_output_items(items: Sequence[object]) -> ParsedOutput:
             except (json.JSONDecodeError, ValueError) as error:
                 raise ProviderProtocolError(
                     "OpenAI function call 参数不是完整 JSON。",
-                    provider=ProviderId.OPENAI,
+                    provider=provider,
                 ) from error
             if not isinstance(arguments, dict):
                 raise ProviderProtocolError(
                     "OpenAI function call 参数必须是 JSON 对象。",
-                    provider=ProviderId.OPENAI,
+                    provider=provider,
                 )
             tool_calls.append(
                 ToolCall(
@@ -219,6 +299,11 @@ def parse_output_items(items: Sequence[object]) -> ParsedOutput:
                 )
             )
         elif item_type == "reasoning":
+            if not allow_reasoning:
+                raise ProviderProtocolError(
+                    "当前 Provider profile 不接受 reasoning output item。",
+                    provider=provider,
+                )
             _required_string(_field(item, "id"), "reasoning item ID")
             _required_sequence(_field(item, "summary"), "reasoning summary")
             _required_string(
@@ -228,7 +313,7 @@ def parse_output_items(items: Sequence[object]) -> ParsedOutput:
         else:
             raise ProviderProtocolError(
                 f"OpenAI Responses 返回了未支持的 output item：{item_type}。",
-                provider=ProviderId.OPENAI,
+                provider=provider,
             )
         replay_items.append(replay_item)
 
@@ -236,7 +321,7 @@ def parse_output_items(items: Sequence[object]) -> ParsedOutput:
     if len(call_ids) != len(set(call_ids)):
         raise ProviderProtocolError(
             "OpenAI Responses 返回了重复的 function call ID。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     return ParsedOutput(
         text="".join(text_parts),
@@ -262,7 +347,11 @@ def to_token_usage(usage: object) -> TokenUsage:
     )
 
 
-def normalize_openai_error(error: APIError) -> ProviderError:
+def normalize_openai_error(
+    error: APIError,
+    *,
+    provider: ProviderId = ProviderId.OPENAI,
+) -> ProviderError:
     """Map OpenAI SDK exceptions to stable, secret-safe project errors."""
 
     status_code: int | None = None
@@ -272,45 +361,46 @@ def normalize_openai_error(error: APIError) -> ProviderError:
         retry_after = parse_retry_after(error.response.headers)
     code = _sdk_error_code(error)
 
+    label = _provider_label(provider)
     if isinstance(error, AuthenticationError) or status_code in {401, 403}:
         return ProviderAuthenticationError(
-            "OpenAI API Key 无效，请检查当前 Provider 配置。",
-            provider=ProviderId.OPENAI,
+            f"{label} API 鉴权失败，请检查当前 Provider 配置。",
+            provider=provider,
             status_code=status_code,
             retry_after=retry_after,
         )
     if isinstance(error, RateLimitError) or status_code == 429:
         return ProviderRateLimitError(
-            "OpenAI 请求过于频繁，请稍后重试。",
-            provider=ProviderId.OPENAI,
+            f"{label} 请求过于频繁，请稍后重试。",
+            provider=provider,
             status_code=status_code,
             retry_after=retry_after,
         )
     if isinstance(error, APITimeoutError) or status_code == 408:
         return ProviderTimeoutError(
-            "OpenAI 请求超时，请检查网络后重试。",
-            provider=ProviderId.OPENAI,
+            f"{label} 请求超时，请检查服务状态后重试。",
+            provider=provider,
             status_code=status_code,
             retry_after=retry_after,
         )
     if isinstance(error, APIConnectionError):
         return ProviderConnectionError(
-            "无法连接 OpenAI API，请检查网络和 API 地址。",
-            provider=ProviderId.OPENAI,
+            f"无法连接 {label} API，请检查服务和 API 地址。",
+            provider=provider,
             status_code=status_code,
             retry_after=retry_after,
         )
     if code in _CONTEXT_ERROR_CODES:
         return ProviderContextOverflowError(
-            "OpenAI 请求超出模型上下文窗口。",
-            provider=ProviderId.OPENAI,
+            f"{label} 请求超出模型上下文窗口。",
+            provider=provider,
             status_code=status_code,
             retry_after=retry_after,
         )
     if status_code is not None and 500 <= status_code <= 599:
         return ProviderInternalError(
-            f"OpenAI API 请求失败（HTTP {status_code}）。",
-            provider=ProviderId.OPENAI,
+            f"{label} API 请求失败（HTTP {status_code}）。",
+            provider=provider,
             status_code=status_code,
             retry_after=retry_after,
         )
@@ -318,67 +408,77 @@ def normalize_openai_error(error: APIError) -> ProviderError:
         status_code is not None and 400 <= status_code <= 499
     ):
         return ProviderInvalidRequestError(
-            f"OpenAI API 请求失败（HTTP {status_code or 400}）。",
-            provider=ProviderId.OPENAI,
+            f"{label} API 请求失败（HTTP {status_code or 400}）。",
+            provider=provider,
             status_code=status_code,
             retry_after=retry_after,
         )
     return ProviderProtocolError(
-        "OpenAI API 请求失败，请稍后重试。",
-        provider=ProviderId.OPENAI,
+        f"{label} API 请求失败，请稍后重试。",
+        provider=provider,
         status_code=status_code,
         retry_after=retry_after,
     )
 
 
-def normalize_stream_error(code: object) -> ProviderError:
+def normalize_stream_error(
+    code: object,
+    *,
+    provider: ProviderId = ProviderId.OPENAI,
+) -> ProviderError:
     """Normalize an SSE error event without copying its untrusted message."""
 
     value = code if isinstance(code, str) else None
+    label = _provider_label(provider)
     if value == "rate_limit_exceeded":
         return ProviderRateLimitError(
-            "OpenAI 流式请求受到限流，请稍后重试。",
-            provider=ProviderId.OPENAI,
+            f"{label} 流式请求受到限流，请稍后重试。",
+            provider=provider,
         )
     if value in _CONTEXT_ERROR_CODES:
         return ProviderContextOverflowError(
-            "OpenAI 请求超出模型上下文窗口。",
-            provider=ProviderId.OPENAI,
+            f"{label} 请求超出模型上下文窗口。",
+            provider=provider,
         )
     if value == "server_error":
         return ProviderInternalError(
-            "OpenAI 流式请求遇到服务端错误。",
-            provider=ProviderId.OPENAI,
+            f"{label} 流式请求遇到服务端错误。",
+            provider=provider,
         )
     return ProviderProtocolError(
-        "OpenAI 流式请求返回错误事件。",
-        provider=ProviderId.OPENAI,
+        f"{label} 流式请求返回错误事件。",
+        provider=provider,
     )
 
 
-def _private_output_items(message: Message, *, model: str) -> list[dict[str, object]]:
+def _private_output_items(
+    message: Message,
+    *,
+    model: str,
+    provider: ProviderId,
+) -> list[dict[str, object]]:
     state = message.provider_state
     if state is None:
         return []
-    if not state.belongs_to(ProviderId.OPENAI, model):
+    if not state.belongs_to(provider, model):
         raise ProviderProtocolError(
             "Provider private state cannot be replayed across providers or models.",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     if state.schema_version != OPENAI_STATE_SCHEMA_VERSION or set(state.payload) != {
         "output_items"
     }:
         raise ProviderProtocolError(
             "OpenAI private state has an unsupported schema.",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     raw_items = state.payload["output_items"]
     if not isinstance(raw_items, (list, tuple)):
         raise ProviderProtocolError(
             "OpenAI private state has an invalid output item collection.",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
-    parsed = parse_output_items(raw_items)
+    parsed = parse_output_items(raw_items, provider=provider)
     public_tools = tuple(
         (call.id, call.name, call.arguments) for call in message.tool_calls
     )
@@ -388,37 +488,37 @@ def _private_output_items(message: Message, *, model: str) -> list[dict[str, obj
     if parsed.text != message.content or private_tools != public_tools:
         raise ProviderProtocolError(
             "OpenAI private state does not match the public assistant message.",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     return [dict(item) for item in parsed.output_items]
 
 
-def _validate_output_message(item: object) -> None:
+def _validate_output_message(item: object, *, provider: ProviderId) -> None:
     _required_string(_field(item, "id"), "message item ID")
     if _field(item, "role") != "assistant":
         raise ProviderProtocolError(
             "OpenAI output message 具有无效角色。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     if _field(item, "status") not in {"completed", "incomplete"}:
         raise ProviderProtocolError(
             "OpenAI output message 具有无效状态。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
 
 
-def _validate_direct_caller(item: object) -> None:
+def _validate_direct_caller(item: object, *, provider: ProviderId) -> None:
     namespace = _field(item, "namespace")
     if namespace not in {None, ""}:
         raise ProviderProtocolError(
             "OpenAI 返回了未配置命名空间的 function call。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     caller = _field(item, "caller")
     if caller is not None and _field(caller, "type") != "direct":
         raise ProviderProtocolError(
             "OpenAI 返回了非直接 function call。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
 
 
@@ -443,22 +543,27 @@ def _stop_reason(
     return StopReason.UNKNOWN
 
 
-def _terminal_response_error(response: object, *, status: str) -> ProviderError:
+def _terminal_response_error(
+    response: object,
+    *,
+    status: str,
+    provider: ProviderId,
+) -> ProviderError:
     error = _field(response, "error")
     code = _field(error, "code")
     if code == "rate_limit_exceeded":
         return ProviderRateLimitError(
             "OpenAI 响应因限流失败。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     if code == "server_error":
         return ProviderInternalError(
             "OpenAI 响应因服务端错误失败。",
-            provider=ProviderId.OPENAI,
+            provider=provider,
         )
     return ProviderProtocolError(
         f"OpenAI Responses 以 {status} 状态终止。",
-        provider=ProviderId.OPENAI,
+        provider=provider,
     )
 
 
@@ -585,3 +690,27 @@ def _optional_string(value: object) -> str | None:
 def _token_count(value: object, field: str) -> int:
     count = _field(value, field)
     return count if isinstance(count, int) and count >= 0 else 0
+
+
+def _provider_label(provider: ProviderId) -> str:
+    return {
+        ProviderId.OPENAI: "OpenAI",
+        ProviderId.OLLAMA: "Ollama",
+        ProviderId.VLLM: "vLLM",
+        ProviderId.DEEPSEEK: "DeepSeek",
+        ProviderId.CLAUDE: "Claude",
+    }[provider]
+
+
+def _rebind_protocol_error(
+    error: ProviderProtocolError,
+    provider: ProviderId,
+) -> ProviderProtocolError:
+    if error.provider is provider:
+        return error
+    return ProviderProtocolError(
+        str(error),
+        provider=provider,
+        status_code=error.status_code,
+        retry_after=error.retry_after,
+    )

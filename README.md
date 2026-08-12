@@ -1,6 +1,6 @@
 # Neil-Agent
 
-A local coding agent built from scratch with Python and provider-neutral model boundaries. DeepSeek, Claude, and OpenAI are currently supported.
+A local coding agent built from scratch with Python and provider-neutral model boundaries. DeepSeek, Claude, OpenAI, Ollama, and vLLM are currently supported.
 
 ## 常用命令
 
@@ -39,7 +39,7 @@ Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review
 高级上下文断层图、安全盾、时间机器和仓库热力图的增量路线见
 [`docs/visualization-development.md`](docs/visualization-development.md)。
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
-[`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前可选运行实现为 DeepSeek、Claude 和 OpenAI，尚未实现的 Ollama 与 vLLM 会在网络请求前 fail closed。
+[`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前五个 Provider 均可显式选择，兼容端点未声明的能力会在网络请求前 fail closed。
 
 ## 模型 Provider 配置
 
@@ -71,14 +71,29 @@ OPENAI_API_KEY=<your-key>
 
 `THINKING_ENABLED=true` 时通过 `OPENAI_REASONING_EFFORT` 设置推理强度，默认 `medium`。推理 item 的加密内容会绑定 OpenAI 与模型后保存，用于手动管理的后续 Responses 上下文；跨 Provider 或模型回放会在网络请求前失败。
 
+Ollama 与 vLLM 复用经过审计的 Responses 编解码和流式状态机，但使用独立的保守 capability profile。两者必须显式提供模型 ID，默认连接本机端点且不要求云 API Key：
+
+```text
+# Ollama（默认 http://localhost:11434/v1）
+LLM_PROVIDER=ollama
+LLM_MODEL=<local-model-id>
+
+# 或 vLLM（默认 http://localhost:8000/v1）
+LLM_PROVIDER=vllm
+LLM_MODEL=<served-model-name>
+```
+
+`LLM_BASE_URL` 可覆盖端点，且必须以 `/v1` 结尾；受保护的本地网关可通过 `LOCAL_API_KEY` 提供 bearer key。适配器不会向兼容端点发送 OpenAI 的 `store` 或私有 reasoning state。由于工具能力取决于服务版本、启动参数和具体模型，默认只开放 Provider 的文本完成与流式输出；验证当前部署后才可设置 `LOCAL_TOOL_CALLING_ENABLED=true`。Neil Agent 的交互和一次性 Agent 循环默认携带内置工具，因此使用这两个入口时必须先开启该开关，否则会在发网前明确拒绝。vLLM 还可显式设置 `LOCAL_PARALLEL_TOOL_CALLS_ENABLED=true`，Ollama profile 不声明并行工具调用。未启用能力时，工具定义、工具历史和 reasoning 均在发网前被拒绝，不做静默降级。
+
 | Provider | 线协议 | 运行状态 | thinking 私有状态 |
 | --- | --- | --- | --- |
 | DeepSeek | Anthropic Messages compatible | 可用，默认兼容入口 | 签名块绑定 DeepSeek 与模型后回放 |
 | Claude | Anthropic Messages native | 可用 | thinking 与 redacted-thinking 原样绑定并回放 |
 | OpenAI | Responses native | 可用 | output items 与 encrypted reasoning 绑定后原样回放 |
-| Ollama / vLLM | OpenAI-compatible | 尚未实现，fail closed | Phase 4 |
+| Ollama | OpenAI-compatible Responses | 可用；工具默认关闭 | 不接受或保存私有 reasoning state |
+| vLLM | OpenAI-compatible Responses | 可用；工具与并行调用分别显式开启 | 不接受或保存私有 reasoning state |
 
-默认测试使用合成、脱敏 fixture，不访问公网。OpenAI 在线 smoke test 只有同时设置 `NEIL_AGENT_RUN_OPENAI_SMOKE=1`、`OPENAI_API_KEY` 和 `NEIL_AGENT_OPENAI_SMOKE_MODEL` 才会执行并消耗额度；本阶段未执行付费在线测试。
+默认测试使用合成、脱敏 fixture，不访问公网。OpenAI 在线 smoke test 只有同时设置 `NEIL_AGENT_RUN_OPENAI_SMOKE=1`、`OPENAI_API_KEY` 和 `NEIL_AGENT_OPENAI_SMOKE_MODEL` 才会执行并消耗额度。本地 smoke test 分别使用 `NEIL_AGENT_RUN_OLLAMA_SMOKE=1` / `NEIL_AGENT_OLLAMA_SMOKE_MODEL` 和 `NEIL_AGENT_RUN_VLLM_SMOKE=1` / `NEIL_AGENT_VLLM_SMOKE_MODEL` 显式开启；默认测试不会假定本机已运行模型服务。本阶段未执行付费 OpenAI 请求。
 
 ## 一次性非交互运行
 

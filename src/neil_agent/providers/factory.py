@@ -63,6 +63,8 @@ def create_provider(
     deepseek_builder: ProviderBuilder | None = None,
     claude_builder: ProviderBuilder | None = None,
     openai_builder: ProviderBuilder | None = None,
+    ollama_builder: ProviderBuilder | None = None,
+    vllm_builder: ProviderBuilder | None = None,
 ) -> ChatModel:
     """Create the configured runtime using the shipped provider adapters."""
 
@@ -78,11 +80,20 @@ def create_provider(
         from .openai import OpenAIProvider
 
         openai_builder = cast(ProviderBuilder, OpenAIProvider)
+    if ollama_builder is None or vllm_builder is None:
+        from .openai_compatible import OllamaProvider, VLLMProvider
+
+        if ollama_builder is None:
+            ollama_builder = cast(ProviderBuilder, OllamaProvider)
+        if vllm_builder is None:
+            vllm_builder = cast(ProviderBuilder, VLLMProvider)
     factory = ProviderFactory(
         {
             ProviderId.DEEPSEEK: deepseek_builder,
             ProviderId.CLAUDE: claude_builder,
             ProviderId.OPENAI: openai_builder,
+            ProviderId.OLLAMA: ollama_builder,
+            ProviderId.VLLM: vllm_builder,
         }
     )
     return factory.create(settings, retry_handler=retry_handler)

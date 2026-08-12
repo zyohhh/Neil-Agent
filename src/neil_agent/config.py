@@ -70,6 +70,11 @@ class Settings(BaseSettings):
         min_length=1,
         description="API key used by the OpenAI provider.",
     )
+    local_api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        description="Optional bearer key for a secured Ollama or vLLM server.",
+    )
     system_prompt: str = Field(
         default=DEFAULT_SYSTEM_PROMPT,
         min_length=1,
@@ -92,6 +97,16 @@ class Settings(BaseSettings):
     ] = Field(
         default="medium",
         description="OpenAI reasoning effort used when thinking is enabled.",
+    )
+    local_tool_calling_enabled: bool = Field(
+        default=False,
+        description=(
+            "Explicitly enable function tools for a verified Ollama/vLLM model."
+        ),
+    )
+    local_parallel_tool_calls_enabled: bool = Field(
+        default=False,
+        description="Allow multiple tool calls for a verified local model.",
     )
     max_tokens: int = Field(
         default=8192,
@@ -237,6 +252,27 @@ class Settings(BaseSettings):
                 raise ValueError("Claude thinking budget must be at least 1024 tokens")
             if self.claude_thinking_budget_tokens >= self.max_tokens:
                 raise ValueError("Claude thinking budget must be less than max tokens")
+        local_provider = self.llm_provider in {ProviderId.OLLAMA, ProviderId.VLLM}
+        if (
+            local_provider
+            and self.local_parallel_tool_calls_enabled
+            and not self.local_tool_calling_enabled
+        ):
+            raise ValueError("parallel local tool calls require local tool calling")
+        if (
+            self.llm_provider is ProviderId.OLLAMA
+            and self.local_parallel_tool_calls_enabled
+        ):
+            raise ValueError("Ollama profile does not declare parallel tool calls")
+        if local_provider:
+            endpoint = self.selected_base_url
+            endpoint_path = "" if endpoint is None else endpoint.path or ""
+            if endpoint is None or endpoint_path.rstrip("/").split("/")[-1] != "v1":
+                raise ValueError("local OpenAI-compatible endpoint must end with /v1")
+            if endpoint.query is not None or endpoint.fragment is not None:
+                raise ValueError(
+                    "local OpenAI-compatible endpoint cannot use query or fragment"
+                )
         return self
 
     @property
@@ -273,8 +309,8 @@ class Settings(BaseSettings):
             ProviderId.DEEPSEEK: self.deepseek_api_key,
             ProviderId.CLAUDE: self.anthropic_api_key,
             ProviderId.OPENAI: self.openai_api_key,
-            ProviderId.OLLAMA: None,
-            ProviderId.VLLM: None,
+            ProviderId.OLLAMA: self.local_api_key,
+            ProviderId.VLLM: self.local_api_key,
         }[self.llm_provider]
 
     @property

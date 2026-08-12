@@ -313,7 +313,7 @@ def test_expected_model_error_has_stable_error_code(tmp_path: Path) -> None:
     assert payload["error_code"] == "model_error"
 
 
-def test_unimplemented_selected_provider_fails_before_network_access(
+def test_local_provider_rejects_unverified_tools_before_network_access(
     tmp_path: Path,
 ) -> None:
     stdout = StringIO()
@@ -335,7 +335,7 @@ def test_unimplemented_selected_provider_fails_before_network_access(
     payload = json.loads(stdout.getvalue())
     assert exit_code == 1
     assert payload["error_code"] == "model_error"
-    assert "ollama" in payload["error"]
+    assert "未显式启用工具调用" in payload["error"]
 
 
 def test_stream_protocol_matches_versioned_contract_fixture(tmp_path: Path) -> None:
