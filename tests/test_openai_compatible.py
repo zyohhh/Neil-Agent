@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from neil_agent.config import Settings
 from neil_agent.providers.base import ProviderId, ProviderTurnState, WireProtocol
 from neil_agent.providers.errors import (
+    ProviderNotImplementedError,
     ProviderProtocolError,
     UnsupportedCapabilityError,
 )
@@ -178,6 +179,11 @@ def test_local_client_uses_profile_endpoint_placeholder_and_no_sdk_retries(
         "timeout": 120.0,
         "max_retries": 0,
     }
+
+
+def test_local_adapter_rejects_mismatched_provider_with_project_error() -> None:
+    with pytest.raises(ProviderNotImplementedError, match="through the Ollama adapter"):
+        OllamaProvider(local_settings(ProviderId.VLLM))
 
 
 def test_local_api_key_and_custom_endpoint_are_forwarded_without_cloud_key() -> None:

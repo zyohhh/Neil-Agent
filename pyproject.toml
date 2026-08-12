@@ -40,6 +40,6 @@ dev = [
 
 [tool.pytest.ini_options]
 markers = [
-    "online: paid provider smoke tests that require explicit environment opt-in",
+    "online: networked provider smoke tests that require explicit environment opt-in",
     "windows_sandbox_security: attack-oriented tests that require a real Windows Sandbox installation",
 ]

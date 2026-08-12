@@ -28,7 +28,6 @@ from .errors import (
 )
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
-from .llm import LLMClient
 from .providers.factory import create_provider
 from .schemas import ActivityEvent, TokenUsage
 from .session import SessionStore
@@ -346,11 +345,7 @@ def run_noninteractive(
             )
         session_store = SessionStore(filesystem.root)
         session = session_store.new_session()
-        model = llm or create_provider(
-            settings,
-            retry_handler=writer.activity,
-            deepseek_builder=LLMClient,
-        )
+        model = llm or create_provider(settings, retry_handler=writer.activity)
         active_hooks = hooks.copy() if hooks is not None else LifecycleHooks()
         if settings.audit_log_enabled:
             JsonlAuditSink(

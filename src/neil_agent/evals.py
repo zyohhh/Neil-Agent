@@ -29,7 +29,8 @@ from .instructions import (
     MAX_INSTRUCTIONS_FILE_BYTES,
     load_project_instructions,
 )
-from .llm import LLMClient
+from .providers.deepseek import DeepSeekProvider
+from .providers.factory import create_provider
 from .noninteractive import run_noninteractive
 from .schemas import (
     ActivityEvent,
@@ -298,7 +299,7 @@ def _default_real_model_factory(
     retry_handler: Callable[[ActivityEvent], None],
 ) -> ChatModel:
     del scenario
-    return LLMClient(settings, retry_handler=retry_handler)
+    return create_provider(settings, retry_handler=retry_handler)
 
 
 def _run_real_v1_acceptance(
@@ -781,7 +782,7 @@ def _eval_workflow_consistency() -> str:
                 "retry_base_delay": 0,
             }
         )
-        retry_model = LLMClient(
+        retry_model = DeepSeekProvider(
             retry_settings,
             client=cast(Anthropic, retry_client),
             retry_handler=retry_activities.append,

@@ -33,7 +33,6 @@ from .instructions import (
     load_project_instructions,
     prepare_project_instructions_init,
 )
-from .llm import LLMClient
 from .noninteractive import (
     OutputFormat,
     PermissionMode,
@@ -342,11 +341,7 @@ def run(console: Console) -> None:
     try:
         llm = cast(
             RetryConfigurableChatModel,
-            create_provider(
-                settings,
-                retry_handler=renderer.show_activity,
-                deepseek_builder=LLMClient,
-            ),
+            create_provider(settings, retry_handler=renderer.show_activity),
         )
     except NeilAgentError as error:
         console.print(f"[bold red]Provider 启动失败：[/bold red]{error}")
@@ -1580,7 +1575,7 @@ def _show_doctor(
     session_store: SessionStore,
     shell_tools: ShellTools,
 ) -> None:
-    """Display read-only local diagnostics without calling DeepSeek."""
+    """Display read-only local diagnostics without calling a model Provider."""
 
     report = run_diagnostics(
         settings,

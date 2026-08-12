@@ -34,6 +34,10 @@ from neil_agent.schemas import (
     ToolDefinition,
 )
 
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:LLMClient is deprecated:DeprecationWarning"
+)
+
 
 def make_settings(*, thinking_enabled: bool = False) -> Settings:
     return Settings(
@@ -407,3 +411,10 @@ def test_stream_does_not_retry_after_text_was_emitted() -> None:
         next(events)
     assert client.messages.stream.call_count == 1
     assert delays == []
+
+
+def test_legacy_llm_client_emits_deprecation_warning() -> None:
+    client = MagicMock(spec=Anthropic)
+
+    with pytest.warns(DeprecationWarning, match="DeepSeekProvider.*0.2.0"):
+        LLMClient(make_settings(), client=cast(Anthropic, client))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
@@ -38,6 +39,35 @@ def deepseek_settings(**updates: object) -> Settings:
     }
     values.update(updates)
     return Settings(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.online
+def test_claude_online_complete_smoke() -> None:
+    if os.environ.get("NEIL_AGENT_RUN_CLAUDE_SMOKE") != "1":
+        pytest.skip("set NEIL_AGENT_RUN_CLAUDE_SMOKE=1 to allow a paid API request")
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    model_name = os.environ.get("NEIL_AGENT_CLAUDE_SMOKE_MODEL")
+    if not api_key or not model_name:
+        pytest.skip("ANTHROPIC_API_KEY and NEIL_AGENT_CLAUDE_SMOKE_MODEL are required")
+
+    model = ClaudeProvider(
+        Settings(
+            _env_file=None,
+            llm_provider=ProviderId.CLAUDE,
+            llm_model=model_name,
+            anthropic_api_key=api_key,
+            max_tokens=32,
+            max_retries=0,
+        )
+    )
+
+    result = model.complete(
+        [Message(role="user", content="Reply with exactly: OK")],
+        system_prompt="Follow the user instruction exactly.",
+    )
+
+    assert result.strip()
+    assert model.last_usage is not None
 
 
 def test_claude_default_client_pins_native_endpoint_and_disables_sdk_retries(

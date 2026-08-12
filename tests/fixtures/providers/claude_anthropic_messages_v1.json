@@ -6,7 +6,8 @@
     "kind": "synthetic-characterization",
     "live_capture": false,
     "sanitized": true,
-    "sdk": "anthropic"
+    "sdk": "anthropic",
+    "sdk_version": "0.116.0"
   },
   "settings": {
     "model": "claude-contract-model",

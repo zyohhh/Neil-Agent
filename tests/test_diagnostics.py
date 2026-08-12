@@ -249,10 +249,133 @@ def test_doctor_reports_selected_local_provider_without_requiring_key(
     )
 
     configuration = report.checks[0]
-    assert configuration.status == "warning"
-    assert "Provider：ollama" in configuration.details
+    assert configuration.status == "ok"
+    assert configuration.summary == "Provider 配置与能力已通过校验"
+    assert "Provider：Ollama（ollama）" in configuration.details
+    assert "线协议：openai-compatible" in configuration.details
     assert "API Key：无需配置" in configuration.details
     assert "模型：local-model" in configuration.details
+    assert "Endpoint：http://localhost:11434/v1" in configuration.details
+    assert any(
+        "流式=支持，工具=未声明，并行工具=未声明，推理状态=未声明" in detail
+        for detail in configuration.details
+    )
+
+
+def test_doctor_reports_enabled_vllm_capabilities_from_runtime_profile(
+    tmp_path: Path,
+) -> None:
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.VLLM,
+        llm_model="served-model",
+        local_tool_calling_enabled=True,
+        local_parallel_tool_calls_enabled=True,
+        workspace_root=tmp_path,
+    )
+
+    report = run_diagnostics(
+        settings,
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    configuration = report.checks[0]
+    assert configuration.status == "ok"
+    assert "Provider：vLLM（vllm）" in configuration.details
+    assert any(
+        "流式=支持，工具=支持，并行工具=支持，推理状态=未声明" in detail
+        for detail in configuration.details
+    )
+
+
+def test_doctor_accepts_ipv6_loopback_http_for_local_provider(tmp_path: Path) -> None:
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.VLLM,
+        llm_model="served-model",
+        llm_base_url="http://[::1]:8000/v1",
+        workspace_root=tmp_path,
+    )
+
+    report = run_diagnostics(
+        settings,
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    configuration = report.checks[0]
+    assert configuration.status == "ok"
+    assert "Endpoint：http://[::1]:8000/v1" in configuration.details
+
+
+def test_doctor_warns_for_remote_plaintext_local_endpoint(tmp_path: Path) -> None:
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.VLLM,
+        llm_model="served-model",
+        llm_base_url="http://models.example.test/v1",
+        workspace_root=tmp_path,
+    )
+
+    report = run_diagnostics(
+        settings,
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    configuration = report.checks[0]
+    assert configuration.status == "warning"
+    assert configuration.summary == "远程 API 地址未使用 HTTPS"
+    assert "Endpoint：http://models.example.test/v1" in configuration.details
+
+
+def test_doctor_redacts_endpoint_credentials_query_fragment_and_api_key(
+    tmp_path: Path,
+) -> None:
+    endpoint_secret = "endpoint-password"
+    query_secret = "private-query"
+    api_secret = "private-api-key"
+    shell_tools = MagicMock(spec=ShellTools)
+    shell_tools.git_status_snapshot.return_value = "## main"
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.OPENAI,
+        llm_model="configured-model",
+        llm_base_url=(
+            f"https://user:{endpoint_secret}@gateway.example.test/v1"
+            f"?tenant={query_secret}#private-fragment"
+        ),
+        openai_api_key=api_secret,
+        workspace_root=tmp_path,
+    )
+
+    report = run_diagnostics(
+        settings,
+        tmp_path,
+        SessionStore(tmp_path),
+        cast(ShellTools, shell_tools),
+    )
+
+    configuration = report.checks[0]
+    rendered = repr(configuration)
+    assert configuration.status == "ok"
+    assert "Endpoint：https://gateway.example.test/v1?（值已隐藏）#（值已隐藏）" in (
+        configuration.details
+    )
+    assert endpoint_secret not in rendered
+    assert query_secret not in rendered
+    assert "private-fragment" not in rendered
+    assert api_secret not in rendered
 
 
 def test_doctor_inspects_enabled_audit_without_exposing_records(

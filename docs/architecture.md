@@ -168,7 +168,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 ## 模型请求重试
 
-- Provider SDK 客户端关闭隐藏重试；`providers/retry.py` 提供公共有界策略，当前 DeepSeek `LLMClient` 负责驱动并报告每次重试，保证次数、等待和终端状态可观察。
+- Provider SDK 客户端关闭隐藏重试；`providers/retry.py` 提供公共有界策略，各 Provider runtime 负责驱动并报告每次重试，保证次数、等待和终端状态可观察。生产入口统一通过 `ProviderFactory` 构造实现；旧 `LLMClient` 只保留为 0.1.x DeepSeek 外部兼容 facade，并计划在 0.2.0 移除。
 - 只把限流、HTTP 408、HTTP 5xx、超时和连接错误视为瞬时失败；鉴权、权限、请求格式及其他 4xx 错误不重试。
 - 等待时间以 `RETRY_BASE_DELAY` 指数增长，并受 `RETRY_MAX_DELAY` 限制；有效的 `Retry-After` 或 `retry-after-ms` 可以提供等待建议，但不能突破本地上限。
 - `MAX_RETRIES` 表示首次请求后的额外尝试次数。达到上限后，最后一个 SDK 异常转换为稳定的中文 `LLMError`。
@@ -177,8 +177,8 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 ## 本地诊断边界
 
-- `/doctor` 只检查当前已加载配置、工作区权限、会话目录、启用后的审计文件/锁、OS 沙箱静态能力和 Git，不调用模型 API，也不修改文件、会话、审计日志、系统沙箱配置或 Git 状态。
-- API Key 只报告已配置且值已隐藏；诊断对象、终端详情和错误信息都不包含 Key。非 HTTPS API 地址会产生警告。
+- `/doctor` 只检查当前已加载配置、Provider 线协议与能力快照、工作区权限、会话目录、启用后的审计文件/锁、OS 沙箱静态能力和 Git，不构造 SDK client、不调用模型 API，也不修改文件、会话、审计日志、系统沙箱配置或 Git 状态。
+- API Key 只报告已配置且值已隐藏；endpoint 只显示 scheme、host、port 和 path，凭据及 query/fragment 值始终隐藏。Ollama/vLLM 的 loopback HTTP 是正常本地端点，其他非 HTTPS 地址产生警告。
 - 工作区检查使用本地权限信息；会话检查复用 `SessionStore.list_sessions()` 的路径、符号链接、格式和版本边界。
 - 审计检查不会创建目录或文件；它先做非阻塞锁探测，空闲时在锁内统计当前/备份文件的记录和格式，繁忙时只报告警告。诊断不返回任何审计正文。
 - OS 沙箱检查只读取平台和可执行组件能力。默认 `disabled` 是安全的正常状态；显式选择 Windows 后端但组件不可用或能力不完整时报告错误，且不会启动探针进程、创建 profile、修改 ACL 或回退到普通子进程。

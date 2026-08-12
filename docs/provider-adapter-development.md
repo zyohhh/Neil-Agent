@@ -5,7 +5,7 @@
 本文档规划 Neil Agent 的多 LLM Provider 协议适配层，仅覆盖 Provider 抽象、协议转换、配置、错误语义和契约测试。
 
 - 开发分支：`feature/provider-runtime`
-- 当前阶段：Phase 4 已完成，准备进入 Phase 5
+- 当前阶段：Phase 5 已完成，多 Provider 协议层进入维护期
 - 目标 Provider：DeepSeek、Claude、OpenAI、Ollama、vLLM
 - 暂不纳入：MCP、评测基准、模型路由与自动降级、可视化、Windows Sandbox 后续主线
 
@@ -23,13 +23,12 @@
 
 ## 2. 当前代码基础与剩余问题
 
-现有架构保持了正确的依赖方向：`Agent` 依赖 `ChatModel` Protocol，而不是具体 SDK。Phase 0～4 已完成 Provider 身份/能力/错误/重试契约、条件配置、Anthropic Messages 与 OpenAI Responses 编解码边界，以及五套可选运行实现。
+现有架构保持了正确的依赖方向：`Agent` 依赖 `ChatModel` Protocol，而不是具体 SDK。Phase 0～5 已完成 Provider 身份/能力/错误/重试契约、条件配置、Anthropic Messages 与 OpenAI Responses 编解码边界、五套可选运行实现及诊断收口。
 
-当前剩余工作包括：
+当前维护事项包括：
 
-1. `/doctor` 尚未完整展示脱敏的 Provider、模型、endpoint 与能力快照。
-2. 各 Provider 的受控在线 smoke test 仍需对应服务、显式凭据或开关，并单独记录执行环境和日期。
-3. 旧 `LLMClient` 仍作为 DeepSeek 兼容 facade，后续需要给出明确迁移期限。
+1. 各 Provider 的受控在线 smoke 只在对应服务或凭据可用时执行，并记录环境、模型和日期；缺少真实运行条件时不得把离线 fixture 标记为在线验证。
+2. 旧 `LLMClient` 仅作为 0.1.x 外部兼容 facade，计划在 0.2.0 移除；生产入口和新代码均使用 `ProviderFactory` / `DeepSeekProvider`。
 
 后续阶段继续围绕稳定核心语义和真实协议差异推进，不为目录整齐复制 SDK wrapper。
 
@@ -379,6 +378,25 @@ Provider 初始化时应生成最终能力快照。Agent 请求某项能力前�
 - 记录已验证的 SDK 版本与在线 smoke test 日期。
 
 交付物：可发布的多 Provider 协议层与用户文档。
+
+完成记录（2026-08-13）：
+
+- `/doctor` 通过只读 `describe_provider()` 获取与运行时同源的 descriptor，不构造 SDK client、不发起网络请求；现在显示 Provider display name/ID、线协议、模型、脱敏 endpoint 和完整 capability snapshot。endpoint 用户信息、query/fragment 值与 API Key 均不会进入诊断对象或终端输出。
+- endpoint 健康语义区分本机与远程：Ollama/vLLM 的 localhost、`.localhost`、IPv4/IPv6 loopback HTTP 视为正常本地部署；其他明文 HTTP 继续警告。Ollama/vLLM 动态工具与并行能力只在配置明确开启时显示为支持，且与实际请求门禁共用同一构造函数。
+- CLI、非交互入口、默认 Factory 和真实 DeepSeek 评测已移除对兼容 `LLMClient` 的内部依赖，统一使用 ProviderFactory/具体 Provider。`LLMClient` 仅为 0.1.x 外部导入兼容保留，构造时发出 `DeprecationWarning`，移除版本明确为 0.2.0。
+- Anthropic golden fixture 补记锁定 SDK `0.116.0`，OpenAI/compatible fixture 保持 SDK `2.53.0`。Claude 新增与 OpenAI 对称的显式付费 smoke；DeepSeek 继续使用双重费用确认验收，Ollama/vLLM 继续使用显式本地服务开关。
+- 在线验证台账：截至 2026-08-13，本开发环境没有可核验的 Claude/OpenAI 凭据成功记录，默认 Ollama/vLLM 端口也未监听；本阶段未执行在线 smoke，状态明确记为“无”，不以合成 fixture 代替真实服务验证。
+- 集成验收：全量 pytest 为 683 项通过、23 项条件跳过；Ruff lint 与 92 个文件格式检查、mypy 51 个源文件及 5 个内置离线评测全部通过。非交互 Ollama 生产入口回归在显式关闭 reasoning 后，于发网前按预期拒绝未验证工具能力并返回稳定 `model_error`。
+
+SDK 与在线验证台账：
+
+| Provider | 锁定客户端 | 离线契约 | 最近在线成功 |
+| --- | --- | --- | --- |
+| DeepSeek | Anthropic SDK 0.116.0 | schema v1 fixture + 真实验收逻辑离线回归 | 无（2026-08-13 未执行） |
+| Claude | Anthropic SDK 0.116.0 | schema v1 fixture | 无（2026-08-13 未执行） |
+| OpenAI | OpenAI SDK 2.53.0 | schema v1 fixture | 无（2026-08-13 未执行） |
+| Ollama | OpenAI SDK 2.53.0 | compatible schema v1 fixture | 无（2026-08-13 默认端口未监听） |
+| vLLM | OpenAI SDK 2.53.0 | compatible schema v1 fixture | 无（2026-08-13 默认端口未监听） |
 
 总工程量预计 10～15 个有效开发日。若先交付可面试演示的最小版本，建议完成 Phase 0～3：这能展示协议抽象、两类真实协议、工具调用、流式状态机和可测试性；Ollama/vLLM 随后补齐。
 

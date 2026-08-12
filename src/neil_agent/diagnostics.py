@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal
 
 from .audit import JsonlAuditSink
 from .config import Settings
 from .errors import AuditError, NeilAgentError, SandboxError, SessionError
+from .providers.base import ProviderCapabilities, ProviderId
+from .providers.factory import describe_provider
 from .sandbox import SandboxCapabilities, WindowsSandboxBackend
 from .session import SessionStore
 from .tools.shell import ShellTools
@@ -73,22 +76,91 @@ def run_diagnostics(
 
 def _check_configuration(settings: Settings) -> DiagnosticCheck:
     endpoint = settings.selected_base_url
-    secure_endpoint = endpoint is None or endpoint.scheme == "https"
+    descriptor = describe_provider(settings)
+    local_http = (
+        settings.llm_provider in {ProviderId.OLLAMA, ProviderId.VLLM}
+        and endpoint is not None
+        and endpoint.scheme == "http"
+        and _is_loopback_host(endpoint.host)
+    )
+    secure_endpoint = endpoint is not None and (
+        endpoint.scheme == "https" or local_http
+    )
     key_status = (
         "已配置（值已隐藏）" if settings.selected_api_key is not None else "无需配置"
     )
     return DiagnosticCheck(
         name="配置",
         status="ok" if secure_endpoint else "warning",
-        summary="配置已通过校验" if secure_endpoint else "API 地址未使用 HTTPS",
+        summary=(
+            "Provider 配置与能力已通过校验"
+            if secure_endpoint
+            else "远程 API 地址未使用 HTTPS"
+        ),
         details=(
-            f"Provider：{settings.llm_provider.value}",
+            f"Provider：{descriptor.display_name}（{descriptor.provider.value}）",
+            f"线协议：{descriptor.wire_protocol.value}",
             f"API Key：{key_status}",
             f"模型：{settings.selected_model}",
+            f"Endpoint：{_redacted_endpoint(endpoint)}",
+            f"能力：{_format_provider_capabilities(descriptor.capabilities)}",
             f"请求超时：{settings.request_timeout:g} 秒",
             f"失败重试：最多 {settings.max_retries} 次，"
             f"等待上限 {settings.retry_max_delay:g} 秒",
         ),
+    )
+
+
+def _redacted_endpoint(endpoint: object) -> str:
+    """Render a useful endpoint without credentials, query, or fragment values."""
+
+    if endpoint is None:
+        return "未配置"
+    scheme = getattr(endpoint, "scheme", None)
+    host = getattr(endpoint, "host", None)
+    port = getattr(endpoint, "port", None)
+    path = getattr(endpoint, "path", None) or "/"
+    if not isinstance(scheme, str) or not isinstance(host, str):
+        return "已配置（详情已隐藏）"
+    display_host = host if ":" not in host or host.startswith("[") else f"[{host}]"
+    default_port = (scheme == "https" and port == 443) or (
+        scheme == "http" and port == 80
+    )
+    authority = display_host
+    if isinstance(port, int) and not default_port:
+        authority = f"{authority}:{port}"
+    redacted = f"{scheme}://{authority}{path}"
+    if getattr(endpoint, "query", None) is not None:
+        redacted += "?（值已隐藏）"
+    if getattr(endpoint, "fragment", None) is not None:
+        redacted += "#（值已隐藏）"
+    return redacted
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if host is None:
+        return False
+    normalized = host.strip("[]").lower()
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _format_provider_capabilities(capabilities: ProviderCapabilities) -> str:
+    values = (
+        ("流式", capabilities.streaming),
+        ("工具", capabilities.tool_calling),
+        ("并行工具", capabilities.parallel_tool_calls),
+        ("推理状态", capabilities.reasoning_state),
+        ("结构化输出", capabilities.structured_output),
+        ("usage", capabilities.usage_reporting),
+        ("prompt cache", capabilities.prompt_caching),
+    )
+    return "，".join(
+        f"{name}={'支持' if supported else '未声明'}" for name, supported in values
     )
 
 

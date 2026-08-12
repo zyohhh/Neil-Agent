@@ -9,7 +9,7 @@ from typing import Protocol, cast
 from ..agent import ChatModel
 from ..config import Settings
 from ..schemas import ActivityEvent
-from .base import ProviderId
+from .base import ProviderDescriptor, ProviderId
 from .errors import ProviderNotImplementedError
 
 RetryHandler = Callable[[ActivityEvent], None]
@@ -69,9 +69,9 @@ def create_provider(
     """Create the configured runtime using the shipped provider adapters."""
 
     if deepseek_builder is None:
-        from ..llm import LLMClient
+        from .deepseek import DeepSeekProvider
 
-        deepseek_builder = cast(ProviderBuilder, LLMClient)
+        deepseek_builder = cast(ProviderBuilder, DeepSeekProvider)
     if claude_builder is None:
         from .claude import ClaudeProvider
 
@@ -97,3 +97,34 @@ def create_provider(
         }
     )
     return factory.create(settings, retry_handler=retry_handler)
+
+
+def describe_provider(settings: Settings) -> ProviderDescriptor:
+    """Return the selected runtime profile without constructing an SDK client."""
+
+    if settings.llm_provider is ProviderId.DEEPSEEK:
+        from .deepseek import DEEPSEEK_DESCRIPTOR
+
+        return DEEPSEEK_DESCRIPTOR
+    if settings.llm_provider is ProviderId.CLAUDE:
+        from .claude import CLAUDE_DESCRIPTOR
+
+        return CLAUDE_DESCRIPTOR
+    if settings.llm_provider is ProviderId.OPENAI:
+        from .openai import OPENAI_DESCRIPTOR
+
+        return OPENAI_DESCRIPTOR
+
+    from .openai_compatible import (
+        OLLAMA_DESCRIPTOR,
+        VLLM_DESCRIPTOR,
+        configured_local_descriptor,
+    )
+
+    if settings.llm_provider is ProviderId.OLLAMA:
+        profile = OLLAMA_DESCRIPTOR
+    elif settings.llm_provider is ProviderId.VLLM:
+        profile = VLLM_DESCRIPTOR
+    else:  # pragma: no cover - ProviderId is exhaustively handled above.
+        raise AssertionError("unknown provider")
+    return configured_local_descriptor(settings, profile)

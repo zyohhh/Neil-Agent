@@ -14,9 +14,9 @@ from openai import OpenAI
 
 from neil_agent.agent import ChatModel, UsageReportingChatModel
 from neil_agent.config import Settings
-from neil_agent.llm import LLMClient
 from neil_agent.providers.claude import ClaudeProvider
 from neil_agent.providers.base import ProviderId
+from neil_agent.providers.deepseek import DeepSeekProvider
 from neil_agent.providers.openai import OpenAIProvider
 from neil_agent.schemas import Message, ModelResponse, TokenUsage, ToolDefinition
 
@@ -160,6 +160,7 @@ def test_deepseek_fixture_is_versioned_synthetic_and_secret_free() -> None:
         "live_capture": False,
         "sanitized": True,
         "sdk": "anthropic",
+        "sdk_version": "0.116.0",
     }
     assert "api_key" not in raw_fixture.lower()
     assert "contract-test-key" not in raw_fixture
@@ -173,7 +174,7 @@ def test_deepseek_complete_matches_v1_golden_contract() -> None:
     contract = _mapping(case["contract"])
     client = MagicMock(spec=Anthropic)
     client.messages.create.return_value = _sdk_message(wire_response)
-    model = LLMClient(
+    model = DeepSeekProvider(
         _settings(fixture, thinking_enabled=False),
         client=cast(Anthropic, client),
     )
@@ -202,7 +203,7 @@ def test_deepseek_text_stream_matches_v1_golden_contract() -> None:
     manager = MagicMock()
     manager.__enter__.return_value = stream
     client.messages.stream.return_value = manager
-    model = LLMClient(
+    model = DeepSeekProvider(
         _settings(fixture, thinking_enabled=False),
         client=cast(Anthropic, client),
     )
@@ -232,7 +233,7 @@ def test_deepseek_tool_stream_matches_v1_golden_contract() -> None:
     manager = MagicMock()
     manager.__enter__.return_value = stream
     client.messages.stream.return_value = manager
-    model = LLMClient(
+    model = DeepSeekProvider(
         _settings(fixture, thinking_enabled=True),
         client=cast(Anthropic, client),
     )
@@ -261,6 +262,7 @@ def test_claude_fixture_is_versioned_synthetic_and_secret_free() -> None:
         "live_capture": False,
         "sanitized": True,
         "sdk": "anthropic",
+        "sdk_version": "0.116.0",
     }
     assert "api_key" not in raw_fixture.lower()
     assert "contract-test-key" not in raw_fixture

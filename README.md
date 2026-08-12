@@ -87,13 +87,17 @@ LLM_MODEL=<served-model-name>
 
 | Provider | 线协议 | 运行状态 | thinking 私有状态 |
 | --- | --- | --- | --- |
-| DeepSeek | Anthropic Messages compatible | 可用，默认兼容入口 | 签名块绑定 DeepSeek 与模型后回放 |
+| DeepSeek | Anthropic Messages compatible | 可用，默认 Provider | 签名块绑定 DeepSeek 与模型后回放 |
 | Claude | Anthropic Messages native | 可用 | thinking 与 redacted-thinking 原样绑定并回放 |
 | OpenAI | Responses native | 可用 | output items 与 encrypted reasoning 绑定后原样回放 |
 | Ollama | OpenAI-compatible Responses | 可用；工具默认关闭 | 不接受或保存私有 reasoning state |
 | vLLM | OpenAI-compatible Responses | 可用；工具与并行调用分别显式开启 | 不接受或保存私有 reasoning state |
 
-默认测试使用合成、脱敏 fixture，不访问公网。OpenAI 在线 smoke test 只有同时设置 `NEIL_AGENT_RUN_OPENAI_SMOKE=1`、`OPENAI_API_KEY` 和 `NEIL_AGENT_OPENAI_SMOKE_MODEL` 才会执行并消耗额度。本地 smoke test 分别使用 `NEIL_AGENT_RUN_OLLAMA_SMOKE=1` / `NEIL_AGENT_OLLAMA_SMOKE_MODEL` 和 `NEIL_AGENT_RUN_VLLM_SMOKE=1` / `NEIL_AGENT_VLLM_SMOKE_MODEL` 显式开启；默认测试不会假定本机已运行模型服务。本阶段未执行付费 OpenAI 请求。
+默认测试使用合成、脱敏 fixture，不访问公网。Claude/OpenAI smoke 必须分别同时设置 `NEIL_AGENT_RUN_CLAUDE_SMOKE=1` / `ANTHROPIC_API_KEY` / `NEIL_AGENT_CLAUDE_SMOKE_MODEL` 和 `NEIL_AGENT_RUN_OPENAI_SMOKE=1` / `OPENAI_API_KEY` / `NEIL_AGENT_OPENAI_SMOKE_MODEL`，执行时会消耗额度。本地 smoke 分别使用 `NEIL_AGENT_RUN_OLLAMA_SMOKE=1` / `NEIL_AGENT_OLLAMA_SMOKE_MODEL` 和 `NEIL_AGENT_RUN_VLLM_SMOKE=1` / `NEIL_AGENT_VLLM_SMOKE_MODEL` 显式开启；默认测试不会假定本机已运行模型服务。DeepSeek 使用 `neil-agent-eval --real-deepseek --confirm-api-cost --format json` 的双重确认验收。当前协议层锁定并验证 Anthropic SDK `0.116.0`、OpenAI SDK `2.53.0`；截至 2026-08-13，本分支没有可核验的在线 smoke 成功记录，因此不会把离线 fixture 标记为在线验证。
+
+`/doctor` 只读显示当前 Provider、线协议、模型、脱敏 endpoint 和能力快照，不构造 SDK client、不发送模型请求，也不会显示 endpoint 凭据、query/fragment 值或 API Key。Ollama/vLLM 的 loopback HTTP 属于正常本地配置；远程明文 HTTP 会产生警告。
+
+内部运行入口现在直接使用 `ProviderFactory` 和 `DeepSeekProvider`。`neil_agent.llm.LLMClient` 仅为 0.1.x 外部导入兼容保留，构造时发出 `DeprecationWarning`，计划在 `0.2.0` 移除；新代码应改为 `from neil_agent.providers.deepseek import DeepSeekProvider`。
 
 ## 一次性非交互运行
 

@@ -27,7 +27,12 @@ from neil_agent.providers.errors import (
     ProviderNotImplementedError,
     ProviderRateLimitError,
 )
-from neil_agent.providers.factory import ProviderFactory
+from neil_agent.providers.deepseek import DeepSeekProvider
+from neil_agent.providers.factory import (
+    ProviderFactory,
+    create_provider,
+    describe_provider,
+)
 from neil_agent.providers.retry import RetryPolicy, parse_retry_after
 from neil_agent.schemas import (
     ActivityEvent,
@@ -280,3 +285,61 @@ def test_provider_factory_rejects_unimplemented_provider_before_builder() -> Non
 
     assert error_info.value.provider is ProviderId.CLAUDE
     assert error_info.value.retryable is False
+
+
+def test_default_factory_uses_native_deepseek_provider_not_legacy_facade() -> None:
+    settings = Settings(_env_file=None, deepseek_api_key="test-key")
+
+    model = create_provider(settings)
+
+    assert type(model) is DeepSeekProvider
+
+
+@pytest.mark.parametrize(
+    ("provider", "wire_protocol"),
+    [
+        (ProviderId.DEEPSEEK, WireProtocol.ANTHROPIC_MESSAGES),
+        (ProviderId.CLAUDE, WireProtocol.ANTHROPIC_MESSAGES),
+        (ProviderId.OPENAI, WireProtocol.OPENAI_RESPONSES),
+        (ProviderId.OLLAMA, WireProtocol.OPENAI_COMPATIBLE),
+        (ProviderId.VLLM, WireProtocol.OPENAI_COMPATIBLE),
+    ],
+)
+def test_describe_provider_is_read_only_and_matches_selected_protocol(
+    provider: ProviderId,
+    wire_protocol: WireProtocol,
+) -> None:
+    values: dict[str, object] = {
+        "_env_file": None,
+        "llm_provider": provider,
+        "llm_model": "configured-model",
+    }
+    if provider is ProviderId.DEEPSEEK:
+        values["deepseek_api_key"] = "test-key"
+    elif provider is ProviderId.CLAUDE:
+        values["anthropic_api_key"] = "test-key"
+    elif provider is ProviderId.OPENAI:
+        values["openai_api_key"] = "test-key"
+    settings = Settings(**values)  # type: ignore[arg-type]
+
+    descriptor = describe_provider(settings)
+
+    assert descriptor.provider is provider
+    assert descriptor.wire_protocol is wire_protocol
+
+
+def test_describe_provider_uses_the_same_dynamic_local_capabilities_as_runtime() -> (
+    None
+):
+    settings = Settings(
+        _env_file=None,
+        llm_provider=ProviderId.VLLM,
+        llm_model="configured-model",
+        local_tool_calling_enabled=True,
+        local_parallel_tool_calls_enabled=True,
+    )
+
+    descriptor = describe_provider(settings)
+
+    assert descriptor.capabilities.tool_calling is True
+    assert descriptor.capabilities.parallel_tool_calls is True

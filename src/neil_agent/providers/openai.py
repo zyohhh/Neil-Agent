@@ -10,12 +10,7 @@ from openai import APIError, OpenAI
 
 from ..config import Settings, get_settings
 from ..schemas import ActivityEvent, Message, ModelResponse, TokenUsage, ToolDefinition
-from .base import (
-    ProviderCapabilities,
-    ProviderDescriptor,
-    ProviderId,
-    WireProtocol,
-)
+from .base import ProviderCapabilities, ProviderDescriptor, ProviderId, WireProtocol
 from .errors import (
     ProviderAuthenticationError,
     ProviderConnectionError,
@@ -97,13 +92,13 @@ class OpenAIResponsesProvider:
         client_factory: OpenAIClientFactory | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self._descriptor = self._configured_descriptor()
         if self.settings.llm_provider is not self.provider_id:
             raise ProviderNotImplementedError(
                 f"Provider '{self.settings.llm_provider.value}' cannot be started "
-                f"through the {self._descriptor.display_name} adapter.",
+                f"through the {self.provider_descriptor.display_name} adapter.",
                 provider=self.settings.llm_provider,
             )
+        self._descriptor = self._configured_descriptor()
         api_key = self.settings.selected_api_key
         if self.requires_api_key and api_key is None:
             raise ProviderAuthenticationError(
@@ -146,29 +141,8 @@ class OpenAIResponsesProvider:
         return self._descriptor
 
     def _configured_descriptor(self) -> ProviderDescriptor:
-        """Freeze one capability snapshot from the selected local profile."""
+        """Freeze one capability snapshot for the native OpenAI profile."""
 
-        capabilities = self.provider_descriptor.capabilities
-        if self.provider_id in {ProviderId.OLLAMA, ProviderId.VLLM}:
-            parallel_tool_calls = (
-                self.provider_id is ProviderId.VLLM
-                and self.settings.local_parallel_tool_calls_enabled
-            )
-            capabilities = ProviderCapabilities(
-                streaming=capabilities.streaming,
-                tool_calling=self.settings.local_tool_calling_enabled,
-                parallel_tool_calls=parallel_tool_calls,
-                reasoning_state=capabilities.reasoning_state,
-                structured_output=capabilities.structured_output,
-                usage_reporting=capabilities.usage_reporting,
-                prompt_caching=capabilities.prompt_caching,
-            )
-            return ProviderDescriptor(
-                provider=self.provider_descriptor.provider,
-                display_name=self.provider_descriptor.display_name,
-                wire_protocol=self.provider_descriptor.wire_protocol,
-                capabilities=capabilities,
-            )
         return self.provider_descriptor
 
     @property

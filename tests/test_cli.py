@@ -146,7 +146,9 @@ def test_run_routes_explicit_live_cockpit_mode(
     )
     live_calls: list[Path] = []
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(
+        cli, "create_provider", lambda *_args, **_kwargs: FakeLLMClient(settings)
+    )
     monkeypatch.setattr(
         cli,
         "_try_show_live_cockpit",
@@ -173,7 +175,7 @@ def test_live_cockpit_degrades_to_snapshot_without_a_terminal(
     output = StringIO()
     console = Console(file=output, force_terminal=False)
     agent = MagicMock(spec=Agent)
-    llm = MagicMock(spec=cli.LLMClient)
+    llm = MagicMock(spec=FakeLLMClient)
     tracker = MagicMock(spec=TaskTracker)
 
     result = cli._try_show_live_cockpit(
@@ -483,7 +485,9 @@ def test_successful_chat_is_saved_automatically(
     instruction_content = "PRIVATE-PROJECT-INSTRUCTION"
     (tmp_path / "AGENTS.md").write_text(instruction_content, encoding="utf-8")
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(
+        cli, "create_provider", lambda *_args, **_kwargs: FakeLLMClient(settings)
+    )
     console = MagicMock(spec=Console)
     console.input.side_effect = ["remember this", "/exit"]
 
@@ -512,7 +516,9 @@ def test_run_explicitly_compacts_and_persists_complete_history(
         workspace_root=tmp_path,
     )
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(
+        cli, "create_provider", lambda *_args, **_kwargs: FakeLLMClient(settings)
+    )
     console = MagicMock(spec=Console)
     console.input.side_effect = [
         "first " + "x" * 1_000,
@@ -675,7 +681,9 @@ def test_run_renames_and_searches_current_session(
         workspace_root=tmp_path,
     )
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(cli, "LLMClient", FakeLLMClient)
+    monkeypatch.setattr(
+        cli, "create_provider", lambda *_args, **_kwargs: FakeLLMClient(settings)
+    )
     console = MagicMock(spec=Console)
     console.input.side_effect = [
         "investigate parser behavior",
