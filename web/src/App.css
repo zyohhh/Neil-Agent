@@ -807,6 +807,36 @@
   justify-content: space-between;
 }
 
+.section-heading-row,
+.review-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.text-button {
+  min-width: 44px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.text-button:hover:not(:disabled),
+.text-button:focus-visible {
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.text-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .review-section {
   padding: 20px 0;
   border-bottom: 1px solid var(--color-border-subtle);
@@ -854,6 +884,18 @@
   color: var(--color-text-muted);
   background: transparent;
   text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.changed-file:hover:not(:disabled),
+.changed-file.is-selected {
+  border-color: rgba(174, 245, 110, 0.35);
+  background: rgba(174, 245, 110, 0.07);
+}
+
+.changed-file:disabled {
+  opacity: 0.9;
   cursor: default;
 }
 
@@ -883,6 +925,62 @@
   color: var(--color-warning);
   font: 700 11px/1 "Cascadia Code", Consolas, monospace;
   text-align: right;
+}
+
+.diff-viewer {
+  margin-top: 12px;
+  color: var(--color-text-faint);
+  font-size: 11px;
+}
+
+.diff-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.diff-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-viewer pre {
+  max-height: min(34vh, 320px);
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  background: rgba(0, 0, 0, 0.22);
+  font: 11px/1.55 "Cascadia Code", Consolas, monospace;
+}
+
+.quality-history ol {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quality-history li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.quality-history strong {
+  color: var(--color-accent);
+  font-size: 11px;
+  text-transform: uppercase;
 }
 
 .metrics-section {

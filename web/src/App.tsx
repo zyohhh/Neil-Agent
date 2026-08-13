@@ -1,11 +1,15 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import './App.css'
 import {
+  fetchLiveDiff,
+  fetchLiveFileTree,
   fetchLiveSnapshot,
+  refreshLiveSnapshot,
   reduceWorkbenchEvent,
   WorkbenchRealtimeClient,
   type LiveConnectionState,
   type LiveFileNode,
+  type LiveGitDiff,
   type LiveRuntimeStep,
   type WorkbenchSnapshotV1,
 } from './protocol'
@@ -405,12 +409,14 @@ function Sidebar({
   interactionLocked,
   drawerMode,
   liveSnapshot,
+  onRefreshFiles,
 }: {
   open: boolean
   onClose: () => void
   interactionLocked: boolean
   drawerMode: boolean
   liveSnapshot: WorkbenchSnapshotV1 | null
+  onRefreshFiles: () => void
 }) {
   const [selectedSession, setSelectedSession] = useState('workbench')
   const [activeTreeItem, setActiveTreeItem] = useState('src')
@@ -502,7 +508,10 @@ function Sidebar({
         </button>
       </div>
       <section className="sidebar-section project-section" aria-labelledby="project-heading">
-        <p className="eyebrow" id="project-heading">Project</p>
+        <div className="section-heading-row">
+          <p className="eyebrow" id="project-heading">Project</p>
+          <button type="button" className="text-button" onClick={onRefreshFiles} disabled={!liveSnapshot}>Refresh</button>
+        </div>
         <ul className="file-tree" role="tree" aria-label="Fixture project files" onKeyDown={handleTreeKeyDown}>
           {visibleFiles.map((file) => (
             <FileTreeNode
@@ -672,15 +681,16 @@ function LiveTimeline({ steps }: { steps: LiveRuntimeStep[] }) {
 }
 
 function ContextGauge({ liveSnapshot }: { liveSnapshot: WorkbenchSnapshotV1 | null }) {
-  const totalTokens = liveSnapshot?.context.total_tokens ?? 142_000
-  const limitTokens = liveSnapshot?.context.limit_tokens ?? 200_000
+  const totalTokens = liveSnapshot ? (liveSnapshot.context.total_tokens ?? 0) : 142_000
+  const limitTokens = liveSnapshot ? liveSnapshot.context.limit_tokens : 200_000
   const hasLiveUsage = Boolean(liveSnapshot && liveSnapshot.context.source === 'server_reported' && liveSnapshot.context.total_tokens !== null)
   const progressMax = limitTokens ?? Math.max(totalTokens, 1)
+  const progressPercent = hasLiveUsage || !liveSnapshot ? Math.min((totalTokens / progressMax) * 100, 100) : 0
   return (
-    <div className="context-gauge" role="progressbar" aria-label={hasLiveUsage ? 'Last server-reported token usage' : 'Fixture context usage'} aria-valuemin={0} aria-valuemax={progressMax} aria-valuenow={totalTokens}>
+    <div className="context-gauge" role="progressbar" aria-label={hasLiveUsage ? 'Last server-reported token usage' : liveSnapshot ? 'Context usage unavailable' : 'Fixture context usage'} aria-valuemin={0} aria-valuemax={progressMax} aria-valuenow={hasLiveUsage || !liveSnapshot ? totalTokens : undefined}>
       <svg viewBox="0 0 160 94" aria-hidden="true">
         <path className="gauge-track" d="M18 80a62 62 0 0 1 124 0" pathLength="100" />
-        <path className="gauge-value" d="M18 80a62 62 0 0 1 124 0" pathLength="100" />
+        <path className="gauge-value" d="M18 80a62 62 0 0 1 124 0" pathLength="100" style={{ strokeDasharray: `${progressPercent} 100` }} />
       </svg>
       <span>
         <strong>{hasLiveUsage ? totalTokens.toLocaleString() : liveSnapshot ? 'Unavailable' : '142K'}</strong>
@@ -699,6 +709,7 @@ function ReviewPanel({
   hasControl,
   onApproveTool,
   onRejectTool,
+  onRefreshReview,
 }: {
   open: boolean
   onClose: () => void
@@ -708,8 +719,11 @@ function ReviewPanel({
   hasControl: boolean
   onApproveTool: (requestId: string) => void
   onRejectTool: (requestId: string) => void
+  onRefreshReview: () => void
 }) {
   const [decision, setDecision] = useState<'none' | 'approved' | 'rejected'>('none')
+  const [selectedDiff, setSelectedDiff] = useState<LiveGitDiff | null>(null)
+  const [diffState, setDiffState] = useState<'idle' | 'loading' | 'error'>('idle')
   const liveApproval = liveSnapshot?.approval ?? null
   const approvalAvailable = liveSnapshot
     ? Boolean(liveApproval?.state === 'pending' && liveSnapshot.capabilities.can_approve_tool && hasControl)
@@ -719,8 +733,8 @@ function ReviewPanel({
     ? liveSnapshot.git.files.map((file) => ({
       id: `${file.status}:${file.path}`,
       name: file.path,
-      added: null,
-      deleted: null,
+      added: file.additions,
+      deleted: file.deletions,
       status: file.status,
     }))
     : changedFiles.map((file) => ({ ...file, status: null }))
@@ -744,6 +758,10 @@ function ReviewPanel({
 
   useEffect(() => setDecision('none'), [scenario.id])
   useEffect(() => {
+    setSelectedDiff(null)
+    setDiffState('idle')
+  }, [liveSnapshot?.git.revision])
+  useEffect(() => {
     if (open && drawerMode) closeButtonRef.current?.focus()
   }, [drawerMode, open])
 
@@ -759,9 +777,12 @@ function ReviewPanel({
     >
       <div className="panel-title-row">
         <div className="panel-title"><BrandMark size={23} /><h2 id="review-heading">Review</h2></div>
-        <button ref={closeButtonRef} className="icon-button mobile-close" type="button" onClick={onClose} aria-label="Close review">
-          <Icon name="x" />
-        </button>
+        <div className="review-heading-actions">
+          <button type="button" className="text-button" onClick={onRefreshReview} disabled={!liveSnapshot}>Refresh</button>
+          <button ref={closeButtonRef} className="icon-button mobile-close" type="button" onClick={onClose} aria-label="Close review">
+            <Icon name="x" />
+          </button>
+        </div>
       </div>
 
       <section className="review-section">
@@ -773,12 +794,24 @@ function ReviewPanel({
       </section>
 
       <section className="review-section">
-        <p className="eyebrow">Changed files <span className="fixture-tag">fixture</span></p>
+        <p className="eyebrow">Changed files <span className="fixture-tag">{liveSnapshot ? 'read-only Git' : 'fixture'}</span></p>
         <div className="changed-files">
           {visibleChangedFiles.map((file) => (
-            <div
+            <button
+              type="button"
               key={file.id}
-              className="changed-file"
+              className={`changed-file ${selectedDiff?.path === file.name ? 'is-selected' : ''}`}
+              disabled={!liveSnapshot || !liveSnapshot.git.revision || !liveSnapshot.capabilities.can_show_diff}
+              onClick={() => {
+                if (!liveSnapshot?.git.revision) return
+                setDiffState('loading')
+                void fetchLiveDiff(file.name, liveSnapshot.git.revision)
+                  .then((diff) => {
+                    setSelectedDiff(diff)
+                    setDiffState('idle')
+                  })
+                  .catch(() => setDiffState('error'))
+              }}
               aria-label={file.added === null ? `${file.name}, Git status ${file.status}` : `${file.name}, added ${file.added} lines, deleted ${file.deleted} lines`}
             >
               <span className="file-bullet" />
@@ -790,10 +823,33 @@ function ReviewPanel({
                   <span className="diff-deleted" aria-label={`deleted ${file.deleted} lines`}>−{file.deleted}</span>
                 </>
               )}
-            </div>
+            </button>
           ))}
         </div>
+        {liveSnapshot ? (
+          <div className="diff-viewer" aria-live="polite">
+            {diffState === 'loading' ? <p>Loading bounded diff…</p> : null}
+            {diffState === 'error' ? <p>Read-only diff could not be loaded.</p> : null}
+            {selectedDiff?.available ? (
+              <>
+                <div className="diff-heading"><strong>{selectedDiff.path}</strong><span>{selectedDiff.truncated ? 'Truncated at 40K' : 'Complete bounded diff'}</span></div>
+                <pre tabIndex={0}><code>{selectedDiff.content}</code></pre>
+              </>
+            ) : selectedDiff ? <p>No text diff: {selectedDiff.reason.replaceAll('_', ' ')}.</p> : null}
+          </div>
+        ) : null}
       </section>
+
+      {liveSnapshot && liveSnapshot.review.quality_checks.length > 0 ? (
+        <section className="review-section quality-history">
+          <p className="eyebrow">Quality history <span className="fixture-tag">bounded</span></p>
+          <ol>
+            {liveSnapshot.review.quality_checks.map((check, index) => (
+              <li key={`${check.check}:${index}`}><span>{check.check}</span><strong>{check.status}</strong></li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
 
       <section className="review-section metrics-section">
         <div>
@@ -802,8 +858,8 @@ function ReviewPanel({
         </div>
         <div className="cost-block">
           <p className="eyebrow">Cost</p>
-          <strong>Unavailable</strong>
-          <small>No rate table</small>
+          <strong>{liveSnapshot?.review.cost_available ? `$${liveSnapshot.review.cost.estimated_usd}` : 'Unavailable'}</strong>
+          <small>{liveSnapshot?.review.cost_available ? `Estimate · ${liveSnapshot.review.cost.rate_table_version}` : liveSnapshot ? liveSnapshot.review.cost.reason.replaceAll('_', ' ') : 'No rate table'}</small>
         </div>
       </section>
 
@@ -1000,7 +1056,7 @@ function Header({
         </select>
       </label>
 
-      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P3 service is running">
+      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P4 service is running">
         <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
       </button>
 
@@ -1207,8 +1263,8 @@ function App() {
     >
       <a className="skip-link" href="#workspace-main">Skip to workspace</a>
       <div className="preview-banner" role="status">
-        <strong>{connectionState === 'live' ? 'P3 live Agent' : connectionState === 'connecting' ? 'P3 reconnecting' : connectionState === 'offline' ? 'P3 offline · last known' : 'P0 fixture preview'}</strong>
-        <span>{connectionState === 'live' ? 'Local realtime execution · preview-gated tools · single control tab · no aggregate approval or PTY' : connectionState === 'fixture' ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected' : 'Last-known state is preserved while the local event stream reconnects'}</span>
+        <strong>{connectionState === 'live' ? 'P4 live Agent' : connectionState === 'connecting' ? 'P4 reconnecting' : connectionState === 'offline' ? 'P4 offline · last known' : 'P0 fixture preview'}</strong>
+        <span>{connectionState === 'live' ? 'Local realtime execution · bounded Git review · preview-gated tools · no aggregate approval or PTY' : connectionState === 'fixture' ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected' : 'Last-known state is preserved while the local event stream reconnects'}</span>
       </div>
       <Header
         scenario={scenario}
@@ -1227,6 +1283,15 @@ function App() {
         interactionLocked={interactionLocked}
         drawerMode={sidebarDrawerMode}
         liveSnapshot={liveSnapshot}
+        onRefreshFiles={() => {
+          if (!liveSnapshot) return
+          void fetchLiveFileTree(liveSnapshot.files.revision)
+            .then((tree) => {
+              if (tree.unchanged) return
+              setLiveSnapshot((current) => current ? { ...current, files: tree } : current)
+            })
+            .catch(() => setCommandError('File tree refresh unavailable'))
+        }}
       />
       <div id="workspace-main" className="workspace-cell" tabIndex={-1}>
         <WorkspacePanel
@@ -1247,6 +1312,13 @@ function App() {
         hasControl={hasControl}
         onApproveTool={(requestId) => realtimeClientRef.current?.approveTool(requestId)}
         onRejectTool={(requestId) => realtimeClientRef.current?.rejectTool(requestId)}
+        onRefreshReview={() => {
+          void refreshLiveSnapshot()
+            .then((snapshot) => {
+              if (snapshot) setLiveSnapshot(snapshot)
+            })
+            .catch(() => setCommandError('Review refresh unavailable'))
+        }}
       />
       <OutputPanel
         scenario={scenario}

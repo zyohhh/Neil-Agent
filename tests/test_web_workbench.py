@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -24,6 +27,7 @@ from neil_agent.web.controller import (
     TurnCancelled,
 )
 from neil_agent.web.security import BootstrapSessionStore
+from neil_agent.web.pricing import ModelRate, ProviderRateTable, load_rate_table
 
 NOW = datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc)
 BOOTSTRAP = "test-bootstrap-secret-that-is-long-enough"
@@ -128,6 +132,27 @@ class DoubleApprovalWorker:
         self.finished.set()
 
 
+class QualityHistoryWorker:
+    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
+        factory = RuntimeEventFactory()
+        for status in ("succeeded", "failed", "skipped"):
+            correlation = factory.new_correlation_id("quality_check")
+            on_runtime(
+                factory.create(
+                    stage="quality_check",
+                    status="started",
+                    correlation_id=correlation,
+                )
+            )
+            on_runtime(
+                factory.create(
+                    stage="quality_check",
+                    status=status,
+                    correlation_id=correlation,
+                )
+            )
+
+
 class ApprovalModel:
     def __init__(self) -> None:
         self.round = 0
@@ -183,6 +208,29 @@ def _authenticate(client: TestClient) -> None:
     assert response.status_code == 204
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=strict" in response.headers["set-cookie"]
+
+
+def _git(root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return completed.stdout
+
+
+def _git_repository(root: Path) -> None:
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test User")
+    (root / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (root / "binary.dat").write_bytes(b"\x00\x01\x02")
+    (root / "old-name.txt").write_text("rename\n", encoding="utf-8")
+    _git(root, "add", "tracked.txt", "binary.dat", "old-name.txt")
+    _git(root, "commit", "-q", "-m", "initial")
 
 
 def test_health_is_generic_and_snapshot_requires_one_time_bootstrap(
@@ -299,6 +347,213 @@ def test_file_tree_is_bounded_and_rejects_sensitive_or_escaping_paths(
     assert tree.json()["items"][0]["children"][0]["name"] == "agent.py"
     assert traversal.status_code == 400
     assert sensitive.status_code == 400
+
+
+def test_file_tree_revision_supports_incremental_refresh(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "first.py").write_text("pass", encoding="utf-8")
+    client = _client(tmp_path)
+    _authenticate(client)
+
+    initial = client.get("/api/v1/files/tree?depth=2").json()
+    unchanged = client.get(
+        "/api/v1/files/tree",
+        params={"depth": 2, "revision": initial["revision"]},
+    ).json()
+    (tmp_path / "src" / "second.py").write_text("pass", encoding="utf-8")
+    changed = client.get(
+        "/api/v1/files/tree",
+        params={"depth": 2, "revision": initial["revision"]},
+    ).json()
+
+    assert unchanged["unchanged"] is True
+    assert unchanged["items"] == []
+    assert changed["unchanged"] is False
+    assert changed["revision"] != initial["revision"]
+    assert [node["name"] for node in changed["items"][0]["children"]] == [
+        "first.py",
+        "second.py",
+    ]
+
+
+def test_review_projects_numstat_rename_binary_and_untracked(tmp_path: Path) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "tracked.txt").write_text("one\nchanged\nthree\n", encoding="utf-8")
+    (tmp_path / "binary.dat").write_bytes(b"\x00\x01\x02\x03")
+    _git(tmp_path, "mv", "old-name.txt", "renamed.txt")
+    (tmp_path / "new.txt").write_text("new\n", encoding="utf-8")
+    client = _client(tmp_path)
+    _authenticate(client)
+
+    payload = client.get("/api/v1/review").json()
+    files = {item["path"]: item for item in payload["git"]["files"]}
+
+    assert payload["git"]["revision"] is not None
+    assert files["tracked.txt"]["additions"] == 2
+    assert files["tracked.txt"]["deletions"] == 1
+    assert files["tracked.txt"]["diff_available"] is True
+    assert files["binary.dat"]["diff_reason"] == "binary"
+    assert files["new.txt"]["kind"] == "untracked"
+    assert files["new.txt"]["diff_reason"] == "untracked"
+    assert files["renamed.txt"]["kind"] == "renamed"
+    assert files["renamed.txt"]["previous_path"] == "old-name.txt"
+
+
+def test_diff_is_authenticated_bounded_and_bound_to_current_revision(
+    tmp_path: Path,
+) -> None:
+    _git_repository(tmp_path)
+    (tmp_path / "tracked.txt").write_text(
+        "one\n" + ("changed-content\n" * 5_000), encoding="utf-8"
+    )
+    (tmp_path / "new.txt").write_text("untracked body", encoding="utf-8")
+    client = _client(tmp_path)
+
+    assert (
+        client.get(
+            "/api/v1/review/diff",
+            params={"path": "tracked.txt", "revision": "0" * 16},
+        ).status_code
+        == 401
+    )
+    _authenticate(client)
+    review = client.get("/api/v1/review").json()
+    revision = review["git"]["revision"]
+    diff = client.get(
+        "/api/v1/review/diff",
+        params={"path": "tracked.txt", "revision": revision},
+    )
+    untracked = client.get(
+        "/api/v1/review/diff",
+        params={"path": "new.txt", "revision": revision},
+    )
+    traversal = client.get(
+        "/api/v1/review/diff",
+        params={"path": "../outside", "revision": revision},
+    )
+    (tmp_path / "tracked.txt").write_text("revision changed\n", encoding="utf-8")
+    stale = client.get(
+        "/api/v1/review/diff",
+        params={"path": "tracked.txt", "revision": revision},
+    )
+
+    assert diff.status_code == 200
+    assert diff.json()["available"] is True
+    assert diff.json()["truncated"] is True
+    assert len(diff.json()["content"]) == 40_000
+    assert untracked.json()["reason"] == "untracked"
+    assert "untracked body" not in untracked.text
+    assert traversal.status_code == 400
+    assert stale.json()["reason"] == "stale"
+    assert stale.json()["content"] == ""
+
+
+def test_cost_requires_exact_versioned_rate_and_all_used_token_categories(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path, clock=lambda: NOW, id_factory=lambda: "feedface")
+    handle = store.new_session()
+    store.save(
+        handle,
+        (
+            Message(role="user", content="Estimate this"),
+            Message(role="assistant", content="Done"),
+        ),
+        (),
+        None,
+        last_usage=TokenUsage(
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            cache_read_input_tokens=250_000,
+        ),
+    )
+    complete = ProviderRateTable(
+        version="rates-2026-08",
+        effective_date=NOW.date(),
+        rates=(
+            ModelRate(
+                provider="deepseek",
+                model="deepseek-test-model",
+                input_usd_per_million=Decimal("1"),
+                output_usd_per_million=Decimal("2"),
+                cache_read_usd_per_million=Decimal("0.25"),
+                input_token_accounting="input_includes_cache_tokens",
+            ),
+        ),
+    )
+    settings = _settings(tmp_path)
+
+    available = WorkbenchSnapshotService(
+        settings, clock=lambda: NOW, rate_table=complete
+    ).review()
+    missing_cache = WorkbenchSnapshotService(
+        settings,
+        clock=lambda: NOW,
+        rate_table=ProviderRateTable(
+            version="rates-incomplete",
+            effective_date=NOW.date(),
+            rates=(
+                ModelRate(
+                    provider="deepseek",
+                    model="deepseek-test-model",
+                    input_usd_per_million=Decimal("1"),
+                    output_usd_per_million=Decimal("2"),
+                ),
+            ),
+        ),
+    ).review()
+
+    assert available.cost_available is True
+    assert available.cost.estimated_usd == "1.812500"
+    assert available.cost.rate_table_version == "rates-2026-08"
+    assert missing_cache.cost_available is False
+    assert missing_cache.cost.reason == "cache_rate_missing"
+
+    future = WorkbenchSnapshotService(
+        settings,
+        clock=lambda: NOW,
+        rate_table=ProviderRateTable(
+            version="future-rates",
+            effective_date=(NOW + timedelta(days=1)).date(),
+            rates=complete.rates,
+        ),
+    ).review()
+    assert future.cost_available is False
+    assert future.cost.reason == "rate_not_effective"
+
+
+def test_rate_table_loader_fails_closed_on_unknown_or_incomplete_schema(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rates.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "test-v1",
+                "effective_date": "2026-08-13",
+                "currency": "USD",
+                "rates": [
+                    {
+                        "provider": "deepseek",
+                        "model": "deepseek-test-model",
+                        "input_usd_per_million": "1",
+                        "output_usd_per_million": "2",
+                        "input_token_accounting": "separate_cache_tokens",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_rate_table(path)
+    assert loaded is not None
+    assert loaded.version == "test-v1"
+
+    path.write_text(
+        '{"schema_version":1,"version":"bad","extra":true}', encoding="utf-8"
+    )
+    assert load_rate_table(path) is None
 
 
 def test_bootstrap_and_session_expiry_fail_closed() -> None:
@@ -444,6 +699,45 @@ def test_realtime_start_stream_completion_and_idempotency(tmp_path: Path) -> Non
     assert snapshot["revision"] >= completed_revision
     assert snapshot["output"][-1]["text"] == "Echo: Inspect the project"
     assert snapshot["timeline"][0]["stage"] == "agent_turn"
+
+
+def test_current_web_turn_keeps_bounded_quality_check_history(tmp_path: Path) -> None:
+    client = _client(tmp_path, worker=QualityHistoryWorker())
+    _authenticate(client)
+
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_json(
+            _command("qualityctrl", "acquire_control", connected["revision"])
+        )
+        control = _receive_result(socket, "qualityctrl")
+        socket.send_json(
+            _command(
+                "qualityrun",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Run checks"},
+            )
+        )
+        _receive_result(socket, "qualityrun")
+        for _ in range(30):
+            event = socket.receive_json()
+            if (
+                event.get("event_type") == "run_state"
+                and event["payload"]["status"] == "completed"
+            ):
+                break
+
+    review = client.get("/api/v1/snapshot").json()["review"]
+    assert [check["status"] for check in review["quality_checks"]] == [
+        "passed",
+        "failed",
+        "not_run",
+    ]
+    assert review["quality_check"] == review["quality_checks"][-1]
 
 
 def test_single_turn_revision_control_and_cancel(tmp_path: Path) -> None:

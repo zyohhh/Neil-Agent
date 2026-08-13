@@ -32,6 +32,7 @@ from pydantic import ValidationError
 from .controller import ClientCommand, CommandError, WorkbenchController
 from .dto import (
     FileTreeDto,
+    GitDiffDto,
     HealthDto,
     ReviewDto,
     SessionListDto,
@@ -170,15 +171,27 @@ def create_app(
         _auth: None = Depends(require_session),
         path: Annotated[str, Query(max_length=4_096)] = "",
         depth: Annotated[int, Query(ge=0, le=4)] = 2,
+        revision: Annotated[str | None, Query(pattern=r"^[0-9a-f]{16}$")] = None,
     ) -> FileTreeDto:
         try:
-            return snapshot_service.files(path, depth=depth)
+            return snapshot_service.files(path, depth=depth, revision=revision)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/api/v1/review", response_model=ReviewDto)
     def review(_auth: None = Depends(require_session)) -> ReviewDto:
         return snapshot_service.review()
+
+    @app.get("/api/v1/review/diff", response_model=GitDiffDto)
+    def review_diff(
+        path: Annotated[str, Query(min_length=1, max_length=4_096)],
+        revision: Annotated[str, Query(pattern=r"^[0-9a-f]{16}$")],
+        _auth: None = Depends(require_session),
+    ) -> GitDiffDto:
+        try:
+            return snapshot_service.diff(path, revision=revision)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.websocket("/api/v1/events")
     async def events(

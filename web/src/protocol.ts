@@ -18,8 +18,31 @@ export interface LiveSession {
 
 export interface LiveGitFile {
   path: string
+  previous_path: string | null
   status: string
   kind: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflict'
+  additions: number | null
+  deletions: number | null
+  diff_available: boolean
+  diff_reason: 'available' | 'untracked' | 'binary' | 'conflict' | 'unavailable'
+}
+
+export interface LiveGitDiff {
+  path: string
+  previous_path: string | null
+  revision: string
+  available: boolean
+  reason: 'available' | 'untracked' | 'binary' | 'conflict' | 'empty' | 'stale' | 'unavailable'
+  content: string
+  truncated: boolean
+}
+
+export interface LiveFileTree {
+  root: string
+  items: LiveFileNode[]
+  truncated: boolean
+  revision: string
+  unchanged: boolean
 }
 
 export type LiveRunStatus = 'idle' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
@@ -79,15 +102,17 @@ export interface WorkbenchSnapshotV1 {
     can_cancel_turn: boolean
     can_request_control: boolean
     can_approve_tool: boolean
+    can_show_diff: boolean
+    can_estimate_cost: boolean
     tool_permission_mode: 'approval_gated'
     has_pty: false
   }
   timeline: LiveRuntimeStep[]
   output: LiveOutputEntry[]
   approval: LiveApproval | null
-  git: { available: boolean; branch: string | null; change_count: number; files: LiveGitFile[]; truncated: boolean }
+  git: { available: boolean; branch: string | null; revision: string | null; change_count: number; files: LiveGitFile[]; truncated: boolean }
   sessions: { available: boolean; items: LiveSession[]; invalid_count: number; total_count: number }
-  files: { root: string; items: LiveFileNode[]; truncated: boolean }
+  files: LiveFileTree
   task: {
     source: 'saved_session' | 'unavailable'
     session_id: string | null
@@ -103,7 +128,17 @@ export interface WorkbenchSnapshotV1 {
   review: {
     state: 'empty' | 'passed' | 'failed' | 'approval_required' | 'stale' | 'applied' | 'unavailable'
     approval_available: boolean
-    cost_available: false
+    quality_check: { check: string; status: 'passed' | 'failed' | 'not_run'; exit_code: number | null } | null
+    quality_checks: Array<{ check: string; status: 'passed' | 'failed' | 'not_run'; exit_code: number | null }>
+    cost_available: boolean
+    cost: {
+      source: 'versioned_rate_table' | 'unavailable'
+      estimated_usd: string | null
+      rate_table_version: string | null
+      rate_effective_date: string | null
+      model: string | null
+      reason: 'no_rate_table' | 'no_saved_usage' | 'model_not_listed' | 'cache_rate_missing' | 'rate_not_effective' | 'estimated'
+    }
   }
   security: {
     mode: 'approval_gated'
@@ -190,7 +225,26 @@ export const fetchLiveSnapshot = (): Promise<WorkbenchSnapshotV1 | null> => {
   return liveSnapshotRequest
 }
 
-const refreshLiveSnapshot = () => requestSnapshot(false)
+export const refreshLiveSnapshot = () => requestSnapshot(false)
+
+export const fetchLiveFileTree = async (revision: string): Promise<LiveFileTree> => {
+  const response = await fetch(`/api/v1/files/tree?depth=2&revision=${encodeURIComponent(revision)}`, {
+    credentials: 'include',
+    cache: 'no-store',
+  })
+  if (!response.ok) throw new Error('File tree refresh unavailable')
+  return response.json() as Promise<LiveFileTree>
+}
+
+export const fetchLiveDiff = async (path: string, revision: string): Promise<LiveGitDiff> => {
+  const query = new URLSearchParams({ path, revision })
+  const response = await fetch(`/api/v1/review/diff?${query}`, {
+    credentials: 'include',
+    cache: 'no-store',
+  })
+  if (!response.ok) throw new Error('Read-only diff unavailable')
+  return response.json() as Promise<LiveGitDiff>
+}
 
 export const resetLiveSnapshotRequestForTests = () => {
   liveSnapshotRequest = null

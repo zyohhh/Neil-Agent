@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from difflib import unified_diff
 from hashlib import sha256
 from pathlib import Path
@@ -22,6 +23,7 @@ QUALITY_COMMANDS: dict[str, tuple[str, ...]] = {
 MAX_GIT_PATHS = 50
 MAX_COMMIT_MESSAGE_CHARS = 200
 STATUS_TIMEOUT_SECONDS = 5.0
+MAX_WEB_DIFF_CHARS = 40_000
 BLOCKED_GIT_DIRECTORIES = frozenset(
     {
         ".git",
@@ -56,6 +58,14 @@ SAFE_ENVIRONMENT_NAMES = frozenset(
         "WINDIR",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class GitDiffSnapshot:
+    """One bounded, read-only Git diff produced for the local Web Workbench."""
+
+    content: str
+    truncated: bool
 
 
 class ShellTools:
@@ -136,6 +146,74 @@ class ShellTools:
         return self._capture(
             self._git_status_command(),
             timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
+        )
+
+    def git_review_status_snapshot(self) -> str:
+        """Return NUL-delimited porcelain for a bounded Web review projection."""
+
+        return self._capture_stdout(
+            self._git_command(
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--branch",
+                "--untracked-files=all",
+                "--ignore-submodules=all",
+            ),
+            timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
+        )
+
+    def git_numstat_snapshot(self) -> str:
+        """Return tracked working-tree line counts relative to ``HEAD``."""
+
+        return self._capture_stdout(
+            self._git_command(
+                "diff",
+                "--numstat",
+                "-z",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--ignore-submodules=all",
+                "--no-renames",
+                "HEAD",
+                "--",
+            ),
+            timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
+        )
+
+    def git_file_diff_snapshot(
+        self,
+        paths: list[str],
+        *,
+        max_chars: int = MAX_WEB_DIFF_CHARS,
+    ) -> GitDiffSnapshot:
+        """Return one bounded tracked-file diff for validated literal paths."""
+
+        if max_chars < 1_000 or max_chars > 100_000:
+            raise ToolError(
+                "Git diff limit must be between 1000 and 100000 characters."
+            )
+        normalized = self._normalize_git_paths(paths)
+        if len(normalized) > 2:
+            raise ToolError("A Web review diff accepts at most two rename paths.")
+        content = self._capture_stdout(
+            self._git_command(
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--ignore-submodules=all",
+                "--no-renames",
+                "--unified=3",
+                "--no-color",
+                "HEAD",
+                "--",
+                *self._literal_pathspecs(normalized),
+            ),
+            timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
+        )
+        return GitDiffSnapshot(
+            content=content[:max_chars],
+            truncated=len(content) > max_chars,
         )
 
     def git_diff(self, staged: bool = False) -> str:
@@ -321,6 +399,19 @@ class ShellTools:
             completed.stderr,
             truncate=truncate,
         )
+
+    def _capture_stdout(
+        self,
+        command: list[str],
+        *,
+        timeout: float | None = None,
+    ) -> str:
+        """Capture successful stdout exactly for machine-readable Git formats."""
+
+        completed = self._run_process(command, timeout=timeout)
+        if completed.returncode != 0:
+            raise ToolError(self._format_process_result(command, completed))
+        return completed.stdout
 
     def _run_process(
         self,

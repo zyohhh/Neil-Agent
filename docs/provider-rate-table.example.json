@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "version": "operator-rates-YYYY-MM-DD",
+  "effective_date": "2099-01-01",
+  "currency": "USD",
+  "rates": [
+    {
+      "provider": "example-provider",
+      "model": "example-model",
+      "input_usd_per_million": "1.00",
+      "output_usd_per_million": "2.00",
+      "cache_creation_usd_per_million": "1.25",
+      "cache_read_usd_per_million": "0.10",
+      "input_token_accounting": "separate_cache_tokens"
+    }
+  ]
+}

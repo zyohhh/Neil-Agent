@@ -26,6 +26,7 @@ from ..tools import FileSystemTools, ShellTools, ToolRegistry
 from .dto import (
     ApprovalRequestDto,
     OutputEntryDto,
+    QualityCheckDto,
     ReviewState,
     RunDto,
     RuntimeCapabilitiesDto,
@@ -200,6 +201,7 @@ class WorkbenchController:
         self._lock = RLock()
         self._events: deque[dict[str, Any]] = deque(maxlen=event_history_size)
         self._output: deque[OutputEntryDto] = deque(maxlen=MAX_OUTPUT_ENTRIES)
+        self._quality_checks: deque[QualityCheckDto] = deque(maxlen=20)
         self._steps: dict[str, RuntimeStepDto] = {}
         self._subscribers: dict[
             str, tuple[asyncio.AbstractEventLoop, ControllerSubscription]
@@ -226,6 +228,8 @@ class WorkbenchController:
         with self._lock:
             running = self._run.status in {"running", "cancelling"}
             approval = None if self._approval is None else self._approval.request
+            quality_checks = tuple(self._quality_checks) or base.review.quality_checks
+            latest_quality = quality_checks[-1] if quality_checks else None
             return base.model_copy(
                 update={
                     "run": self._run,
@@ -239,6 +243,8 @@ class WorkbenchController:
                             and approval.state == "pending"
                             and self._control_client_id is not None
                         ),
+                        can_show_diff=base.git.available,
+                        can_estimate_cost=base.review.cost_available,
                     ),
                     "timeline": tuple(self._steps.values())[-MAX_RUNTIME_STEPS:],
                     "output": tuple(self._output),
@@ -249,6 +255,8 @@ class WorkbenchController:
                             "approval_available": (
                                 approval is not None and approval.state == "pending"
                             ),
+                            "quality_check": latest_quality,
+                            "quality_checks": quality_checks,
                         }
                     ),
                 }
@@ -388,6 +396,7 @@ class WorkbenchController:
             self._cancel = cancel
             self._steps.clear()
             self._output.clear()
+            self._quality_checks.clear()
             self._approval = None
             self._run = RunDto(
                 status="running",
@@ -511,6 +520,25 @@ class WorkbenchController:
             ):
                 self._steps.pop(next(iter(self._steps)))
             self._steps[event.correlation_id] = step
+            if event.stage == "quality_check" and event.status in {
+                "succeeded",
+                "failed",
+                "skipped",
+            }:
+                quality_status = cast(
+                    Literal["passed", "failed", "not_run"],
+                    {
+                        "succeeded": "passed",
+                        "failed": "failed",
+                        "skipped": "not_run",
+                    }[event.status],
+                )
+                self._quality_checks.append(
+                    QualityCheckDto(
+                        check="run_quality_check",
+                        status=quality_status,
+                    )
+                )
         self._publish(
             "runtime_step", {"run_id": run_id, "step": step.model_dump(mode="json")}
         )

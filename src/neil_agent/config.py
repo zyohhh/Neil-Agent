@@ -173,6 +173,13 @@ class Settings(BaseSettings):
         ge=1_000,
         description="Maximum command output returned to the model.",
     )
+    web_rate_table: Path | None = Field(
+        default=None,
+        description=(
+            "Optional versioned JSON Provider rate table used only for local Web "
+            "Workbench cost estimates."
+        ),
+    )
     sandbox_backend: Literal["disabled", "windows-sandbox"] = Field(
         default="disabled",
         description=(

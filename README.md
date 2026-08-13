@@ -41,7 +41,7 @@ Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
 [`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前五个 Provider 均可显式选择，兼容端点未声明的能力会在网络请求前 fail closed。
 浏览器端 Web Workbench 的产品边界、fixture 原型和实时接入路线见
-[`docs/web-workbench-development.md`](docs/web-workbench-development.md)。稳定的 `?scene=` fixture 仍用于视觉回归；正常启动则进入 P3 实时本地工作台。
+[`docs/web-workbench-development.md`](docs/web-workbench-development.md)。稳定的 `?scene=` fixture 仍用于视觉回归；正常启动则进入 P4 实时本地工作台。
 
 P0 本地预览与验证：
 
@@ -60,7 +60,9 @@ npm run capture:baselines
 
 Playwright 默认使用其标准浏览器缓存。若希望把浏览器二进制保存在仓库内的忽略目录，可先将 `PLAYWRIGHT_BROWSERS_PATH` 指向 `web/.playwright-browsers`，再执行安装、E2E 和基线截图命令。
 
-P3 提供实时本地工作台与逐工具审批：先在 `web/` 执行 `npm run build`，再从项目根目录运行 `uv run neil-agent-web`。启动器只绑定 `127.0.0.1`，自动打开带一次性启动凭据的浏览器页；凭据交换后改用 `HttpOnly`、`SameSite=Strict` 本地会话和短时单次 WebSocket ticket。浏览器可开始或取消一个 Agent turn，并接收流式回答、活动、运行步骤和单个高风险工具的有界预览。只有持有控制租约的标签页能 Approve/Reject 当前 request；批准后服务端会重新生成并比对预览，发生变化则 fail closed。控制断线、超时、取消和退出默认拒绝待审批请求。没有聚合 `Approve & Apply`、PTY 或任意 shell。
+P4 提供实时本地工作台、逐工具审批和受限 Review：先在 `web/` 执行 `npm run build`，再从项目根目录运行 `uv run neil-agent-web`。启动器只绑定 `127.0.0.1`，自动打开带一次性启动凭据的浏览器页；凭据交换后改用 `HttpOnly`、`SameSite=Strict` 本地会话和短时单次 WebSocket ticket。浏览器可开始或取消一个 Agent turn，并接收流式回答、活动、运行步骤和单个高风险工具的有界预览。Review 使用固定只读 Git 命令提供逐文件 `+/-`、rename/conflict/binary 状态和当前 revision 绑定的 40K 单文件 diff；未跟踪文件正文不返回，文件树可按 revision 增量刷新。质量检查历史在当前 Web turn 内最多保留 20 条；持久化会话现阶段仍只能恢复最后一条真实检查。
+
+Cost 默认保持 `Unavailable`。如需估算，复制 [`docs/provider-rate-table.example.json`](docs/provider-rate-table.example.json)，填入已核验的真实费率，再设置 `WEB_RATE_TABLE` 指向该本地 JSON；表必须包含 `schema_version: 1`、版本号、生效日期、精确 provider/model、输入/输出费率、缓存费率（若有缓存 token）和 `input_token_accounting`。无表、费率尚未生效、模型未列出、缓存费率不完整或 token 记账语义不匹配时均不显示金额。金额始终标为 estimate，不代表 Provider 账单。只有持有控制租约的标签页能 Approve/Reject 当前 request；没有聚合 `Approve & Apply`、PTY 或任意 shell。
 
 ## 模型 Provider 配置
 

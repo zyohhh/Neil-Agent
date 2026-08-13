@@ -12,16 +12,16 @@ const snapshot = {
   run: { status: 'idle', run_id: null, objective: null, started_at: null, finished_at: null, error_type: null },
   revision: 0,
   last_sequence: 0,
-  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_approve_tool: false, tool_permission_mode: 'approval_gated', has_pty: false },
+  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_approve_tool: false, can_show_diff: true, can_estimate_cost: false, tool_permission_mode: 'approval_gated', has_pty: false },
   timeline: [],
   output: [],
   approval: null,
-  git: { available: true, branch: 'feature/web-workbench', change_count: 1, files: [{ path: 'src/live.py', status: 'M', kind: 'modified' }], truncated: false },
+  git: { available: true, branch: 'feature/web-workbench', revision: '0123456789abcdef', change_count: 1, files: [{ path: 'src/live.py', previous_path: null, status: 'M', kind: 'modified', additions: 2, deletions: 1, diff_available: true, diff_reason: 'available' }], truncated: false },
   sessions: { available: true, items: [], invalid_count: 0, total_count: 0 },
-  files: { root: '', items: [{ name: 'src', path: 'src', kind: 'directory', children: [] }], truncated: false },
+  files: { root: '', items: [{ name: 'src', path: 'src', kind: 'directory', children: [] }], truncated: false, revision: 'fedcba9876543210', unchanged: false },
   task: { source: 'unavailable', session_id: null, steps: [] },
   context: { source: 'unavailable', input_tokens: null, output_tokens: null, total_tokens: null, limit_tokens: 200000 },
-  review: { state: 'stale', approval_available: false, cost_available: false },
+  review: { state: 'stale', quality_check: null, quality_checks: [], approval_available: false, cost_available: false, cost: { source: 'unavailable', estimated_usd: null, rate_table_version: null, rate_effective_date: null, model: null, reason: 'no_rate_table' } },
   security: { mode: 'approval_gated', binding: 'loopback', bootstrap_token_required: true, write_routes: 0, agent_connected: true },
 } satisfies WorkbenchSnapshotV1
 
@@ -67,7 +67,7 @@ describe('WebWorkbenchApp', () => {
     container.remove()
   })
 
-  it('exchanges a launch secret and prepares the P3 realtime workbench', async () => {
+  it('exchanges a launch secret and prepares the P4 realtime workbench', async () => {
     window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
@@ -81,7 +81,7 @@ describe('WebWorkbenchApp', () => {
     await act(async () => Promise.resolve())
 
     expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(document.body.textContent).toContain('P3 offline · last known')
+    expect(document.body.textContent).toContain('P4 offline · last known')
     expect(document.body.textContent).toContain('Neil-Agent-Live')
     expect(document.body.textContent).toContain('deepseek-live')
     expect(document.body.textContent).toContain('Run Agent')
@@ -133,5 +133,41 @@ describe('WebWorkbenchApp', () => {
     expect(reduced.review.state).toBe('approval_required')
     expect(reduced.approval?.tool_name).toBe('write_file')
     expect(reduced.capabilities.can_approve_tool).toBe(true)
+  })
+
+  it('loads one bounded live Git diff from a selected changed file', async () => {
+    window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
+    const diff = {
+      path: 'src/live.py',
+      previous_path: null,
+      revision: '0123456789abcdef',
+      available: true,
+      reason: 'available',
+      content: '@@ -1 +1,2 @@\n-old\n+new',
+      truncated: false,
+    }
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(snapshot), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ticket: 'ticket' }), { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(diff), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    await act(async () => root.render(<App />))
+    await act(async () => Promise.resolve())
+    const changedFile = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('src/live.py'))
+    expect(changedFile).toBeDefined()
+    await act(async () => changedFile?.click())
+    await act(async () => Promise.resolve())
+
+    expect(document.body.textContent).toContain('Complete bounded diff')
+    expect(document.body.textContent).toContain('@@ -1 +1,2 @@')
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toContain('/api/v1/review/diff?')
+
+    await act(async () => root.unmount())
+    container.remove()
+    fetchMock.mockRestore()
   })
 })

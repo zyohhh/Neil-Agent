@@ -79,13 +79,19 @@ class ProviderDto(WorkbenchDto):
 
 class GitFileDto(WorkbenchDto):
     path: str = Field(min_length=1, max_length=4_096)
+    previous_path: str | None = Field(default=None, min_length=1, max_length=4_096)
     status: str = Field(min_length=1, max_length=8)
     kind: Literal["modified", "added", "deleted", "renamed", "untracked", "conflict"]
+    additions: int | None = Field(default=None, ge=0)
+    deletions: int | None = Field(default=None, ge=0)
+    diff_available: bool = False
+    diff_reason: Literal["available", "untracked", "binary", "conflict", "unavailable"]
 
 
 class GitDto(WorkbenchDto):
     available: bool
     branch: str | None = Field(default=None, max_length=512)
+    revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
     change_count: int = Field(default=0, ge=0, le=10_000)
     files: tuple[GitFileDto, ...] = Field(default=(), max_length=100)
     truncated: bool = False
@@ -120,6 +126,8 @@ class FileTreeDto(WorkbenchDto):
     root: str = Field(max_length=4_096)
     items: tuple[FileNodeDto, ...] = Field(default=(), max_length=200)
     truncated: bool = False
+    revision: str = Field(pattern=r"^[0-9a-f]{16}$")
+    unchanged: bool = False
 
 
 class TaskStepDto(WorkbenchDto):
@@ -147,12 +155,44 @@ class QualityCheckDto(WorkbenchDto):
     exit_code: int | None = None
 
 
+class CostEstimateDto(WorkbenchDto):
+    source: Literal["versioned_rate_table", "unavailable"]
+    estimated_usd: str | None = Field(default=None, pattern=r"^(0|[1-9]\d*)\.\d{6}$")
+    rate_table_version: str | None = Field(default=None, max_length=64)
+    rate_effective_date: str | None = Field(
+        default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"
+    )
+    model: str | None = Field(default=None, max_length=256)
+    reason: Literal[
+        "no_rate_table",
+        "no_saved_usage",
+        "model_not_listed",
+        "cache_rate_missing",
+        "rate_not_effective",
+        "estimated",
+    ]
+
+
 class ReviewDto(WorkbenchDto):
     state: ReviewState
     git: GitDto
     quality_check: QualityCheckDto | None = None
+    quality_checks: tuple[QualityCheckDto, ...] = Field(default=(), max_length=20)
     approval_available: bool = False
-    cost_available: Literal[False] = False
+    cost_available: bool = False
+    cost: CostEstimateDto
+
+
+class GitDiffDto(WorkbenchDto):
+    path: str = Field(min_length=1, max_length=4_096)
+    previous_path: str | None = Field(default=None, min_length=1, max_length=4_096)
+    revision: str = Field(pattern=r"^[0-9a-f]{16}$")
+    available: bool
+    reason: Literal[
+        "available", "untracked", "binary", "conflict", "empty", "stale", "unavailable"
+    ]
+    content: str = Field(default="", max_length=40_000)
+    truncated: bool = False
 
 
 class SecurityDto(WorkbenchDto):
@@ -207,6 +247,8 @@ class RuntimeCapabilitiesDto(WorkbenchDto):
     can_cancel_turn: bool
     can_request_control: bool = True
     can_approve_tool: bool
+    can_show_diff: bool = True
+    can_estimate_cost: bool = False
     tool_permission_mode: Literal["approval_gated"] = "approval_gated"
     has_pty: Literal[False] = False
 

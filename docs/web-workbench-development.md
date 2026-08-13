@@ -729,6 +729,10 @@ Approve/Reject 仅接受当前控制租约持有者、当前 request ID 和精�
 - 多质量检查历史；
 - 仅在具备版本化 Provider 费率表时显示“Estimated cost”，否则保持 unavailable。
 
+当前 P4 已实现：Review 通过固定只读 Git 边界返回逐文件 numstat、rename/conflict/binary/untracked 状态，以及与 Git revision 绑定且最多 40K 字符的单文件 diff；未跟踪文件正文不通过 diff API 返回，路径不在当前安全变更集合、revision 过期或工作区越界时 fail closed。文件树使用 16 位内容 revision 做增量刷新，revision 未变化时只返回 `unchanged=true`，不重复传输整棵树。
+
+Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 Session v3 只持久化 `latest_quality_check`，所以刷新或恢复旧会话时协议真实返回 0–1 条；在会话存储升级前不伪造历史。Cost 仅在显式 `WEB_RATE_TABLE` 指向严格的 schema v1 本地 JSON、且 provider/model、费率生效日期、缓存价格和 input token 记账语义全部匹配时显示六位小数的美元 estimate；其余情况继续显示 `Unavailable`。仓库不内置会随时间失效的 Provider 价格。
+
 ### P5：打包与安全加固
 
 交付：
@@ -851,7 +855,7 @@ feat(api): add tool approval flow
 4. 首版是否允许在浏览器恢复/切换会话，还是只观察当前 CLI 会话？
 5. 模型切换是否由 Web 进程独立拥有，还是沿用启动时环境配置？
 6. 质量检查输出允许显示多少正文、保留多久？
-7. P4 是否需要美元成本；若需要，谁维护 Provider/模型/日期版本化费率表？
+7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
 8. 前端产物采用 wheel 内嵌，还是开发期先作为独立启动项？
 
 P0 只使用 fixture，尚未接入模型切换或真实 Agent。进入 P1 前需明确 Provider 提交在目标远端分支中的合并关系，避免 Web API 在未稳定的 Provider 所有权之上实现。

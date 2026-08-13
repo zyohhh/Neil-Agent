@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import dataclass
 from collections.abc import Callable
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -22,9 +24,11 @@ from ..tools.shell import (
 )
 from .dto import (
     ContextDto,
+    CostEstimateDto,
     FileNodeDto,
     FileTreeDto,
     GitDto,
+    GitDiffDto,
     GitFileDto,
     ProviderCapabilitiesDto,
     ProviderDto,
@@ -39,10 +43,12 @@ from .dto import (
     WorkspaceDto,
     utc_timestamp,
 )
+from .pricing import ProviderRateTable, load_rate_table
 
 MAX_TREE_NODES = 300
 MAX_TREE_DEPTH = 4
 MAX_REVIEW_FILES = 100
+MAX_WEB_DIFF_CHARS = 40_000
 ReviewState = Literal["empty", "passed", "failed", "stale", "unavailable"]
 SENSITIVE_NAMES = frozenset(
     {
@@ -58,6 +64,13 @@ SENSITIVE_NAMES = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _GitStatusEntry:
+    status: str
+    path: str
+    previous_path: str | None = None
+
+
 class WorkbenchSnapshotService:
     """Project local metadata without exposing content or mutation capabilities."""
 
@@ -66,6 +79,7 @@ class WorkbenchSnapshotService:
         settings: Settings,
         *,
         clock: Callable[[], datetime] | None = None,
+        rate_table: ProviderRateTable | None = None,
     ) -> None:
         root = settings.workspace_root.expanduser().resolve(strict=True)
         if not root.is_dir():
@@ -73,6 +87,7 @@ class WorkbenchSnapshotService:
         self.settings = settings
         self.root = root
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._rate_table = rate_table or load_rate_table(settings.web_rate_table)
         self._sessions = SessionStore(root)
         self._shell = ShellTools(
             root,
@@ -116,7 +131,13 @@ class WorkbenchSnapshotService:
             total_count=index.valid_count,
         )
 
-    def files(self, relative_path: str = "", *, depth: int = 2) -> FileTreeDto:
+    def files(
+        self,
+        relative_path: str = "",
+        *,
+        depth: int = 2,
+        revision: str | None = None,
+    ) -> FileTreeDto:
         """Return a bounded tree without following links or reading file contents."""
 
         if depth < 0 or depth > MAX_TREE_DEPTH:
@@ -124,22 +145,95 @@ class WorkbenchSnapshotService:
         requested = self._resolve_relative_directory(relative_path)
         budget = [MAX_TREE_NODES]
         items = self._list_directory(requested, depth=depth, budget=budget)
+        current_revision = self._file_tree_revision(requested, items)
         return FileTreeDto(
             root=requested.relative_to(self.root).as_posix()
             if requested != self.root
             else "",
-            items=items,
+            items=() if revision == current_revision else items,
             truncated=budget[0] == 0,
+            revision=current_revision,
+            unchanged=revision == current_revision,
         )
 
     def git(self) -> GitDto:
         """Return concise Git metadata through the existing fixed command boundary."""
 
         try:
-            raw = self._shell.git_status_snapshot()
+            raw = self._shell.git_review_status_snapshot()
         except (ToolError, OSError):
             return GitDto(available=False)
-        return self._parse_git_status(raw)
+        try:
+            numstat = self._shell.git_numstat_snapshot()
+        except (ToolError, OSError):
+            numstat = None
+        return self._parse_git_status(raw, numstat)
+
+    def diff(self, path: str, *, revision: str) -> GitDiffDto:
+        """Return one bounded diff only for a current, visible Git status entry."""
+
+        git = self.git()
+        if not git.available or git.revision is None:
+            return GitDiffDto(
+                path=self._bounded_requested_path(path),
+                revision="0" * 16,
+                available=False,
+                reason="unavailable",
+            )
+        if revision != git.revision:
+            return GitDiffDto(
+                path=self._bounded_requested_path(path),
+                revision=git.revision,
+                available=False,
+                reason="stale",
+            )
+        requested = next((item for item in git.files if item.path == path), None)
+        if requested is None:
+            raise ValueError("diff path is not a current visible Git change")
+        if not requested.diff_available:
+            reason = requested.diff_reason
+            return GitDiffDto(
+                path=requested.path,
+                previous_path=requested.previous_path,
+                revision=git.revision,
+                available=False,
+                reason=reason,
+            )
+        paths = [requested.path]
+        if requested.previous_path is not None:
+            paths.insert(0, requested.previous_path)
+        try:
+            snapshot = self._shell.git_file_diff_snapshot(
+                paths, max_chars=MAX_WEB_DIFF_CHARS
+            )
+        except (ToolError, OSError):
+            return GitDiffDto(
+                path=requested.path,
+                previous_path=requested.previous_path,
+                revision=git.revision,
+                available=False,
+                reason="unavailable",
+            )
+        if (
+            "GIT binary patch" in snapshot.content
+            or "Binary files " in snapshot.content
+        ):
+            return GitDiffDto(
+                path=requested.path,
+                previous_path=requested.previous_path,
+                revision=git.revision,
+                available=False,
+                reason="binary",
+            )
+        return GitDiffDto(
+            path=requested.path,
+            previous_path=requested.previous_path,
+            revision=git.revision,
+            available=bool(snapshot.content),
+            reason="available" if snapshot.content else "empty",
+            content=snapshot.content,
+            truncated=snapshot.truncated,
+        )
 
     def review(self) -> ReviewDto:
         """Combine read-only Git metadata with the latest persisted quality result."""
@@ -164,7 +258,15 @@ class WorkbenchSnapshotService:
             state = "stale"
         else:
             state = "empty"
-        return ReviewDto(state=state, git=git, quality_check=quality)
+        cost = self._cost(latest)
+        return ReviewDto(
+            state=state,
+            git=git,
+            quality_check=quality,
+            quality_checks=() if quality is None else (quality,),
+            cost=cost,
+            cost_available=cost.source == "versioned_rate_table",
+        )
 
     def snapshot(self) -> WorkbenchSnapshotDto:
         """Build one internally consistent, versioned first-screen snapshot."""
@@ -263,7 +365,66 @@ class WorkbenchSnapshotService:
             state = "stale"
         else:
             state = "empty"
-        return ReviewDto(state=state, git=git, quality_check=quality)
+        cost = self._cost(latest)
+        return ReviewDto(
+            state=state,
+            git=git,
+            quality_check=quality,
+            quality_checks=() if quality is None else (quality,),
+            cost=cost,
+            cost_available=cost.source == "versioned_rate_table",
+        )
+
+    def _cost(self, latest: SessionSnapshot | None) -> CostEstimateDto:
+        table = self._rate_table
+        if table is None:
+            return CostEstimateDto(source="unavailable", reason="no_rate_table")
+        if table.effective_date > self._clock().date():
+            return CostEstimateDto(
+                source="unavailable",
+                rate_table_version=table.version,
+                rate_effective_date=table.effective_date.isoformat(),
+                model=self.settings.selected_model,
+                reason="rate_not_effective",
+            )
+        usage = None if latest is None else latest.last_usage
+        if usage is None:
+            return CostEstimateDto(
+                source="unavailable",
+                rate_table_version=table.version,
+                rate_effective_date=table.effective_date.isoformat(),
+                model=self.settings.selected_model,
+                reason="no_saved_usage",
+            )
+        rate = table.find(
+            self.settings.llm_provider.value, self.settings.selected_model
+        )
+        if rate is None:
+            return CostEstimateDto(
+                source="unavailable",
+                rate_table_version=table.version,
+                rate_effective_date=table.effective_date.isoformat(),
+                model=self.settings.selected_model,
+                reason="model_not_listed",
+            )
+        estimate = rate.estimate(usage)
+        if estimate is None:
+            return CostEstimateDto(
+                source="unavailable",
+                rate_table_version=table.version,
+                rate_effective_date=table.effective_date.isoformat(),
+                model=self.settings.selected_model,
+                reason="cache_rate_missing",
+            )
+        rounded = estimate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        return CostEstimateDto(
+            source="versioned_rate_table",
+            estimated_usd=f"{rounded:.6f}",
+            rate_table_version=table.version,
+            rate_effective_date=table.effective_date.isoformat(),
+            model=self.settings.selected_model,
+            reason="estimated",
+        )
 
     def _resolve_relative_directory(self, relative_path: str) -> Path:
         if not isinstance(relative_path, str) or "\x00" in relative_path:
@@ -346,42 +507,183 @@ class WorkbenchSnapshotService:
             or lowered.startswith(".env.")
         )
 
-    def _parse_git_status(self, raw: str) -> GitDto:
-        lines = raw.splitlines()
+    @staticmethod
+    def _file_tree_revision(root: Path, items: tuple[FileNodeDto, ...]) -> str:
+        def walk(nodes: tuple[FileNodeDto, ...]) -> list[str]:
+            values: list[str] = []
+            for node in nodes:
+                values.append(f"{node.kind}:{node.path}")
+                values.extend(walk(node.children))
+            return values
+
+        identity = "\0".join([root.name, *walk(items)])
+        return sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+    def _parse_git_status(self, raw: str, numstat: str | None) -> GitDto:
+        records = raw.split("\0")
         branch = None
-        change_lines = lines
-        if lines and lines[0].startswith("## "):
-            branch_text = lines[0][3:].strip()
+        if records and records[0].startswith("## "):
+            branch_text = records.pop(0)[3:].strip()
             branch = branch_text.split("...", 1)[0].strip()
             if branch.startswith("No commits yet on "):
                 branch = branch.removeprefix("No commits yet on ")
-            change_lines = lines[1:]
+        entries: list[_GitStatusEntry] = []
+        index = 0
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if len(record) < 4 or record[2] != " ":
+                continue
+            status = record[:2]
+            path = record[3:]
+            previous_path = None
+            if "R" in status or "C" in status:
+                if index >= len(records):
+                    continue
+                previous_path = records[index]
+                index += 1
+            entries.append(
+                _GitStatusEntry(
+                    status=status,
+                    path=path,
+                    previous_path=previous_path,
+                )
+            )
+        stats = self._parse_numstat(numstat or "")
         files: list[GitFileDto] = []
         total_changes = 0
-        for line in change_lines:
-            if len(line) < 3:
+        for entry in entries:
+            if not self._safe_git_path(entry.path):
+                continue
+            if entry.previous_path is not None and not self._safe_git_path(
+                entry.previous_path
+            ):
                 continue
             total_changes += 1
             if len(files) >= MAX_REVIEW_FILES:
                 continue
-            status_code = line[:2]
-            path = line[3:].strip().split(" -> ")[-1].strip('"')
-            if not path or not self._safe_git_path(path):
-                continue
+            status_code = entry.status
+            additions, deletions = self._combined_numstat(entry, stats)
+            kind = self._git_kind(status_code)
+            binary = (additions, deletions) == (None, None) and any(
+                stats.get(path) == (None, None)
+                for path in (entry.path, entry.previous_path)
+                if path is not None
+            )
+            diff_available = (
+                numstat is not None
+                and kind not in {"untracked", "conflict"}
+                and not binary
+            )
+            reason: Literal[
+                "available", "untracked", "binary", "conflict", "unavailable"
+            ]
+            if kind == "untracked":
+                reason = "untracked"
+            elif kind == "conflict":
+                reason = "conflict"
+            elif binary:
+                reason = "binary"
+            elif diff_available:
+                reason = "available"
+            else:
+                reason = "unavailable"
             files.append(
                 GitFileDto(
-                    path=path[:4_096],
+                    path=entry.path[:4_096],
+                    previous_path=(
+                        entry.previous_path[:4_096]
+                        if entry.previous_path is not None
+                        else None
+                    ),
                     status=status_code.strip() or "?",
-                    kind=self._git_kind(status_code),
+                    kind=kind,
+                    additions=additions,
+                    deletions=deletions,
+                    diff_available=diff_available,
+                    diff_reason=reason,
                 )
             )
         return GitDto(
             available=True,
             branch=(branch or "detached")[:512],
+            revision=self._git_revision(raw, numstat or "", entries),
             change_count=min(total_changes, 10_000),
             files=tuple(files),
             truncated=total_changes > len(files),
         )
+
+    def _git_revision(
+        self,
+        status: str,
+        numstat: str,
+        entries: list[_GitStatusEntry],
+    ) -> str:
+        digest = sha256()
+        digest.update(status.encode("utf-8"))
+        digest.update(numstat.encode("utf-8"))
+        for entry in entries[:MAX_REVIEW_FILES]:
+            if not self._safe_git_path(entry.path):
+                continue
+            candidate = self.root.joinpath(*PurePosixPath(entry.path).parts)
+            try:
+                info = candidate.lstat()
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(self.root)
+            except (OSError, ValueError):
+                digest.update(f"missing:{entry.path}".encode("utf-8"))
+                continue
+            if candidate.is_symlink() or not stat.S_ISREG(info.st_mode):
+                digest.update(f"blocked:{entry.path}".encode("utf-8"))
+                continue
+            digest.update(
+                f"file:{entry.path}:{info.st_size}:{info.st_mtime_ns}".encode("utf-8")
+            )
+        return digest.hexdigest()[:16]
+
+    def _parse_numstat(self, raw: str) -> dict[str, tuple[int | None, int | None]]:
+        stats: dict[str, tuple[int | None, int | None]] = {}
+        for record in raw.split("\0"):
+            if not record:
+                continue
+            parts = record.split("\t", 2)
+            if len(parts) != 3 or not self._safe_git_path(parts[2]):
+                continue
+            if parts[0] == "-" or parts[1] == "-":
+                stats[parts[2]] = (None, None)
+                continue
+            try:
+                stats[parts[2]] = (int(parts[0]), int(parts[1]))
+            except ValueError:
+                continue
+        return stats
+
+    @staticmethod
+    def _combined_numstat(
+        entry: _GitStatusEntry,
+        stats: dict[str, tuple[int | None, int | None]],
+    ) -> tuple[int | None, int | None]:
+        values = [
+            stats[path]
+            for path in (entry.path, entry.previous_path)
+            if path is not None and path in stats
+        ]
+        if not values or any(value == (None, None) for value in values):
+            return None, None
+        return sum(value[0] or 0 for value in values), sum(
+            value[1] or 0 for value in values
+        )
+
+    def _bounded_requested_path(self, value: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 4_096
+            or "\x00" in value
+            or not self._safe_git_path(value)
+        ):
+            raise ValueError("diff path must be a safe workspace-relative path")
+        return value
 
     def _safe_git_path(self, value: str) -> bool:
         pure = PurePosixPath(value.replace("\\", "/"))
