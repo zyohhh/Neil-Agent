@@ -540,6 +540,89 @@
   font-size: 13px;
 }
 
+.live-task-form {
+  margin: 16px 0 10px;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  background: rgba(8, 13, 17, 0.42);
+}
+
+.live-task-form > label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.live-task-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.live-task-row textarea {
+  min-width: 0;
+  flex: 1;
+  resize: vertical;
+  max-height: 140px;
+  padding: 11px 13px;
+  border: 1px solid var(--border-bright);
+  border-radius: 12px;
+  color: var(--text-primary);
+  background: rgba(3, 7, 10, .62);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.live-task-row textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.start-run-button,
+.cancel-run-button {
+  min-width: 112px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.start-run-button { color: #101412; background: var(--text-primary); }
+.cancel-run-button { color: var(--text-primary); background: rgba(255, 126, 94, .18); border: 1px solid rgba(255, 126, 94, .45); }
+.start-run-button:disabled,
+.cancel-run-button:disabled { cursor: not-allowed; opacity: .45; }
+
+.live-task-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.command-error { margin: 8px 0 0; color: #ffb6a1; font-size: 12px; }
+
+.live-empty-state {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.live-empty-state strong { color: var(--text-primary); }
+.live-step-heading { cursor: default; }
+.output-muted { color: var(--text-muted); }
+
 .objective-check {
   display: inline-grid;
   place-items: center;
@@ -1177,6 +1260,10 @@
 }
 
 @media (max-width: 767px) {
+  .live-task-row { flex-direction: column; }
+  .live-task-meta { flex-direction: column; gap: 3px; }
+  .start-run-button,
+  .cancel-run-button { width: 100%; }
   .app-shell {
     grid-template-areas:
       "banner"

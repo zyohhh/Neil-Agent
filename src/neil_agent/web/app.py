@@ -1,7 +1,9 @@
-"""FastAPI application factory for the read-only local workbench."""
+"""FastAPI application factory for the local realtime workbench."""
 
 from __future__ import annotations
 
+import asyncio
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +18,8 @@ from fastapi import (
     Query,
     Request,
     Response,
+    WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -23,7 +27,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..config import Settings
-from .dto import FileTreeDto, HealthDto, ReviewDto, SessionListDto, WorkbenchSnapshotDto
+from pydantic import ValidationError
+
+from .controller import ClientCommand, CommandError, WorkbenchController
+from .dto import (
+    FileTreeDto,
+    HealthDto,
+    ReviewDto,
+    SessionListDto,
+    WebSocketTicketDto,
+    WorkbenchSnapshotDto,
+)
 from .security import BootstrapSessionStore
 from .service import WorkbenchSnapshotService
 
@@ -43,18 +57,25 @@ def create_app(
     bootstrap_token: str,
     static_root: Path | None = None,
     service: WorkbenchSnapshotService | None = None,
+    controller: WorkbenchController | None = None,
 ) -> FastAPI:
-    """Create an authenticated, GET-only API without constructing an Agent."""
+    """Create an authenticated loopback API and one realtime Agent controller."""
 
     if len(bootstrap_token) < 32:
         raise ValueError(
             "Web Workbench bootstrap token must contain at least 32 characters"
         )
     snapshot_service = service or WorkbenchSnapshotService(settings)
+    workbench_controller = controller or WorkbenchController.production(
+        settings, snapshot_service
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        yield
+        try:
+            yield
+        finally:
+            workbench_controller.close()
 
     app = FastAPI(
         title="Neil Agent Web Workbench",
@@ -65,6 +86,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.workbench_service = snapshot_service
+    app.state.workbench_controller = workbench_controller
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=["127.0.0.1", "localhost", "testserver"],
@@ -128,7 +150,16 @@ def create_app(
 
     @app.get("/api/v1/snapshot", response_model=WorkbenchSnapshotDto)
     def snapshot(_auth: None = Depends(require_session)) -> WorkbenchSnapshotDto:
-        return snapshot_service.snapshot()
+        return workbench_controller.snapshot()
+
+    @app.get("/api/v1/ws-ticket", response_model=WebSocketTicketDto)
+    def ws_ticket(
+        token: Annotated[str | None, Cookie(alias="neil_workbench_session")] = None,
+    ) -> WebSocketTicketDto:
+        ticket = session_store.issue_ws_ticket(token)
+        if ticket is None:
+            raise HTTPException(status_code=401, detail="Valid local session required")
+        return WebSocketTicketDto(ticket=ticket.token)
 
     @app.get("/api/v1/sessions", response_model=SessionListDto)
     def sessions(_auth: None = Depends(require_session)) -> SessionListDto:
@@ -148,6 +179,66 @@ def create_app(
     @app.get("/api/v1/review", response_model=ReviewDto)
     def review(_auth: None = Depends(require_session)) -> ReviewDto:
         return snapshot_service.review()
+
+    @app.websocket("/api/v1/events")
+    async def events(
+        websocket: WebSocket,
+        ticket: str = Query(min_length=32, max_length=128),
+        after: int = Query(default=0, ge=0),
+    ) -> None:
+        origin = websocket.headers.get("origin")
+        host = websocket.headers.get("host", "").split(":", 1)[0]
+        if (
+            origin not in ALLOWED_ORIGINS
+            or host not in {"127.0.0.1", "localhost", "testserver"}
+            or not session_store.consume_ws_ticket(ticket)
+        ):
+            await websocket.close(code=4401, reason="Local authentication required")
+            return
+        await websocket.accept()
+        client_id = f"client-{secrets.token_hex(16)}"
+        try:
+            subscription = workbench_controller.subscribe(client_id, after)
+        except CommandError as error:
+            await websocket.send_json(
+                {"protocol_version": 1, "message_type": "error", "code": error.code}
+            )
+            await websocket.close(code=4429)
+            return
+        send_lock = asyncio.Lock()
+
+        async def send(message: dict[str, object]) -> None:
+            async with send_lock:
+                await websocket.send_json(message)
+
+        await send(workbench_controller.connected_message(client_id, after))
+
+        async def send_events() -> None:
+            while True:
+                event = await subscription.queue.get()
+                await send(event)
+
+        sender = asyncio.create_task(send_events())
+        try:
+            while True:
+                payload = await websocket.receive_json()
+                try:
+                    command = ClientCommand.model_validate(payload)
+                except ValidationError:
+                    await send(
+                        {
+                            "protocol_version": 1,
+                            "message_type": "error",
+                            "code": "invalid_command",
+                        }
+                    )
+                    continue
+                await send(workbench_controller.handle_command(client_id, command))
+        except WebSocketDisconnect:
+            pass
+        finally:
+            sender.cancel()
+            workbench_controller.unsubscribe(client_id)
 
     if static_root is not None and (static_root / "index.html").is_file():
         app.mount("/", StaticFiles(directory=static_root, html=True), name="workbench")

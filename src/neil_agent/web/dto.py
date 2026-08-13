@@ -1,4 +1,4 @@
-"""Versioned, metadata-only DTOs for the local Web Workbench."""
+"""Versioned DTOs for the local Web Workbench."""
 
 from __future__ import annotations
 
@@ -14,11 +14,36 @@ class WorkbenchDto(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+RunStatus = Literal[
+    "idle",
+    "running",
+    "cancelling",
+    "completed",
+    "failed",
+    "cancelled",
+]
+StepStatus = Literal[
+    "pending",
+    "running",
+    "waiting_for_approval",
+    "succeeded",
+    "failed",
+    "skipped",
+    "cancelled",
+]
+
+
 class HealthDto(WorkbenchDto):
     status: Literal["ready"] = "ready"
     service: Literal["neil-agent-web"] = "neil-agent-web"
     schema_version: Literal[1] = 1
-    read_only: Literal[True] = True
+    read_only_tools: Literal[True] = True
+    realtime: Literal[True] = True
+
+
+class WebSocketTicketDto(WorkbenchDto):
+    ticket: str = Field(min_length=32, max_length=128)
+    expires_in_seconds: Literal[30] = 30
 
 
 class WorkspaceDto(WorkbenchDto):
@@ -122,20 +147,48 @@ class ReviewDto(WorkbenchDto):
 
 
 class SecurityDto(WorkbenchDto):
-    mode: Literal["read_only"] = "read_only"
+    mode: Literal["agent_read_only"] = "agent_read_only"
     binding: Literal["loopback"] = "loopback"
     bootstrap_token_required: Literal[True] = True
     write_routes: Literal[0] = 0
-    agent_connected: Literal[False] = False
+    agent_connected: Literal[True] = True
     sandbox_backend: Literal["disabled", "windows-sandbox"]
     audit_enabled: bool
 
 
 class RunDto(WorkbenchDto):
-    status: Literal["not_connected"] = "not_connected"
-    detail: Literal[
-        "P1 exposes saved metadata only; Agent execution is not connected"
-    ] = "P1 exposes saved metadata only; Agent execution is not connected"
+    status: RunStatus = "idle"
+    run_id: str | None = Field(default=None, pattern=r"^run-[0-9a-f]{32}$")
+    objective: str | None = Field(default=None, max_length=500)
+    started_at: AwareDatetime | None = None
+    finished_at: AwareDatetime | None = None
+    error_type: str | None = Field(default=None, max_length=120)
+
+
+class RuntimeStepDto(WorkbenchDto):
+    correlation_id: str = Field(min_length=1, max_length=80)
+    stage: Literal[
+        "agent_turn", "model_request", "tool_call", "approval", "quality_check"
+    ]
+    title: str = Field(min_length=1, max_length=200)
+    status: StepStatus
+    timestamp: AwareDatetime
+    metadata: dict[str, bool | int | str] = Field(default_factory=dict)
+
+
+class OutputEntryDto(WorkbenchDto):
+    kind: Literal["status", "activity", "assistant", "warning", "error"]
+    text: str = Field(min_length=1, max_length=4_000)
+    timestamp: AwareDatetime
+
+
+class RuntimeCapabilitiesDto(WorkbenchDto):
+    can_start_turn: bool
+    can_cancel_turn: bool
+    can_request_control: bool = True
+    can_approve_tool: Literal[False] = False
+    tool_permission_mode: Literal["read_only"] = "read_only"
+    has_pty: Literal[False] = False
 
 
 class WorkbenchSnapshotDto(WorkbenchDto):
@@ -145,6 +198,14 @@ class WorkbenchSnapshotDto(WorkbenchDto):
     workspace: WorkspaceDto
     provider: ProviderDto
     run: RunDto = RunDto()
+    revision: int = Field(default=0, ge=0)
+    last_sequence: int = Field(default=0, ge=0)
+    capabilities: RuntimeCapabilitiesDto = RuntimeCapabilitiesDto(
+        can_start_turn=True,
+        can_cancel_turn=False,
+    )
+    timeline: tuple[RuntimeStepDto, ...] = Field(default=(), max_length=200)
+    output: tuple[OutputEntryDto, ...] = Field(default=(), max_length=200)
     git: GitDto
     sessions: SessionListDto
     files: FileTreeDto

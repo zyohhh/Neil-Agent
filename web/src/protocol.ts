@@ -22,6 +22,32 @@ export interface LiveGitFile {
   kind: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflict'
 }
 
+export type LiveRunStatus = 'idle' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
+
+export interface LiveRun {
+  status: LiveRunStatus
+  run_id: string | null
+  objective: string | null
+  started_at: string | null
+  finished_at: string | null
+  error_type: string | null
+}
+
+export interface LiveRuntimeStep {
+  correlation_id: string
+  stage: 'agent_turn' | 'model_request' | 'tool_call' | 'approval' | 'quality_check'
+  title: string
+  status: 'pending' | 'running' | 'waiting_for_approval' | 'succeeded' | 'failed' | 'skipped' | 'cancelled'
+  timestamp: string
+  metadata: Record<string, string | number | boolean>
+}
+
+export interface LiveOutputEntry {
+  kind: 'status' | 'activity' | 'assistant' | 'warning' | 'error'
+  text: string
+  timestamp: string
+}
+
 export interface WorkbenchSnapshotV1 {
   schema_version: 1
   source: 'live'
@@ -34,7 +60,19 @@ export interface WorkbenchSnapshotV1 {
     wire_protocol: string
     thinking_enabled: boolean
   }
-  run: { status: 'not_connected'; detail: string }
+  run: LiveRun
+  revision: number
+  last_sequence: number
+  capabilities: {
+    can_start_turn: boolean
+    can_cancel_turn: boolean
+    can_request_control: boolean
+    can_approve_tool: false
+    tool_permission_mode: 'read_only'
+    has_pty: false
+  }
+  timeline: LiveRuntimeStep[]
+  output: LiveOutputEntry[]
   git: { available: boolean; branch: string | null; change_count: number; files: LiveGitFile[]; truncated: boolean }
   sessions: { available: boolean; items: LiveSession[]; invalid_count: number; total_count: number }
   files: { root: string; items: LiveFileNode[]; truncated: boolean }
@@ -56,15 +94,53 @@ export interface WorkbenchSnapshotV1 {
     cost_available: false
   }
   security: {
-    mode: 'read_only'
+    mode: 'agent_read_only'
     binding: 'loopback'
     bootstrap_token_required: true
     write_routes: 0
-    agent_connected: false
+    agent_connected: true
   }
 }
 
 export type LiveConnectionState = 'fixture' | 'connecting' | 'live' | 'offline'
+
+export interface WorkbenchEventV1 {
+  protocol_version: 1
+  message_type: 'event'
+  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'control_changed' | 'snapshot_invalidated' | 'service_closing'
+  sequence: number
+  revision: number
+  timestamp: string
+  payload: Record<string, unknown>
+}
+
+type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn'
+
+interface PendingCommand {
+  command: CommandName
+  payload: Record<string, unknown>
+}
+
+interface ConnectedMessage {
+  protocol_version: 1
+  message_type: 'connected'
+  client_id: string
+  sequence: number
+  revision: number
+  control: boolean
+}
+
+interface CommandResult {
+  protocol_version: 1
+  message_type: 'command_result'
+  command_id: string
+  status: 'accepted' | 'rejected'
+  detail: string
+  code: string | null
+  run_id: string | null
+  sequence: number
+  revision: number
+}
 
 const getBootstrapSecret = () => {
   const hash = new URLSearchParams(window.location.hash.slice(1))
@@ -75,31 +151,34 @@ const getBootstrapSecret = () => {
 
 let liveSnapshotRequest: Promise<WorkbenchSnapshotV1 | null> | null = null
 
+const requestSnapshot = async (exchangeBootstrap: boolean): Promise<WorkbenchSnapshotV1 | null> => {
+  const bootstrap = exchangeBootstrap ? getBootstrapSecret() : null
+  if (bootstrap) {
+    const exchange = await fetch('/api/v1/bootstrap', {
+      method: 'POST',
+      headers: { 'X-Neil-Bootstrap': bootstrap },
+      credentials: 'include',
+    })
+    if (!exchange.ok) throw new Error('Local bootstrap failed')
+  }
+  const response = await fetch('/api/v1/snapshot', {
+    credentials: 'include',
+    cache: 'no-store',
+  })
+  if (response.status === 401 && !bootstrap) return null
+  if (!response.ok) throw new Error('Local snapshot unavailable')
+  const payload: unknown = await response.json()
+  if (!isSnapshot(payload)) throw new Error('Local snapshot contract mismatch')
+  return payload
+}
+
 export const fetchLiveSnapshot = (): Promise<WorkbenchSnapshotV1 | null> => {
   if (new URLSearchParams(window.location.search).has('scene')) return Promise.resolve(null)
-  if (liveSnapshotRequest) return liveSnapshotRequest
-  liveSnapshotRequest = (async () => {
-    const bootstrap = getBootstrapSecret()
-    if (bootstrap) {
-      const exchange = await fetch('/api/v1/bootstrap', {
-        method: 'POST',
-        headers: { 'X-Neil-Bootstrap': bootstrap },
-        credentials: 'include',
-      })
-      if (!exchange.ok) throw new Error('Local bootstrap failed')
-    }
-    const response = await fetch('/api/v1/snapshot', {
-      credentials: 'include',
-      cache: 'no-store',
-    })
-    if (response.status === 401 && !bootstrap) return null
-    if (!response.ok) throw new Error('Local snapshot unavailable')
-    const payload: unknown = await response.json()
-    if (!isSnapshot(payload)) throw new Error('Local snapshot contract mismatch')
-    return payload
-  })()
+  if (!liveSnapshotRequest) liveSnapshotRequest = requestSnapshot(true)
   return liveSnapshotRequest
 }
+
+const refreshLiveSnapshot = () => requestSnapshot(false)
 
 export const resetLiveSnapshotRequestForTests = () => {
   liveSnapshotRequest = null
@@ -108,5 +187,213 @@ export const resetLiveSnapshotRequestForTests = () => {
 const isSnapshot = (value: unknown): value is WorkbenchSnapshotV1 => {
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
-  return record.schema_version === 1 && record.source === 'live' && typeof record.generated_at === 'string'
+  return record.schema_version === 1
+    && record.source === 'live'
+    && typeof record.generated_at === 'string'
+    && typeof record.revision === 'number'
+    && typeof record.last_sequence === 'number'
+    && typeof record.run === 'object'
+}
+
+interface RealtimeHandlers {
+  onConnection: (state: LiveConnectionState) => void
+  onSnapshot: (snapshot: WorkbenchSnapshotV1) => void
+  onEvent: (event: WorkbenchEventV1) => void
+  onControl: (hasControl: boolean) => void
+  onCommandError: (message: string | null) => void
+}
+
+export class WorkbenchRealtimeClient {
+  private socket: WebSocket | null = null
+  private reconnectTimer: number | null = null
+  private reconnectDelay = 400
+  private stopped = false
+  private revision = 0
+  private lastSequence = 0
+  private clientId: string | null = null
+  private commandCounter = 0
+  private readonly handlers: RealtimeHandlers
+  private readonly pendingCommands = new Map<string, PendingCommand>()
+  private resyncing = false
+
+  constructor(handlers: RealtimeHandlers) {
+    this.handlers = handlers
+  }
+
+  start(snapshot: WorkbenchSnapshotV1) {
+    this.revision = snapshot.revision
+    this.lastSequence = snapshot.last_sequence
+    void this.connect().catch(() => this.handleDisconnect())
+  }
+
+  stop() {
+    this.stopped = true
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer)
+    this.socket?.close(1000, 'Workbench view closed')
+    this.socket = null
+  }
+
+  startTurn(prompt: string) {
+    return this.send('start_turn', { prompt })
+  }
+
+  cancelTurn() {
+    return this.send('cancel_turn', {})
+  }
+
+  private async connect() {
+    if (this.stopped) return
+    this.handlers.onConnection('connecting')
+    const ticketResponse = await fetch('/api/v1/ws-ticket', { credentials: 'include', cache: 'no-store' })
+    if (!ticketResponse.ok) throw new Error('Realtime ticket unavailable')
+    const ticketPayload = await ticketResponse.json() as { ticket: string }
+    const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const socket = new WebSocket(`${scheme}//${window.location.host}/api/v1/events?ticket=${encodeURIComponent(ticketPayload.ticket)}&after=${this.lastSequence}`)
+    this.socket = socket
+    socket.onmessage = (message) => this.handleMessage(message)
+    socket.onclose = () => this.handleDisconnect()
+    socket.onerror = () => socket.close()
+  }
+
+  private handleMessage(message: MessageEvent<string>) {
+    let payload: ConnectedMessage | CommandResult | WorkbenchEventV1
+    try {
+      payload = JSON.parse(message.data) as ConnectedMessage | CommandResult | WorkbenchEventV1
+    } catch {
+      this.invalidate()
+      return
+    }
+    if (payload.message_type === 'connected') {
+      this.clientId = payload.client_id
+      this.revision = Math.max(this.revision, payload.revision)
+      this.lastSequence = payload.sequence
+      this.reconnectDelay = 400
+      this.handlers.onConnection('live')
+      this.handlers.onControl(payload.control)
+      this.send('acquire_control', {})
+      return
+    }
+    if (payload.message_type === 'command_result') {
+      this.revision = payload.revision
+      const pending = this.pendingCommands.get(payload.command_id)
+      this.pendingCommands.delete(payload.command_id)
+      if (payload.status === 'rejected' && payload.code === 'revision_conflict') {
+        if (pending && this.socket?.readyState === WebSocket.OPEN) {
+          this.send(pending.command, pending.payload)
+        } else {
+          this.handlers.onCommandError('State changed; refreshing the local snapshot')
+          this.invalidate()
+        }
+      } else if (payload.status === 'rejected') this.handlers.onCommandError(payload.detail)
+      else {
+        this.handlers.onCommandError(null)
+        if (payload.detail === 'Control acquired') this.handlers.onControl(true)
+      }
+      return
+    }
+    if (payload.message_type !== 'event') return
+    if (payload.event_type === 'snapshot_invalidated' || payload.sequence !== this.lastSequence + 1) {
+      this.invalidate()
+      return
+    }
+    this.lastSequence = payload.sequence
+    this.revision = payload.revision
+    if (payload.event_type === 'control_changed') {
+      this.handlers.onControl(payload.payload.holder === this.clientId)
+    }
+    this.handlers.onEvent(payload)
+  }
+
+  private send(command: CommandName, payload: Record<string, unknown>) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      this.handlers.onCommandError('Realtime connection is not ready')
+      return false
+    }
+    this.commandCounter += 1
+    const commandId = `web-${Date.now().toString(36)}-${this.commandCounter.toString(36)}`
+    this.pendingCommands.set(commandId, { command, payload })
+    this.socket.send(JSON.stringify({
+      protocol_version: 1,
+      message_type: 'command',
+      command_id: commandId,
+      expected_revision: this.revision,
+      command,
+      payload,
+    }))
+    return true
+  }
+
+  private invalidate() {
+    if (this.resyncing || this.stopped) return
+    this.resyncing = true
+    this.socket?.close()
+    void this.resync()
+  }
+
+  private async resync() {
+    if (this.stopped) return
+    this.handlers.onConnection('connecting')
+    try {
+      const snapshot = await refreshLiveSnapshot()
+      if (!snapshot) throw new Error('Session expired')
+      this.revision = snapshot.revision
+      this.lastSequence = snapshot.last_sequence
+      this.handlers.onSnapshot(snapshot)
+      await this.connect()
+    } catch {
+      this.resyncing = false
+      this.handleDisconnect()
+      return
+    }
+    this.resyncing = false
+  }
+
+  private handleDisconnect() {
+    if (this.stopped || this.resyncing || this.reconnectTimer !== null) return
+    this.socket = null
+    this.pendingCommands.clear()
+    this.handlers.onConnection('offline')
+    this.handlers.onControl(false)
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null
+      void this.resync()
+    }, this.reconnectDelay)
+    this.reconnectDelay = Math.min(5_000, this.reconnectDelay * 2)
+  }
+}
+
+export const reduceWorkbenchEvent = (
+  snapshot: WorkbenchSnapshotV1,
+  event: WorkbenchEventV1,
+): WorkbenchSnapshotV1 => {
+  const base = { ...snapshot, revision: event.revision, last_sequence: event.sequence }
+  if (event.event_type === 'run_state') {
+    const run = event.payload as unknown as LiveRun
+    const active = run.status === 'running' || run.status === 'cancelling'
+    return {
+      ...base,
+      run,
+      capabilities: { ...snapshot.capabilities, can_start_turn: !active, can_cancel_turn: active },
+    }
+  }
+  if (event.event_type === 'runtime_step') {
+    const step = event.payload.step as LiveRuntimeStep
+    const timeline = snapshot.timeline.filter((item) => item.correlation_id !== step.correlation_id)
+    return { ...base, timeline: [...timeline, step].slice(-200) }
+  }
+  if (event.event_type === 'assistant_text_delta' || event.event_type === 'activity') {
+    const text = event.event_type === 'assistant_text_delta'
+      ? String(event.payload.text ?? '')
+      : String(event.payload.message ?? '')
+    if (!text) return base
+    return {
+      ...base,
+      output: [...snapshot.output, {
+        kind: event.event_type === 'assistant_text_delta' ? 'assistant' : 'activity',
+        text,
+        timestamp: event.timestamp,
+      }].slice(-200) as LiveOutputEntry[],
+    }
+  }
+  return base
 }

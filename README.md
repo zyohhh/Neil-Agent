@@ -40,8 +40,8 @@ Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review
 [`docs/visualization-development.md`](docs/visualization-development.md)。
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
 [`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前五个 Provider 均可显式选择，兼容端点未声明的能力会在网络请求前 fail closed。
-浏览器端 Web Workbench 的产品边界、P0 fixture 原型和后续接入路线见
-[`docs/web-workbench-development.md`](docs/web-workbench-development.md)。P0 位于 `web/`，所有界面数据均为明确标记的本地合成 fixture，不会连接 Agent、Provider、文件系统、Git 或真实审批。
+浏览器端 Web Workbench 的产品边界、fixture 原型和实时接入路线见
+[`docs/web-workbench-development.md`](docs/web-workbench-development.md)。稳定的 `?scene=` fixture 仍用于视觉回归；正常启动则进入 P2 实时本地工作台。
 
 P0 本地预览与验证：
 
@@ -60,7 +60,7 @@ npm run capture:baselines
 
 Playwright 默认使用其标准浏览器缓存。若希望把浏览器二进制保存在仓库内的忽略目录，可先将 `PLAYWRIGHT_BROWSERS_PATH` 指向 `web/.playwright-browsers`，再执行安装、E2E 和基线截图命令。
 
-P1 提供只读本地工作台：先在 `web/` 执行 `npm run build`，再从项目根目录运行 `uv run neil-agent-web`。启动器只绑定 `127.0.0.1`，自动打开带一次性启动凭据的浏览器页；凭据交换后改用 `HttpOnly`、`SameSite=Strict` 本地会话。该阶段只读取工作区文件树元数据、Git 状态、Provider 描述与已保存会话摘要，不连接 Agent 执行、写文件、真实审批、模型请求或 WebSocket。
+P2 提供实时本地工作台：先在 `web/` 执行 `npm run build`，再从项目根目录运行 `uv run neil-agent-web`。启动器只绑定 `127.0.0.1`，自动打开带一次性启动凭据的浏览器页；凭据交换后改用 `HttpOnly`、`SameSite=Strict` 本地会话和短时单次 WebSocket ticket。浏览器可开始或取消一个 Agent turn，并接收流式回答、活动与运行步骤。P2 只注册有界只读文件/Git 工具，不提供 PTY、任意 shell、文件或 Git 写入和网页审批；副作用审批属于 P3。
 
 ## 模型 Provider 配置
 

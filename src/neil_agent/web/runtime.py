@@ -21,9 +21,7 @@ DEFAULT_WEB_PORT = 8765
 def main() -> None:
     """Serve the built workbench on loopback with an ephemeral bootstrap token."""
 
-    parser = argparse.ArgumentParser(
-        description="Run the read-only Neil Agent Web Workbench"
-    )
+    parser = argparse.ArgumentParser(description="Run the Neil Agent Web Workbench")
     parser.add_argument("--port", type=int, default=DEFAULT_WEB_PORT)
     arguments = parser.parse_args()
     if not 1_024 <= arguments.port <= 65_535:
@@ -39,7 +37,7 @@ def main() -> None:
     app = create_app(settings, bootstrap_token=token, static_root=static_root)
     launch_url = f"http://127.0.0.1:{arguments.port}/#bootstrap={token}"
     print(
-        f"Read-only Web Workbench starting on http://127.0.0.1:{arguments.port}/",
+        f"Web Workbench starting on http://127.0.0.1:{arguments.port}/",
         flush=True,
     )
     if os.environ.get("NEIL_AGENT_WEB_NO_BROWSER") != "1":

@@ -693,6 +693,12 @@ Web 安全评审必须覆盖 DNS rebinding、CSRF、跨站 WebSocket 劫持、�
 
 ### P2：实时运行与恢复
 
+状态：已于 `feature/web-workbench` 完成。P2 在 P1 的 loopback bootstrap 会话之上增加 30 秒有效、单次消费且绑定原会话的 WebSocket ticket；一个 `WorkbenchController` 负责单活动 turn、单控制租约、命令幂等、revision 校验、512 条有界重放、每客户端 64 条有界队列和退出时协作取消。
+
+浏览器现在可以提交 prompt、取消活动 turn，并实时消费流式回答、`ActivityEvent` 和经 allowlist 约束的 `RuntimeEvent` 投影。前端检测 sequence 间隙或 `snapshot_invalidated` 后先重新获取 HTTP 快照，再用新的单次 ticket 重连；断线时保留 last-known 状态并以有界退避恢复。慢客户端不会阻塞 Agent：队列溢出后仅收到失效通知并必须重同步。
+
+P2 的 Agent 只注册 bounded read-only filesystem/Git 工具和内存 task-plan 工具。没有 PTY、任意 shell、文件写入、Git 写入或网页审批；`can_approve_tool=false` 保持服务端固定。需要副作用的工具审批仍属于 P3，不能由 P2 客户端伪造。
+
 交付：
 
 - WebSocket 协议、单活动 turn、控制租约；

@@ -1,6 +1,14 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import './App.css'
-import { fetchLiveSnapshot, type LiveConnectionState, type LiveFileNode, type WorkbenchSnapshotV1 } from './protocol'
+import {
+  fetchLiveSnapshot,
+  reduceWorkbenchEvent,
+  WorkbenchRealtimeClient,
+  type LiveConnectionState,
+  type LiveFileNode,
+  type LiveRuntimeStep,
+  type WorkbenchSnapshotV1,
+} from './protocol'
 
 type IconName =
   | 'spark'
@@ -630,6 +638,39 @@ function Timeline({ scenario }: { scenario: Scenario }) {
   )
 }
 
+const liveStepIcon: Record<LiveRuntimeStep['stage'], IconName> = {
+  agent_turn: 'spark',
+  model_request: 'search',
+  tool_call: 'panel',
+  approval: 'check',
+  quality_check: 'flask',
+}
+
+function LiveTimeline({ steps }: { steps: LiveRuntimeStep[] }) {
+  if (steps.length === 0) {
+    return <div className="live-empty-state"><strong>No active timeline</strong><span>Start a read-only Agent task to stream runtime events here.</span></div>
+  }
+  return (
+    <ol className="timeline" aria-label="Live Agent timeline">
+      {steps.map((step, index) => (
+        <li className={`timeline-step step-${step.status === 'waiting_for_approval' ? 'waiting' : step.status}`} key={step.correlation_id}>
+          <span className="timeline-node"><Icon name={liveStepIcon[step.stage]} size={20} /></span>
+          <div className="timeline-content">
+            <div className="step-heading live-step-heading">
+              <span><strong>{step.title}</strong><small>{step.stage.replaceAll('_', ' ')}</small></span>
+              <span className="step-meta">
+                <time dateTime={step.timestamp}>{new Date(step.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                <span className="step-check" aria-label={step.status}><Icon name={step.status === 'failed' ? 'x' : 'check'} size={15} /></span>
+              </span>
+            </div>
+          </div>
+          {index < steps.length - 1 ? <span className="timeline-rail" /> : null}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
 function ContextGauge({ liveSnapshot }: { liveSnapshot: WorkbenchSnapshotV1 | null }) {
   const totalTokens = liveSnapshot?.context.total_tokens ?? 142_000
   const limitTokens = liveSnapshot?.context.limit_tokens ?? 200_000
@@ -787,12 +828,14 @@ function ReviewPanel({
 
 function OutputPanel({
   scenario,
+  liveSnapshot,
   collapsed,
   height,
   onCollapsedChange,
   onHeightChange,
 }: {
   scenario: Scenario
+  liveSnapshot: WorkbenchSnapshotV1 | null
   collapsed: boolean
   height: number
   onCollapsedChange: (collapsed: boolean) => void
@@ -800,6 +843,9 @@ function OutputPanel({
 }) {
   const [cleared, setCleared] = useState(false)
   const panelRef = useRef<HTMLElement>(null)
+  const visibleOutputLines = liveSnapshot
+    ? liveSnapshot.output.map((entry) => entry.text)
+    : scenario.outputLines
 
   useEffect(() => setCleared(false), [scenario.id])
 
@@ -847,7 +893,7 @@ function OutputPanel({
         <button type="button" className="output-title" onClick={() => onCollapsedChange(!collapsed)} aria-expanded={!collapsed}>
           <Icon name="panel" size={19} />
           <strong id="output-heading">Output</strong>
-          <span className="fixture-tag">fixture</span>
+          <span className="fixture-tag">{liveSnapshot ? 'live stream' : 'fixture'}</span>
           <span className={`tree-chevron ${collapsed ? '' : 'is-open'}`}><Icon name="chevron" size={14} /></span>
         </button>
         <div className="output-actions">
@@ -859,7 +905,7 @@ function OutputPanel({
       </div>
       {!collapsed ? (
         <div className="output-stream" role="log" aria-label="Synthetic fixture output">
-          {(cleared ? ['Fixture output cleared locally.'] : scenario.outputLines).map((line, index) => (
+          {(cleared ? [`${liveSnapshot ? 'Live' : 'Fixture'} output cleared locally.`] : visibleOutputLines).map((line, index) => (
             <div key={`${scenario.id}-${index}`} className={line.startsWith('×') || line.startsWith('!') ? 'output-warning' : line.startsWith('✓') ? 'output-success' : ''}>{line}</div>
           ))}
           <div className="output-prompt">› <span className="cursor" /></div>
@@ -911,7 +957,7 @@ function Header({
         <span>Neil Agent</span>
       </div>
 
-      <button type="button" className="workspace-selector" disabled aria-label="Workspace selector is read-only in P1">
+      <button type="button" className="workspace-selector" disabled aria-label="Workspace selector is fixed for this local service">
         <span>workspace</span><b>/</b><strong>{liveSnapshot?.workspace.name ?? 'Neil-Agent'}</strong><span className="selector-chevron"><Icon name="chevron" size={15} /></span>
       </button>
 
@@ -934,13 +980,13 @@ function Header({
         </select>
       </label>
 
-      <button type="button" className="model-selector" disabled title="Model switching is not connected in the read-only P1 workbench">
+      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P2 service is running">
         <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
       </button>
 
       <div className={`run-status tone-${connectionState === 'live' ? 'success' : connectionState === 'offline' ? 'danger' : scenario.runTone}`}>
         <span className="status-dot" />
-        <span>{connectionState === 'live' ? 'Live · read-only' : connectionState === 'offline' ? 'Offline · fixture fallback' : connectionState === 'connecting' ? 'Connecting locally' : scenario.runLabel}</span>
+        <span>{connectionState === 'live' ? `Live · ${liveSnapshot?.run.status ?? 'idle'}` : connectionState === 'offline' ? 'Offline · last known' : connectionState === 'connecting' ? 'Reconnecting locally' : scenario.runLabel}</span>
       </div>
 
       <button ref={reviewTriggerRef} type="button" className="review-mobile-button icon-button" onClick={onOpenReview} aria-label="Open review">
@@ -952,19 +998,74 @@ function Header({
   )
 }
 
-function WorkspacePanel({ scenario, liveSnapshot }: { scenario: Scenario; liveSnapshot: WorkbenchSnapshotV1 | null }) {
+function WorkspacePanel({
+  scenario,
+  liveSnapshot,
+  hasControl,
+  commandError,
+  onStartTurn,
+  onCancelTurn,
+}: {
+  scenario: Scenario
+  liveSnapshot: WorkbenchSnapshotV1 | null
+  hasControl: boolean
+  commandError: string | null
+  onStartTurn: (prompt: string) => void
+  onCancelTurn: () => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  const active = liveSnapshot?.run.status === 'running' || liveSnapshot?.run.status === 'cancelling'
   return (
     <main className="workspace-panel panel">
       <div className="panel-title workspace-title">
         <BrandMark size={23} />
         <div><h1>Workspace</h1><span className="fixture-tag">{liveSnapshot ? 'live snapshot' : 'fixture preview'}</span></div>
       </div>
-      <div className="objective-bar">
-        <span className="objective-check"><Icon name="check" size={14} /></span>
-        <span>{liveSnapshot ? `Read-only snapshot of ${liveSnapshot.workspace.name}; Agent execution is not connected in P1.` : scenario.objective}</span>
-      </div>
-      <div className="timeline-scroll" tabIndex={0} aria-label="Scrollable fixture timeline">
-        <Timeline scenario={scenario} />
+      {liveSnapshot ? (
+        <form
+          className="live-task-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const value = prompt.trim()
+            if (!value) return
+            onStartTurn(value)
+            setPrompt('')
+          }}
+        >
+          <label htmlFor="live-task-prompt">Agent task</label>
+          <div className="live-task-row">
+            <textarea
+              id="live-task-prompt"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="Ask Neil Agent to inspect or explain this workspace…"
+              maxLength={8000}
+              rows={2}
+              disabled={active}
+            />
+            {active ? (
+              <button type="button" className="cancel-run-button" onClick={onCancelTurn} disabled={!hasControl || liveSnapshot.run.status === 'cancelling'}>
+                {liveSnapshot.run.status === 'cancelling' ? 'Cancelling…' : 'Cancel'}
+              </button>
+            ) : (
+              <button type="submit" className="start-run-button" disabled={!hasControl || !prompt.trim()}>Run read-only</button>
+            )}
+          </div>
+          <div className="live-task-meta">
+            <span>{hasControl ? 'This tab has control' : 'Observing · another tab may have control'}</span>
+            <span>Read-only tools · approvals arrive in P3</span>
+          </div>
+          {commandError ? <p className="command-error" role="alert">{commandError}</p> : null}
+        </form>
+      ) : (
+        <div className="objective-bar">
+          <span className="objective-check"><Icon name="check" size={14} /></span>
+          <span>{scenario.objective}</span>
+        </div>
+      )}
+      {liveSnapshot?.run.objective ? <div className="objective-bar"><span className="objective-check"><Icon name="check" size={14} /></span><span>{liveSnapshot.run.objective}</span></div> : null}
+      <div className="timeline-scroll" tabIndex={0} aria-label={liveSnapshot ? 'Scrollable live timeline' : 'Scrollable fixture timeline'}>
+        {liveSnapshot ? <LiveTimeline steps={liveSnapshot.timeline} /> : <Timeline scenario={scenario} />}
       </div>
     </main>
   )
@@ -982,6 +1083,9 @@ function App() {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const [liveSnapshot, setLiveSnapshot] = useState<WorkbenchSnapshotV1 | null>(null)
   const [connectionState, setConnectionState] = useState<LiveConnectionState>(scenarioFromLocation ? 'fixture' : 'connecting')
+  const [hasControl, setHasControl] = useState(false)
+  const [commandError, setCommandError] = useState<string | null>(null)
+  const realtimeClientRef = useRef<WorkbenchRealtimeClient | null>(null)
   const sidebarTriggerRef = useRef<HTMLButtonElement | null>(null)
   const reviewTriggerRef = useRef<HTMLButtonElement | null>(null)
   const overlayOpen = sidebarOpen || reviewOpen
@@ -1003,7 +1107,15 @@ function App() {
         if (!active) return
         if (snapshot) {
           setLiveSnapshot(snapshot)
-          setConnectionState('live')
+          const client = new WorkbenchRealtimeClient({
+            onConnection: setConnectionState,
+            onSnapshot: setLiveSnapshot,
+            onEvent: (event) => setLiveSnapshot((current) => current ? reduceWorkbenchEvent(current, event) : current),
+            onControl: setHasControl,
+            onCommandError: setCommandError,
+          })
+          realtimeClientRef.current = client
+          client.start(snapshot)
         } else {
           setConnectionState('fixture')
         }
@@ -1011,7 +1123,11 @@ function App() {
       .catch(() => {
         if (active) setConnectionState('offline')
       })
-    return () => { active = false }
+    return () => {
+      active = false
+      realtimeClientRef.current?.stop()
+      realtimeClientRef.current = null
+    }
   }, [])
 
   const closeSidebar = () => {
@@ -1071,8 +1187,8 @@ function App() {
     >
       <a className="skip-link" href="#workspace-main">Skip to workspace</a>
       <div className="preview-banner" role="status">
-        <strong>{connectionState === 'live' ? 'P1 live read-only' : connectionState === 'connecting' ? 'P1 connecting' : connectionState === 'offline' ? 'P1 offline fallback' : 'P0 fixture preview'}</strong>
-        <span>{connectionState === 'live' ? 'Local metadata snapshot · no Agent execution, write route, model request, or approval action is connected' : 'Synthetic data only · no Agent, model, file, Git, or approval action is connected'}</span>
+        <strong>{connectionState === 'live' ? 'P2 live Agent' : connectionState === 'connecting' ? 'P2 reconnecting' : connectionState === 'offline' ? 'P2 offline · last known' : 'P0 fixture preview'}</strong>
+        <span>{connectionState === 'live' ? 'Local realtime execution · read-only tools · single control tab · no approval or PTY' : connectionState === 'fixture' ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected' : 'Last-known state is preserved while the local event stream reconnects'}</span>
       </div>
       <Header
         scenario={scenario}
@@ -1093,11 +1209,19 @@ function App() {
         liveSnapshot={liveSnapshot}
       />
       <div id="workspace-main" className="workspace-cell" tabIndex={-1}>
-        <WorkspacePanel scenario={scenario} liveSnapshot={liveSnapshot} />
+        <WorkspacePanel
+          scenario={scenario}
+          liveSnapshot={liveSnapshot}
+          hasControl={hasControl}
+          commandError={commandError}
+          onStartTurn={(prompt) => realtimeClientRef.current?.startTurn(prompt)}
+          onCancelTurn={() => realtimeClientRef.current?.cancelTurn()}
+        />
       </div>
       <ReviewPanel open={reviewOpen} onClose={closeReview} scenario={scenario} drawerMode={reviewDrawerMode} liveSnapshot={liveSnapshot} />
       <OutputPanel
         scenario={scenario}
+        liveSnapshot={liveSnapshot}
         collapsed={outputCollapsed}
         height={outputHeight}
         onCollapsedChange={setOutputCollapsed}
