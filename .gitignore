@@ -207,6 +207,9 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Workspace-local npm cache used by the Web Workbench toolchain
+.npm-cache/
+
 # PyPI configuration file
 .pypirc
 

@@ -40,6 +40,25 @@ Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review
 [`docs/visualization-development.md`](docs/visualization-development.md)。
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
 [`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前五个 Provider 均可显式选择，兼容端点未声明的能力会在网络请求前 fail closed。
+浏览器端 Web Workbench 的产品边界、P0 fixture 原型和后续接入路线见
+[`docs/web-workbench-development.md`](docs/web-workbench-development.md)。P0 位于 `web/`，所有界面数据均为明确标记的本地合成 fixture，不会连接 Agent、Provider、文件系统、Git 或真实审批。
+
+P0 本地预览与验证：
+
+```text
+cd web
+npm install
+npx playwright install chromium
+npm run dev
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+npm run e2e
+npm run capture:baselines
+```
+
+Playwright 默认使用其标准浏览器缓存。若希望把浏览器二进制保存在仓库内的忽略目录，可先将 `PLAYWRIGHT_BROWSERS_PATH` 指向 `web/.playwright-browsers`，再执行安装、E2E 和基线截图命令。
 
 ## 模型 Provider 配置
 
