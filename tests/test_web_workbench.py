@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 from neil_agent.config import Settings
 from neil_agent.events import RuntimeEventFactory
 from neil_agent.schemas import ActivityEvent, Message, TokenUsage
+from neil_agent.schemas import ModelResponse, ToolCall
 from neil_agent.session import SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 from neil_agent.web import WorkbenchController, WorkbenchSnapshotService, create_app
@@ -39,7 +40,7 @@ def _settings(root: Path) -> Settings:
 
 
 class EchoWorker:
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime):  # type: ignore[no-untyped-def]
+    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
         on_activity(ActivityEvent(status="running", message="Model request started"))
         factory = RuntimeEventFactory()
         correlation = factory.new_correlation_id("agent_turn")
@@ -64,12 +65,91 @@ class BlockingWorker:
         self.started = Event()
         self.cancelled = Event()
 
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime):  # type: ignore[no-untyped-def]
+    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
         self.started.set()
         if not cancel.wait(2):
             raise AssertionError("test worker was not cancelled")
         self.cancelled.set()
         raise TurnCancelled
+
+
+class ApprovalWorker:
+    def __init__(self) -> None:
+        self.requested = Event()
+        self.finished = Event()
+        self.approved: bool | None = None
+
+    def run(  # type: ignore[no-untyped-def]
+        self,
+        prompt,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):
+        self.requested.set()
+        self.approved = request_approval(
+            ToolCall(id="tool-1", name="write_file", arguments={"path": "demo.txt"}),
+            "Write demo.txt\n--- before\n+++ after\n+approved content",
+        )
+        on_text("approved" if self.approved else "rejected")
+        self.finished.set()
+
+
+class DoubleApprovalWorker:
+    def __init__(self) -> None:
+        self.first_requested = Event()
+        self.second_requested = Event()
+        self.finished = Event()
+        self.decisions: list[bool] = []
+
+    def run(  # type: ignore[no-untyped-def]
+        self,
+        prompt,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):
+        self.first_requested.set()
+        self.decisions.append(
+            request_approval(
+                ToolCall(id="tool-1", name="write_file"), "Preview first tool"
+            )
+        )
+        self.second_requested.set()
+        self.decisions.append(
+            request_approval(
+                ToolCall(id="tool-2", name="write_file"), "Preview second tool"
+            )
+        )
+        self.finished.set()
+
+
+class ApprovalModel:
+    def __init__(self) -> None:
+        self.round = 0
+
+    def complete(self, messages, *, system_prompt):  # type: ignore[no-untyped-def]
+        return ""
+
+    def stream(self, messages, *, system_prompt, tools=()):  # type: ignore[no-untyped-def]
+        self.round += 1
+        if self.round == 1:
+            yield ModelResponse(
+                tool_calls=(
+                    ToolCall(
+                        id="tool-1",
+                        name="write_file",
+                        arguments={"path": "approved.txt", "content": "approved"},
+                    ),
+                )
+            )
+            return
+        yield "done"
+        yield ModelResponse(content="done")
 
 
 def _client(
@@ -505,6 +585,355 @@ def test_reconnect_replays_events_after_snapshot_sequence(tmp_path: Path) -> Non
         assert replayed["sequence"] == int(first_event["sequence"]) + 1
 
     asyncio.run(replay())
+
+
+def _approval_snapshot(controller: WorkbenchController) -> dict[str, Any]:
+    snapshot = controller.snapshot().model_dump(mode="json")
+    approval = snapshot["approval"]
+    assert approval is not None
+    return approval
+
+
+def test_single_tool_approval_accepts_exact_current_request(tmp_path: Path) -> None:
+    worker = ApprovalWorker()
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("approval01", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval02",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Create one file"},
+            )
+        ),
+    )
+    assert worker.requested.wait(1)
+    approval = _approval_snapshot(controller)
+    snapshot = controller.snapshot()
+    assert approval["tool_name"] == "write_file"
+    assert "approved content" in approval["preview"]
+    assert snapshot.capabilities.can_approve_tool is True
+    assert snapshot.review.state == "approval_required"
+
+    decision = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval03",
+                "approve_tool",
+                snapshot.revision,
+                {"request_id": approval["request_id"]},
+            )
+        ),
+    )
+
+    assert decision["status"] == "accepted"
+    assert worker.finished.wait(1)
+    assert worker.approved is True
+    assert controller.snapshot().approval is not None
+    assert controller.snapshot().approval.state == "approved"
+
+
+def test_approval_rejects_stale_revision_wrong_id_and_duplicate(
+    tmp_path: Path,
+) -> None:
+    worker = ApprovalWorker()
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("approval04", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval05",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Create one file"},
+            )
+        ),
+    )
+    assert worker.requested.wait(1)
+    snapshot = controller.snapshot()
+    approval = _approval_snapshot(controller)
+
+    stale = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval06",
+                "approve_tool",
+                snapshot.revision - 1,
+                {"request_id": approval["request_id"]},
+            )
+        ),
+    )
+    wrong = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval07",
+                "approve_tool",
+                snapshot.revision,
+                {"request_id": "approval-" + "0" * 32},
+            )
+        ),
+    )
+    assert stale["code"] == "revision_conflict"
+    assert wrong["code"] == "approval_stale"
+
+    rejected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval08",
+                "reject_tool",
+                snapshot.revision,
+                {"request_id": approval["request_id"]},
+            )
+        ),
+    )
+    assert rejected["status"] == "accepted"
+    assert worker.finished.wait(1)
+    assert worker.approved is False
+    duplicate = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval09",
+                "approve_tool",
+                controller.snapshot().revision,
+                {"request_id": approval["request_id"]},
+            )
+        ),
+    )
+    assert duplicate["code"] == "approval_resolved"
+
+
+def test_control_disconnect_rejects_pending_approval(tmp_path: Path) -> None:
+    worker = ApprovalWorker()
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+
+    async def disconnect() -> None:
+        controller.subscribe("owner", 0)
+        control = controller.handle_command(
+            "owner",
+            ClientCommand.model_validate(_command("approval10", "acquire_control", 0)),
+        )
+        controller.handle_command(
+            "owner",
+            ClientCommand.model_validate(
+                _command(
+                    "approval11",
+                    "start_turn",
+                    int(control["revision"]),
+                    {"prompt": "Create one file"},
+                )
+            ),
+        )
+        assert worker.requested.wait(1)
+        controller.unsubscribe("owner")
+
+    asyncio.run(disconnect())
+    assert worker.finished.wait(1)
+    assert worker.approved is False
+    approval = controller.snapshot().approval
+    assert approval is not None
+    assert approval.state == "stale"
+    assert approval.decision_detail == "Control client disconnected"
+
+
+def test_multiple_tools_require_separate_approval_requests(tmp_path: Path) -> None:
+    worker = DoubleApprovalWorker()
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("approval12", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval13",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Create two files"},
+            )
+        ),
+    )
+    assert worker.first_requested.wait(1)
+    first = controller.snapshot().approval
+    assert first is not None
+    first_decision = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval14",
+                "approve_tool",
+                controller.snapshot().revision,
+                {"request_id": first.request_id},
+            )
+        ),
+    )
+    assert first_decision["status"] == "accepted"
+    assert worker.second_requested.wait(1)
+    second = controller.snapshot().approval
+    assert second is not None
+    assert second.request_id != first.request_id
+    assert second.preview == "Preview second tool"
+
+    second_decision = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval15",
+                "reject_tool",
+                controller.snapshot().revision,
+                {"request_id": second.request_id},
+            )
+        ),
+    )
+    assert second_decision["status"] == "accepted"
+    assert worker.finished.wait(1)
+    assert worker.decisions == [True, False]
+
+
+def test_agent_worker_revalidates_preview_before_approved_write(
+    tmp_path: Path,
+) -> None:
+    from neil_agent.web.controller import AgentTurnWorker
+
+    model = ApprovalModel()
+    worker = AgentTurnWorker(_settings(tmp_path))
+    approved = Event()
+
+    from unittest.mock import patch
+
+    with patch("neil_agent.web.controller.create_provider", return_value=model):
+        worker.run(
+            "Create approved.txt",
+            Event(),
+            lambda text: None,
+            lambda event: None,
+            lambda event: None,
+            lambda call, preview: approved.set() or True,
+        )
+
+    assert approved.is_set()
+    assert (tmp_path / "approved.txt").read_text(encoding="utf-8") == "approved"
+
+
+def test_agent_worker_fails_closed_when_preview_changes_after_approval(
+    tmp_path: Path,
+) -> None:
+    from neil_agent.web.controller import AgentTurnWorker
+    from unittest.mock import patch
+
+    target = tmp_path / "approved.txt"
+    target.write_text("before", encoding="utf-8")
+    model = ApprovalModel()
+    worker = AgentTurnWorker(_settings(tmp_path))
+
+    def change_after_preview(call: ToolCall, preview: str) -> bool:
+        assert "before" in preview
+        target.write_text("concurrent change", encoding="utf-8")
+        return True
+
+    with patch("neil_agent.web.controller.create_provider", return_value=model):
+        worker.run(
+            "Update approved.txt",
+            Event(),
+            lambda text: None,
+            lambda event: None,
+            lambda event: None,
+            change_after_preview,
+        )
+
+    assert target.read_text(encoding="utf-8") == "concurrent change"
+
+
+def test_approval_expires_and_unblocks_worker(tmp_path: Path) -> None:
+    current = [NOW]
+    worker = ApprovalWorker()
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: current[0])
+    controller = WorkbenchController(service, worker, clock=lambda: current[0])
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("approval16", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "approval17",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Create one file"},
+            )
+        ),
+    )
+    assert worker.requested.wait(1)
+
+    current[0] += timedelta(minutes=6)
+
+    assert worker.finished.wait(1)
+    assert worker.approved is False
+    approval = controller.snapshot().approval
+    assert approval is not None
+    assert approval.state == "expired"
+
+
+def test_websocket_approves_one_current_tool_request(tmp_path: Path) -> None:
+    worker = ApprovalWorker()
+    client = _client(tmp_path, worker=worker)
+    _authenticate(client)
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_json(
+            _command("approval18", "acquire_control", connected["revision"])
+        )
+        control = _receive_result(socket, "approval18")
+        socket.send_json(
+            _command(
+                "approval19",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Create one file"},
+            )
+        )
+        _receive_result(socket, "approval19")
+        approval_event = None
+        for _ in range(12):
+            event = socket.receive_json()
+            if event.get("event_type") == "approval_requested":
+                approval_event = event
+                break
+        assert approval_event is not None
+        request_id = approval_event["payload"]["approval"]["request_id"]
+        socket.send_json(
+            _command(
+                "approval20",
+                "approve_tool",
+                int(approval_event["revision"]),
+                {"request_id": request_id},
+            )
+        )
+        assert _receive_result(socket, "approval20")["status"] == "accepted"
+        assert worker.finished.wait(1)
+        assert worker.approved is True
 
 
 def test_control_lease_allows_only_one_tab_and_disconnect_releases(

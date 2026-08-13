@@ -22,6 +22,15 @@ RunStatus = Literal[
     "failed",
     "cancelled",
 ]
+ReviewState = Literal[
+    "empty",
+    "passed",
+    "failed",
+    "approval_required",
+    "stale",
+    "applied",
+    "unavailable",
+]
 StepStatus = Literal[
     "pending",
     "running",
@@ -139,15 +148,15 @@ class QualityCheckDto(WorkbenchDto):
 
 
 class ReviewDto(WorkbenchDto):
-    state: Literal["empty", "passed", "failed", "stale", "unavailable"]
+    state: ReviewState
     git: GitDto
     quality_check: QualityCheckDto | None = None
-    approval_available: Literal[False] = False
+    approval_available: bool = False
     cost_available: Literal[False] = False
 
 
 class SecurityDto(WorkbenchDto):
-    mode: Literal["agent_read_only"] = "agent_read_only"
+    mode: Literal["approval_gated"] = "approval_gated"
     binding: Literal["loopback"] = "loopback"
     bootstrap_token_required: Literal[True] = True
     write_routes: Literal[0] = 0
@@ -182,12 +191,23 @@ class OutputEntryDto(WorkbenchDto):
     timestamp: AwareDatetime
 
 
+class ApprovalRequestDto(WorkbenchDto):
+    request_id: str = Field(pattern=r"^approval-[0-9a-f]{32}$")
+    run_id: str = Field(pattern=r"^run-[0-9a-f]{32}$")
+    tool_name: str = Field(min_length=1, max_length=128)
+    preview: str = Field(min_length=1, max_length=30_000)
+    created_at: AwareDatetime
+    expires_at: AwareDatetime
+    state: Literal["pending", "approved", "rejected", "expired", "stale"]
+    decision_detail: str | None = Field(default=None, max_length=240)
+
+
 class RuntimeCapabilitiesDto(WorkbenchDto):
     can_start_turn: bool
     can_cancel_turn: bool
     can_request_control: bool = True
-    can_approve_tool: Literal[False] = False
-    tool_permission_mode: Literal["read_only"] = "read_only"
+    can_approve_tool: bool
+    tool_permission_mode: Literal["approval_gated"] = "approval_gated"
     has_pty: Literal[False] = False
 
 
@@ -203,9 +223,11 @@ class WorkbenchSnapshotDto(WorkbenchDto):
     capabilities: RuntimeCapabilitiesDto = RuntimeCapabilitiesDto(
         can_start_turn=True,
         can_cancel_turn=False,
+        can_approve_tool=False,
     )
     timeline: tuple[RuntimeStepDto, ...] = Field(default=(), max_length=200)
     output: tuple[OutputEntryDto, ...] = Field(default=(), max_length=200)
+    approval: ApprovalRequestDto | None = None
     git: GitDto
     sessions: SessionListDto
     files: FileTreeDto

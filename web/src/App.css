@@ -543,7 +543,7 @@
 .live-task-form {
   margin: 16px 0 10px;
   padding: 14px;
-  border: 1px solid var(--border-soft);
+  border: 1px solid var(--color-border-subtle);
   border-radius: 16px;
   background: rgba(8, 13, 17, 0.42);
 }
@@ -972,6 +972,25 @@
 
 .approval-card.is-ready {
   border-color: rgba(231, 197, 107, 0.42);
+}
+
+.approval-preview {
+  max-height: min(240px, 28vh);
+  margin: 10px 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  color: var(--color-text-muted);
+  background: rgba(3, 7, 10, .72);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.55 ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+.approval-preview:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
 .approval-card > span:first-child {

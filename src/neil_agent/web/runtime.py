@@ -37,7 +37,8 @@ def main() -> None:
     app = create_app(settings, bootstrap_token=token, static_root=static_root)
     launch_url = f"http://127.0.0.1:{arguments.port}/#bootstrap={token}"
     print(
-        f"Web Workbench starting on http://127.0.0.1:{arguments.port}/",
+        f"Web Workbench starting on http://127.0.0.1:{arguments.port}/ "
+        "(single-tool approvals enabled)",
         flush=True,
     )
     if os.environ.get("NEIL_AGENT_WEB_NO_BROWSER") != "1":

@@ -48,6 +48,17 @@ export interface LiveOutputEntry {
   timestamp: string
 }
 
+export interface LiveApproval {
+  request_id: string
+  run_id: string
+  tool_name: string
+  preview: string
+  created_at: string
+  expires_at: string
+  state: 'pending' | 'approved' | 'rejected' | 'expired' | 'stale'
+  decision_detail: string | null
+}
+
 export interface WorkbenchSnapshotV1 {
   schema_version: 1
   source: 'live'
@@ -67,12 +78,13 @@ export interface WorkbenchSnapshotV1 {
     can_start_turn: boolean
     can_cancel_turn: boolean
     can_request_control: boolean
-    can_approve_tool: false
-    tool_permission_mode: 'read_only'
+    can_approve_tool: boolean
+    tool_permission_mode: 'approval_gated'
     has_pty: false
   }
   timeline: LiveRuntimeStep[]
   output: LiveOutputEntry[]
+  approval: LiveApproval | null
   git: { available: boolean; branch: string | null; change_count: number; files: LiveGitFile[]; truncated: boolean }
   sessions: { available: boolean; items: LiveSession[]; invalid_count: number; total_count: number }
   files: { root: string; items: LiveFileNode[]; truncated: boolean }
@@ -89,12 +101,12 @@ export interface WorkbenchSnapshotV1 {
     limit_tokens: number | null
   }
   review: {
-    state: 'empty' | 'passed' | 'failed' | 'stale' | 'unavailable'
-    approval_available: false
+    state: 'empty' | 'passed' | 'failed' | 'approval_required' | 'stale' | 'applied' | 'unavailable'
+    approval_available: boolean
     cost_available: false
   }
   security: {
-    mode: 'agent_read_only'
+    mode: 'approval_gated'
     binding: 'loopback'
     bootstrap_token_required: true
     write_routes: 0
@@ -107,14 +119,14 @@ export type LiveConnectionState = 'fixture' | 'connecting' | 'live' | 'offline'
 export interface WorkbenchEventV1 {
   protocol_version: 1
   message_type: 'event'
-  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'control_changed' | 'snapshot_invalidated' | 'service_closing'
+  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'approval_requested' | 'approval_resolved' | 'control_changed' | 'snapshot_invalidated' | 'service_closing'
   sequence: number
   revision: number
   timestamp: string
   payload: Record<string, unknown>
 }
 
-type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn'
+type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn' | 'approve_tool' | 'reject_tool'
 
 interface PendingCommand {
   command: CommandName
@@ -239,6 +251,14 @@ export class WorkbenchRealtimeClient {
 
   cancelTurn() {
     return this.send('cancel_turn', {})
+  }
+
+  approveTool(requestId: string) {
+    return this.send('approve_tool', { request_id: requestId })
+  }
+
+  rejectTool(requestId: string) {
+    return this.send('reject_tool', { request_id: requestId })
   }
 
   private async connect() {
@@ -380,6 +400,28 @@ export const reduceWorkbenchEvent = (
     const step = event.payload.step as LiveRuntimeStep
     const timeline = snapshot.timeline.filter((item) => item.correlation_id !== step.correlation_id)
     return { ...base, timeline: [...timeline, step].slice(-200) }
+  }
+  if (event.event_type === 'approval_requested' || event.event_type === 'approval_resolved') {
+    const approval = event.payload.approval as LiveApproval
+    const pending = approval.state === 'pending'
+    return {
+      ...base,
+      approval,
+      review: {
+        ...snapshot.review,
+        approval_available: pending,
+        state: pending
+          ? 'approval_required'
+          : approval.state === 'approved'
+            ? 'applied'
+            : approval.state === 'expired' || approval.state === 'stale'
+              ? 'stale'
+              : approval.state === 'rejected'
+                ? snapshot.git.change_count > 0 ? 'stale' : 'empty'
+                : snapshot.review.state,
+      },
+      capabilities: { ...snapshot.capabilities, can_approve_tool: pending },
+    }
   }
   if (event.event_type === 'assistant_text_delta' || event.event_type === 'activity') {
     const text = event.event_type === 'assistant_text_delta'

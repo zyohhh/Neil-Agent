@@ -648,7 +648,7 @@ const liveStepIcon: Record<LiveRuntimeStep['stage'], IconName> = {
 
 function LiveTimeline({ steps }: { steps: LiveRuntimeStep[] }) {
   if (steps.length === 0) {
-    return <div className="live-empty-state"><strong>No active timeline</strong><span>Start a read-only Agent task to stream runtime events here.</span></div>
+    return <div className="live-empty-state"><strong>No active timeline</strong><span>Start an Agent task to stream runtime events here.</span></div>
   }
   return (
     <ol className="timeline" aria-label="Live Agent timeline">
@@ -696,15 +696,24 @@ function ReviewPanel({
   scenario,
   drawerMode,
   liveSnapshot,
+  hasControl,
+  onApproveTool,
+  onRejectTool,
 }: {
   open: boolean
   onClose: () => void
   scenario: Scenario
   drawerMode: boolean
   liveSnapshot: WorkbenchSnapshotV1 | null
+  hasControl: boolean
+  onApproveTool: (requestId: string) => void
+  onRejectTool: (requestId: string) => void
 }) {
   const [decision, setDecision] = useState<'none' | 'approved' | 'rejected'>('none')
-  const approvalAvailable = scenario.reviewState === 'approval' && decision === 'none'
+  const liveApproval = liveSnapshot?.approval ?? null
+  const approvalAvailable = liveSnapshot
+    ? Boolean(liveApproval?.state === 'pending' && liveSnapshot.capabilities.can_approve_tool && hasControl)
+    : scenario.reviewState === 'approval' && decision === 'none'
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const visibleChangedFiles = liveSnapshot
     ? liveSnapshot.git.files.map((file) => ({
@@ -720,7 +729,9 @@ function ReviewPanel({
       empty: 'Working tree clean',
       passed: 'Latest saved check passed',
       failed: 'Latest saved check failed',
+      approval_required: 'One tool needs approval',
       stale: 'Changes need a new check',
+      applied: 'One approved tool executed',
       unavailable: 'Review unavailable',
     } as const)[liveSnapshot.review.state]
     : scenario.reviewLabel
@@ -800,26 +811,35 @@ function ReviewPanel({
         <p className="eyebrow">Single-tool approval</p>
         <div className={`approval-card ${approvalAvailable ? 'is-ready' : ''}`}>
           <span>
-            <strong>{decision === 'approved' ? 'Fixture approved' : decision === 'rejected' ? 'Fixture rejected' : approvalAvailable ? 'Write App.tsx' : 'No pending tool'}</strong>
-            <small>{approvalAvailable ? 'One synthetic action' : 'No real side effect'}</small>
+            <strong>{liveApproval ? `${liveApproval.tool_name} · ${liveApproval.state}` : decision === 'approved' ? 'Fixture approved' : decision === 'rejected' ? 'Fixture rejected' : approvalAvailable ? 'Write App.tsx' : 'No pending tool'}</strong>
+            <small>{liveApproval?.decision_detail ?? (liveApproval ? 'This decision applies to exactly one tool preview' : approvalAvailable ? 'One synthetic action' : 'No real side effect')}</small>
           </span>
           <span className="shield-badge"><Icon name={decision === 'rejected' ? 'x' : 'check'} size={17} /></span>
         </div>
+        {liveApproval ? (
+          <pre className="approval-preview" tabIndex={0} aria-label={`Preview for ${liveApproval.tool_name}`}><code>{liveApproval.preview}</code></pre>
+        ) : null}
         <button
           type="button"
           className="approve-button"
           disabled={!approvalAvailable}
-          onClick={() => setDecision('approved')}
+          onClick={() => {
+            if (liveApproval) onApproveTool(liveApproval.request_id)
+            else setDecision('approved')
+          }}
         >
-          Approve fixture
+          {liveSnapshot ? 'Approve one tool' : 'Approve fixture'}
         </button>
         <button
           type="button"
           className="reject-button"
           disabled={!approvalAvailable}
-          onClick={() => setDecision('rejected')}
+          onClick={() => {
+            if (liveApproval) onRejectTool(liveApproval.request_id)
+            else setDecision('rejected')
+          }}
         >
-          Reject fixture
+          {liveSnapshot ? 'Reject one tool' : 'Reject fixture'}
         </button>
       </section>
     </aside>
@@ -980,7 +1000,7 @@ function Header({
         </select>
       </label>
 
-      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P2 service is running">
+      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P3 service is running">
         <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
       </button>
 
@@ -1048,12 +1068,12 @@ function WorkspacePanel({
                 {liveSnapshot.run.status === 'cancelling' ? 'Cancelling…' : 'Cancel'}
               </button>
             ) : (
-              <button type="submit" className="start-run-button" disabled={!hasControl || !prompt.trim()}>Run read-only</button>
+              <button type="submit" className="start-run-button" disabled={!hasControl || !prompt.trim()}>Run Agent</button>
             )}
           </div>
           <div className="live-task-meta">
             <span>{hasControl ? 'This tab has control' : 'Observing · another tab may have control'}</span>
-            <span>Read-only tools · approvals arrive in P3</span>
+            <span>Mutations require one-tool preview approval</span>
           </div>
           {commandError ? <p className="command-error" role="alert">{commandError}</p> : null}
         </form>
@@ -1187,8 +1207,8 @@ function App() {
     >
       <a className="skip-link" href="#workspace-main">Skip to workspace</a>
       <div className="preview-banner" role="status">
-        <strong>{connectionState === 'live' ? 'P2 live Agent' : connectionState === 'connecting' ? 'P2 reconnecting' : connectionState === 'offline' ? 'P2 offline · last known' : 'P0 fixture preview'}</strong>
-        <span>{connectionState === 'live' ? 'Local realtime execution · read-only tools · single control tab · no approval or PTY' : connectionState === 'fixture' ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected' : 'Last-known state is preserved while the local event stream reconnects'}</span>
+        <strong>{connectionState === 'live' ? 'P3 live Agent' : connectionState === 'connecting' ? 'P3 reconnecting' : connectionState === 'offline' ? 'P3 offline · last known' : 'P0 fixture preview'}</strong>
+        <span>{connectionState === 'live' ? 'Local realtime execution · preview-gated tools · single control tab · no aggregate approval or PTY' : connectionState === 'fixture' ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected' : 'Last-known state is preserved while the local event stream reconnects'}</span>
       </div>
       <Header
         scenario={scenario}
@@ -1218,7 +1238,16 @@ function App() {
           onCancelTurn={() => realtimeClientRef.current?.cancelTurn()}
         />
       </div>
-      <ReviewPanel open={reviewOpen} onClose={closeReview} scenario={scenario} drawerMode={reviewDrawerMode} liveSnapshot={liveSnapshot} />
+      <ReviewPanel
+        open={reviewOpen}
+        onClose={closeReview}
+        scenario={scenario}
+        drawerMode={reviewDrawerMode}
+        liveSnapshot={liveSnapshot}
+        hasControl={hasControl}
+        onApproveTool={(requestId) => realtimeClientRef.current?.approveTool(requestId)}
+        onRejectTool={(requestId) => realtimeClientRef.current?.rejectTool(requestId)}
+      />
       <OutputPanel
         scenario={scenario}
         liveSnapshot={liveSnapshot}

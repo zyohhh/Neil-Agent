@@ -12,16 +12,17 @@ const snapshot = {
   run: { status: 'idle', run_id: null, objective: null, started_at: null, finished_at: null, error_type: null },
   revision: 0,
   last_sequence: 0,
-  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_approve_tool: false, tool_permission_mode: 'read_only', has_pty: false },
+  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_approve_tool: false, tool_permission_mode: 'approval_gated', has_pty: false },
   timeline: [],
   output: [],
+  approval: null,
   git: { available: true, branch: 'feature/web-workbench', change_count: 1, files: [{ path: 'src/live.py', status: 'M', kind: 'modified' }], truncated: false },
   sessions: { available: true, items: [], invalid_count: 0, total_count: 0 },
   files: { root: '', items: [{ name: 'src', path: 'src', kind: 'directory', children: [] }], truncated: false },
   task: { source: 'unavailable', session_id: null, steps: [] },
   context: { source: 'unavailable', input_tokens: null, output_tokens: null, total_tokens: null, limit_tokens: 200000 },
   review: { state: 'stale', approval_available: false, cost_available: false },
-  security: { mode: 'agent_read_only', binding: 'loopback', bootstrap_token_required: true, write_routes: 0, agent_connected: true },
+  security: { mode: 'approval_gated', binding: 'loopback', bootstrap_token_required: true, write_routes: 0, agent_connected: true },
 } satisfies WorkbenchSnapshotV1
 
 describe('WebWorkbenchApp', () => {
@@ -66,7 +67,7 @@ describe('WebWorkbenchApp', () => {
     container.remove()
   })
 
-  it('exchanges a launch secret and prepares the P2 realtime workbench', async () => {
+  it('exchanges a launch secret and prepares the P3 realtime workbench', async () => {
     window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
@@ -80,10 +81,10 @@ describe('WebWorkbenchApp', () => {
     await act(async () => Promise.resolve())
 
     expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(document.body.textContent).toContain('P2 offline · last known')
+    expect(document.body.textContent).toContain('P3 offline · last known')
     expect(document.body.textContent).toContain('Neil-Agent-Live')
     expect(document.body.textContent).toContain('deepseek-live')
-    expect(document.body.textContent).toContain('Run read-only')
+    expect(document.body.textContent).toContain('Run Agent')
     expect(window.location.hash).toBe('')
 
     await act(async () => root.unmount())
@@ -105,5 +106,32 @@ describe('WebWorkbenchApp', () => {
     expect(reduced.output[0].text).toBe('Hello from Agent')
     expect(reduced.workspace.name).toBe('Neil-Agent-Live')
     expect(reduced.last_sequence).toBe(1)
+  })
+
+  it('reduces one live approval request into an actionable review state', () => {
+    const reduced = reduceWorkbenchEvent(snapshot, {
+      protocol_version: 1,
+      message_type: 'event',
+      event_type: 'approval_requested',
+      sequence: 1,
+      revision: 1,
+      timestamp: '2026-08-13T08:00:01Z',
+      payload: {
+        approval: {
+          request_id: `approval-${'a'.repeat(32)}`,
+          run_id: `run-${'b'.repeat(32)}`,
+          tool_name: 'write_file',
+          preview: 'Write one file',
+          created_at: '2026-08-13T08:00:01Z',
+          expires_at: '2026-08-13T08:05:01Z',
+          state: 'pending',
+          decision_detail: null,
+        },
+      },
+    })
+
+    expect(reduced.review.state).toBe('approval_required')
+    expect(reduced.approval?.tool_name).toBe('write_file')
+    expect(reduced.capabilities.can_approve_tool).toBe(true)
   })
 })
