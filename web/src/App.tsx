@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import './App.css'
+import { fetchLiveSnapshot, type LiveConnectionState, type LiveFileNode, type WorkbenchSnapshotV1 } from './protocol'
 
 type IconName =
   | 'spark'
@@ -104,6 +105,14 @@ const sessions = [
   { id: 'security', title: 'Review sandbox boundary', time: 'Aug 9' },
   { id: 'context', title: 'Visualize context budget', time: 'Aug 7' },
 ]
+
+const liveFileNodes = (nodes: LiveFileNode[]): FileNode[] => nodes.map((node) => ({
+  id: node.path,
+  name: `${node.name}${node.kind === 'directory' ? '/' : ''}`,
+  kind: node.kind === 'directory' ? 'folder' : 'file',
+  language: node.name.endsWith('.tsx') ? 'tsx' : node.name.endsWith('.md') ? 'md' : undefined,
+  children: node.kind === 'directory' ? liveFileNodes(node.children) : undefined,
+}))
 
 const baseSteps: TimelineStep[] = [
   {
@@ -387,15 +396,30 @@ function Sidebar({
   onClose,
   interactionLocked,
   drawerMode,
+  liveSnapshot,
 }: {
   open: boolean
   onClose: () => void
   interactionLocked: boolean
   drawerMode: boolean
+  liveSnapshot: WorkbenchSnapshotV1 | null
 }) {
   const [selectedSession, setSelectedSession] = useState('workbench')
   const [activeTreeItem, setActiveTreeItem] = useState('src')
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const visibleFiles = liveSnapshot ? liveFileNodes(liveSnapshot.files.items) : files
+  const visibleSessions = liveSnapshot
+    ? liveSnapshot.sessions.items.map((session, index) => ({
+      id: session.session_id,
+      title: session.title,
+      time: new Date(session.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      active: index === 0,
+    }))
+    : sessions
+
+  useEffect(() => {
+    if (liveSnapshot?.sessions.items[0]) setSelectedSession(liveSnapshot.sessions.items[0].session_id)
+  }, [liveSnapshot])
 
   useEffect(() => {
     if (open && drawerMode) closeButtonRef.current?.focus()
@@ -472,7 +496,7 @@ function Sidebar({
       <section className="sidebar-section project-section" aria-labelledby="project-heading">
         <p className="eyebrow" id="project-heading">Project</p>
         <ul className="file-tree" role="tree" aria-label="Fixture project files" onKeyDown={handleTreeKeyDown}>
-          {files.map((file) => (
+          {visibleFiles.map((file) => (
             <FileTreeNode
               key={file.id}
               node={file}
@@ -486,7 +510,7 @@ function Sidebar({
       <section className="sidebar-section sessions-section" aria-labelledby="sessions-heading">
         <p className="eyebrow" id="sessions-heading">Sessions</p>
         <div className="session-list">
-          {sessions.map((session) => (
+          {visibleSessions.map((session) => (
             <button
               type="button"
               key={session.id}
@@ -606,14 +630,21 @@ function Timeline({ scenario }: { scenario: Scenario }) {
   )
 }
 
-function ContextGauge() {
+function ContextGauge({ liveSnapshot }: { liveSnapshot: WorkbenchSnapshotV1 | null }) {
+  const totalTokens = liveSnapshot?.context.total_tokens ?? 142_000
+  const limitTokens = liveSnapshot?.context.limit_tokens ?? 200_000
+  const hasLiveUsage = Boolean(liveSnapshot && liveSnapshot.context.source === 'server_reported' && liveSnapshot.context.total_tokens !== null)
+  const progressMax = limitTokens ?? Math.max(totalTokens, 1)
   return (
-    <div className="context-gauge" role="progressbar" aria-label="Fixture context usage" aria-valuemin={0} aria-valuemax={200} aria-valuenow={142}>
+    <div className="context-gauge" role="progressbar" aria-label={hasLiveUsage ? 'Last server-reported token usage' : 'Fixture context usage'} aria-valuemin={0} aria-valuemax={progressMax} aria-valuenow={totalTokens}>
       <svg viewBox="0 0 160 94" aria-hidden="true">
         <path className="gauge-track" d="M18 80a62 62 0 0 1 124 0" pathLength="100" />
         <path className="gauge-value" d="M18 80a62 62 0 0 1 124 0" pathLength="100" />
       </svg>
-      <span><strong>142K</strong><small>/ 200K fixture</small></span>
+      <span>
+        <strong>{hasLiveUsage ? totalTokens.toLocaleString() : liveSnapshot ? 'Unavailable' : '142K'}</strong>
+        <small>{hasLiveUsage ? (limitTokens ? `/ ${limitTokens.toLocaleString()}` : 'last saved run') : liveSnapshot ? 'No saved usage' : '/ 200K fixture'}</small>
+      </span>
     </div>
   )
 }
@@ -623,15 +654,41 @@ function ReviewPanel({
   onClose,
   scenario,
   drawerMode,
+  liveSnapshot,
 }: {
   open: boolean
   onClose: () => void
   scenario: Scenario
   drawerMode: boolean
+  liveSnapshot: WorkbenchSnapshotV1 | null
 }) {
   const [decision, setDecision] = useState<'none' | 'approved' | 'rejected'>('none')
   const approvalAvailable = scenario.reviewState === 'approval' && decision === 'none'
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const visibleChangedFiles = liveSnapshot
+    ? liveSnapshot.git.files.map((file) => ({
+      id: `${file.status}:${file.path}`,
+      name: file.path,
+      added: null,
+      deleted: null,
+      status: file.status,
+    }))
+    : changedFiles.map((file) => ({ ...file, status: null }))
+  const reviewLabel = liveSnapshot
+    ? ({
+      empty: 'Working tree clean',
+      passed: 'Latest saved check passed',
+      failed: 'Latest saved check failed',
+      stale: 'Changes need a new check',
+      unavailable: 'Review unavailable',
+    } as const)[liveSnapshot.review.state]
+    : scenario.reviewLabel
+  const reviewDetail = liveSnapshot
+    ? `${liveSnapshot.git.change_count} read-only Git change${liveSnapshot.git.change_count === 1 ? '' : 's'}`
+    : scenario.reviewDetail
+  const reviewState = liveSnapshot
+    ? liveSnapshot.review.state === 'unavailable' ? 'failed' : liveSnapshot.review.state
+    : scenario.reviewState
 
   useEffect(() => setDecision('none'), [scenario.id])
   useEffect(() => {
@@ -657,26 +714,30 @@ function ReviewPanel({
 
       <section className="review-section">
         <p className="eyebrow">Current step</p>
-        <div className={`review-status status-${scenario.reviewState}`}>
+        <div className={`review-status status-${reviewState}`}>
           <span className="status-dot" />
-          <span><strong>{scenario.reviewLabel}</strong><small>{scenario.reviewDetail}</small></span>
+          <span><strong>{reviewLabel}</strong><small>{reviewDetail}</small></span>
         </div>
       </section>
 
       <section className="review-section">
         <p className="eyebrow">Changed files <span className="fixture-tag">fixture</span></p>
         <div className="changed-files">
-          {changedFiles.map((file) => (
+          {visibleChangedFiles.map((file) => (
             <div
               key={file.id}
               className="changed-file"
-              aria-label={`${file.name}, added ${file.added} lines, deleted ${file.deleted} lines`}
+              aria-label={file.added === null ? `${file.name}, Git status ${file.status}` : `${file.name}, added ${file.added} lines, deleted ${file.deleted} lines`}
             >
               <span className="file-bullet" />
               <Icon name="file" size={17} />
               <span className="changed-name">{file.name}</span>
-              <span className="diff-added" aria-label={`added ${file.added} lines`}>+{file.added}</span>
-              <span className="diff-deleted" aria-label={`deleted ${file.deleted} lines`}>−{file.deleted}</span>
+              {file.added === null ? <span className="git-status-code">{file.status}</span> : (
+                <>
+                  <span className="diff-added" aria-label={`added ${file.added} lines`}>+{file.added}</span>
+                  <span className="diff-deleted" aria-label={`deleted ${file.deleted} lines`}>−{file.deleted}</span>
+                </>
+              )}
             </div>
           ))}
         </div>
@@ -685,7 +746,7 @@ function ReviewPanel({
       <section className="review-section metrics-section">
         <div>
           <p className="eyebrow">Context</p>
-          <ContextGauge />
+          <ContextGauge liveSnapshot={liveSnapshot} />
         </div>
         <div className="cost-block">
           <p className="eyebrow">Cost</p>
@@ -816,6 +877,8 @@ function Header({
   compact,
   sidebarTriggerRef,
   reviewTriggerRef,
+  liveSnapshot,
+  connectionState,
 }: {
   scenario: Scenario
   onScenarioChange: (scenario: Scenario) => void
@@ -824,6 +887,8 @@ function Header({
   compact: boolean
   sidebarTriggerRef: React.RefObject<HTMLButtonElement | null>
   reviewTriggerRef: React.RefObject<HTMLButtonElement | null>
+  liveSnapshot: WorkbenchSnapshotV1 | null
+  connectionState: LiveConnectionState
 }) {
   const scenarioId = useId()
   const [mode, setMode] = useState<'focus' | 'build'>('build')
@@ -846,8 +911,8 @@ function Header({
         <span>Neil Agent</span>
       </div>
 
-      <button type="button" className="workspace-selector" disabled aria-label="Fixture workspace selector is not connected in P0">
-        <span>workspace</span><b>/</b><strong>Neil-Agent</strong><span className="selector-chevron"><Icon name="chevron" size={15} /></span>
+      <button type="button" className="workspace-selector" disabled aria-label="Workspace selector is read-only in P1">
+        <span>workspace</span><b>/</b><strong>{liveSnapshot?.workspace.name ?? 'Neil-Agent'}</strong><span className="selector-chevron"><Icon name="chevron" size={15} /></span>
       </button>
 
       <div className="mode-switcher" role="group" aria-label="Fixture work mode" onKeyDown={setModeFromKey}>
@@ -869,13 +934,13 @@ function Header({
         </select>
       </label>
 
-      <button type="button" className="model-selector" disabled={interactionLocked} title={interactionLocked ? 'Model switching is disabled while this fixture run is active.' : 'Fixture model selector'}>
-        <span>OpenAI</span><strong>gpt-5</strong><Icon name="chevron" size={14} />
+      <button type="button" className="model-selector" disabled title="Model switching is not connected in the read-only P1 workbench">
+        <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
       </button>
 
-      <div className={`run-status tone-${scenario.runTone}`}>
+      <div className={`run-status tone-${connectionState === 'live' ? 'success' : connectionState === 'offline' ? 'danger' : scenario.runTone}`}>
         <span className="status-dot" />
-        <span>{scenario.runLabel}</span>
+        <span>{connectionState === 'live' ? 'Live · read-only' : connectionState === 'offline' ? 'Offline · fixture fallback' : connectionState === 'connecting' ? 'Connecting locally' : scenario.runLabel}</span>
       </div>
 
       <button ref={reviewTriggerRef} type="button" className="review-mobile-button icon-button" onClick={onOpenReview} aria-label="Open review">
@@ -887,16 +952,16 @@ function Header({
   )
 }
 
-function WorkspacePanel({ scenario }: { scenario: Scenario }) {
+function WorkspacePanel({ scenario, liveSnapshot }: { scenario: Scenario; liveSnapshot: WorkbenchSnapshotV1 | null }) {
   return (
     <main className="workspace-panel panel">
       <div className="panel-title workspace-title">
         <BrandMark size={23} />
-        <div><h1>Workspace</h1><span className="fixture-tag">fixture preview</span></div>
+        <div><h1>Workspace</h1><span className="fixture-tag">{liveSnapshot ? 'live snapshot' : 'fixture preview'}</span></div>
       </div>
       <div className="objective-bar">
         <span className="objective-check"><Icon name="check" size={14} /></span>
-        <span>{scenario.objective}</span>
+        <span>{liveSnapshot ? `Read-only snapshot of ${liveSnapshot.workspace.name}; Agent execution is not connected in P1.` : scenario.objective}</span>
       </div>
       <div className="timeline-scroll" tabIndex={0} aria-label="Scrollable fixture timeline">
         <Timeline scenario={scenario} />
@@ -915,6 +980,8 @@ function App() {
   const [outputCollapsed, setOutputCollapsed] = useState(false)
   const [outputHeight, setOutputHeight] = useState(174)
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
+  const [liveSnapshot, setLiveSnapshot] = useState<WorkbenchSnapshotV1 | null>(null)
+  const [connectionState, setConnectionState] = useState<LiveConnectionState>(scenarioFromLocation ? 'fixture' : 'connecting')
   const sidebarTriggerRef = useRef<HTMLButtonElement | null>(null)
   const reviewTriggerRef = useRef<HTMLButtonElement | null>(null)
   const overlayOpen = sidebarOpen || reviewOpen
@@ -927,6 +994,24 @@ function App() {
     const onResize = () => setViewportWidth(window.innerWidth)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    fetchLiveSnapshot()
+      .then((snapshot) => {
+        if (!active) return
+        if (snapshot) {
+          setLiveSnapshot(snapshot)
+          setConnectionState('live')
+        } else {
+          setConnectionState('fixture')
+        }
+      })
+      .catch(() => {
+        if (active) setConnectionState('offline')
+      })
+    return () => { active = false }
   }, [])
 
   const closeSidebar = () => {
@@ -986,8 +1071,8 @@ function App() {
     >
       <a className="skip-link" href="#workspace-main">Skip to workspace</a>
       <div className="preview-banner" role="status">
-        <strong>P0 fixture preview</strong>
-        <span>Synthetic data only · no Agent, model, file, Git, or approval action is connected</span>
+        <strong>{connectionState === 'live' ? 'P1 live read-only' : connectionState === 'connecting' ? 'P1 connecting' : connectionState === 'offline' ? 'P1 offline fallback' : 'P0 fixture preview'}</strong>
+        <span>{connectionState === 'live' ? 'Local metadata snapshot · no Agent execution, write route, model request, or approval action is connected' : 'Synthetic data only · no Agent, model, file, Git, or approval action is connected'}</span>
       </div>
       <Header
         scenario={scenario}
@@ -997,17 +1082,20 @@ function App() {
         compact={compact}
         sidebarTriggerRef={sidebarTriggerRef}
         reviewTriggerRef={reviewTriggerRef}
+        liveSnapshot={liveSnapshot}
+        connectionState={connectionState}
       />
       <Sidebar
         open={sidebarOpen}
         onClose={closeSidebar}
         interactionLocked={interactionLocked}
         drawerMode={sidebarDrawerMode}
+        liveSnapshot={liveSnapshot}
       />
       <div id="workspace-main" className="workspace-cell" tabIndex={-1}>
-        <WorkspacePanel scenario={scenario} />
+        <WorkspacePanel scenario={scenario} liveSnapshot={liveSnapshot} />
       </div>
-      <ReviewPanel open={reviewOpen} onClose={closeReview} scenario={scenario} drawerMode={reviewDrawerMode} />
+      <ReviewPanel open={reviewOpen} onClose={closeReview} scenario={scenario} drawerMode={reviewDrawerMode} liveSnapshot={liveSnapshot} />
       <OutputPanel
         scenario={scenario}
         collapsed={outputCollapsed}

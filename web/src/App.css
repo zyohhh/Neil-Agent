@@ -795,6 +795,13 @@
   color: var(--color-deleted);
 }
 
+.git-status-code {
+  min-width: 28px;
+  color: var(--color-warning);
+  font: 700 11px/1 "Cascadia Code", Consolas, monospace;
+  text-align: right;
+}
+
 .metrics-section {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(90px, 0.75fr);

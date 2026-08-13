@@ -209,6 +209,7 @@ tempCodeRunnerFile.py
 
 # Workspace-local npm cache used by the Web Workbench toolchain
 .npm-cache/
+.uv-cache/
 
 # PyPI configuration file
 .pypirc

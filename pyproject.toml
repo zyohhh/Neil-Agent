@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.116.0",
+    "fastapi>=0.116,<1",
     "openai>=2.53.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
@@ -16,11 +17,13 @@ dependencies = [
     "rich>=15.0.0",
     "textual>=8.2.8,<9.0.0",
     "typer>=0.26.8",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.scripts]
 neil-agent = "neil_agent:main"
 neil-agent-eval = "neil_agent.evals:main"
+neil-agent-web = "neil_agent.web.runtime:main"
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

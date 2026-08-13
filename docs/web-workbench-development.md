@@ -678,12 +678,18 @@ Web 安全评审必须覆盖 DNS rebinding、CSRF、跨站 WebSocket 劫持、�
 
 ### P1：只读本地工作台
 
+状态：已在 `feature/web-workbench` 完成。实现新增 `neil-agent-web` 本地入口、FastAPI app factory、一次性 bootstrap 交换、严格 Host/Origin/CORS/CSP/no-store 边界，以及版本化 Pydantic DTO。服务只绑定 `127.0.0.1`；前端在存在已认证 P1 快照时显示 `P1 live read-only`，否则保留确定性 fixture/离线降级。
+
 交付：
 
 - Python app factory 和 bootstrap 安全边界；
 - `/health`、`/snapshot`、sessions、file tree、review 只读端点；
 - workspace、模型、Git、任务、上下文、安全和会话的真实 DTO；
 - 首屏、刷新和错误降级。
+
+当前 P1 的真实数据范围限定为工作区名称与匿名 identity、Provider/模型描述、只读 Git porcelain 状态、隐藏敏感目录且不跟随符号链接的有界文件树、已保存会话摘要、最近保存的 plan/质量检查元数据和服务端 token usage。不会返回消息正文、质量检查输出、文件内容、绝对工作区路径、API Key、环境变量、thinking 或 Provider 私有状态。`approval_available=false`、`cost_available=false`、`write_routes=0` 和 `agent_connected=false` 均由 DTO 固定，不能由前端猜测。
+
+启动方式：先在 `web/` 执行 `npm run build`，再在仓库根目录运行 `uv run neil-agent-web`。启动器自动打开浏览器并在 URL fragment 中短时交付高熵 bootstrap secret；fragment 不会发送到 HTTP 服务，前端随即通过 `POST /api/v1/bootstrap` 交换为内存中的 `HttpOnly`、`SameSite=Strict` cookie，并立刻从地址栏移除 secret。bootstrap 单次使用且两分钟失效，本地会话八小时失效。P1 没有任何 Web 写路由；浏览器关闭/服务重启后重新启动即可建立新会话。
 
 ### P2：实时运行与恢复
 

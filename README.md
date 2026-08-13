@@ -60,6 +60,8 @@ npm run capture:baselines
 
 Playwright 默认使用其标准浏览器缓存。若希望把浏览器二进制保存在仓库内的忽略目录，可先将 `PLAYWRIGHT_BROWSERS_PATH` 指向 `web/.playwright-browsers`，再执行安装、E2E 和基线截图命令。
 
+P1 提供只读本地工作台：先在 `web/` 执行 `npm run build`，再从项目根目录运行 `uv run neil-agent-web`。启动器只绑定 `127.0.0.1`，自动打开带一次性启动凭据的浏览器页；凭据交换后改用 `HttpOnly`、`SameSite=Strict` 本地会话。该阶段只读取工作区文件树元数据、Git 状态、Provider 描述与已保存会话摘要，不连接 Agent 执行、写文件、真实审批、模型请求或 WebSocket。
+
 ## 模型 Provider 配置
 
 DeepSeek 仍是兼容默认值，旧配置可继续使用：
