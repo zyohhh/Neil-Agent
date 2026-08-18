@@ -3,6 +3,8 @@ import { act } from 'react'
 import App from './App'
 import { reduceWorkbenchEvent, resetLiveSnapshotRequestForTests, type WorkbenchSnapshotV1 } from './protocol'
 
+;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
 const snapshot = {
   schema_version: 1,
   source: 'live',
@@ -68,7 +70,7 @@ describe('WebWorkbenchApp', () => {
     container.remove()
   })
 
-  it('exchanges a launch secret and prepares the P5 realtime workbench', async () => {
+  it('exchanges a launch secret and prepares the P6 realtime workbench', async () => {
     window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
     document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
     const fetchMock = vi.spyOn(globalThis, 'fetch')
@@ -87,7 +89,7 @@ describe('WebWorkbenchApp', () => {
       method: 'POST',
       headers: { 'X-Neil-CSRF': 'test-csrf-token' },
     })
-    expect(document.body.textContent).toContain('P5 offline · last known')
+    expect(document.body.textContent).toContain('P6 offline · last known')
     expect(document.body.textContent).toContain('Neil-Agent-Live')
     expect(document.body.textContent).toContain('deepseek-live')
     expect(document.body.textContent).toContain('Run Agent')

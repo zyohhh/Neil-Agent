@@ -510,7 +510,7 @@ function Sidebar({
       <section className="sidebar-section project-section" aria-labelledby="project-heading">
         <div className="section-heading-row">
           <p className="eyebrow" id="project-heading">Project</p>
-          <button type="button" className="text-button" onClick={onRefreshFiles} disabled={!liveSnapshot}>Refresh</button>
+          {liveSnapshot ? <button type="button" className="text-button" onClick={onRefreshFiles}>Refresh</button> : null}
         </div>
         <ul className="file-tree" role="tree" aria-label="Fixture project files" onKeyDown={handleTreeKeyDown}>
           {visibleFiles.map((file) => (
@@ -778,7 +778,7 @@ function ReviewPanel({
       <div className="panel-title-row">
         <div className="panel-title"><BrandMark size={23} /><h2 id="review-heading">Review</h2></div>
         <div className="review-heading-actions">
-          <button type="button" className="text-button" onClick={onRefreshReview} disabled={!liveSnapshot}>Refresh</button>
+          {liveSnapshot ? <button type="button" className="text-button" onClick={onRefreshReview}>Refresh</button> : null}
           <button ref={closeButtonRef} className="icon-button mobile-close" type="button" onClick={onClose} aria-label="Close review">
             <Icon name="x" />
           </button>
@@ -918,7 +918,7 @@ function OutputPanel({
   onHeightChange: (height: number) => void
 }) {
   const [cleared, setCleared] = useState(false)
-  const panelRef = useRef<HTMLElement>(null)
+  const outputSource = liveSnapshot ? 'live Agent' : 'fixture'
   const visibleOutputLines = liveSnapshot
     ? liveSnapshot.output.map((entry) => entry.text)
     : scenario.outputLines
@@ -948,13 +948,12 @@ function OutputPanel({
     <section
       className={`output-panel panel ${collapsed ? 'is-collapsed' : ''}`}
       aria-labelledby="output-heading"
-      ref={panelRef}
     >
       {!collapsed ? (
         <div
           className="output-resizer"
           role="separator"
-          aria-label="Resize fixture output"
+          aria-label={`Resize ${outputSource} output`}
           aria-orientation="horizontal"
           aria-valuemin={128}
           aria-valuemax={outputMaximum}
@@ -977,18 +976,17 @@ function OutputPanel({
           <span className={`tree-chevron ${collapsed ? '' : 'is-open'}`}><Icon name="chevron" size={14} /></span>
         </button>
         <div className="output-actions">
-          <span>feature/web-workbench</span>
+          <span>{liveSnapshot?.git.branch ?? 'feature/web-workbench'}</span>
           <span className="status-dot" />
-          <button type="button" className="icon-button" aria-label="Clear fixture output" onClick={() => setCleared(true)}><Icon name="x" size={16} /></button>
+          <button type="button" className="icon-button" aria-label={`Clear displayed ${outputSource} output locally`} onClick={() => setCleared(true)}><Icon name="x" size={16} /></button>
           <button type="button" className="icon-button" onClick={() => updateHeight(304)} aria-label="Expand output"><Icon name="plus" size={17} /></button>
         </div>
       </div>
       {!collapsed ? (
-        <div className="output-stream" role="log" aria-label="Synthetic fixture output">
+        <div className="output-stream" role="log" aria-label={liveSnapshot ? 'Live Agent output' : 'Synthetic fixture output'}>
           {(cleared ? [`${liveSnapshot ? 'Live' : 'Fixture'} output cleared locally.`] : visibleOutputLines).map((line, index) => (
             <div key={`${scenario.id}-${index}`} className={line.startsWith('×') || line.startsWith('!') ? 'output-warning' : line.startsWith('✓') ? 'output-success' : ''}>{line}</div>
           ))}
-          <div className="output-prompt">› <span className="cursor" /></div>
         </div>
       ) : null}
     </section>
@@ -996,85 +994,137 @@ function OutputPanel({
 }
 
 function Header({
-  scenario,
-  onScenarioChange,
   onOpenSidebar,
   onOpenReview,
-  compact,
   sidebarTriggerRef,
   reviewTriggerRef,
   liveSnapshot,
   connectionState,
+  interactionLocked,
+  fixtureStatusLabel,
+  fixtureTone,
 }: {
-  scenario: Scenario
-  onScenarioChange: (scenario: Scenario) => void
   onOpenSidebar: () => void
   onOpenReview: () => void
-  compact: boolean
   sidebarTriggerRef: React.RefObject<HTMLButtonElement | null>
   reviewTriggerRef: React.RefObject<HTMLButtonElement | null>
   liveSnapshot: WorkbenchSnapshotV1 | null
   connectionState: LiveConnectionState
+  interactionLocked: boolean
+  fixtureStatusLabel: string
+  fixtureTone: Scenario['runTone']
 }) {
-  const scenarioId = useId()
   const [mode, setMode] = useState<'focus' | 'build'>('build')
-  const interactionLocked = scenario.id === 'running' || scenario.id === 'approval'
+  const focusModeRef = useRef<HTMLButtonElement>(null)
+  const buildModeRef = useRef<HTMLButtonElement>(null)
+  const selectMode = (nextMode: 'focus' | 'build', moveFocus = false) => {
+    if (interactionLocked) return
+    setMode(nextMode)
+    if (moveFocus) {
+      window.setTimeout(() => (nextMode === 'focus' ? focusModeRef : buildModeRef).current?.focus(), 0)
+    }
+  }
   const setModeFromKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (interactionLocked) return
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault()
-      setMode((current) => current === 'focus' ? 'build' : 'focus')
+      selectMode(mode === 'focus' ? 'build' : 'focus', true)
     }
   }
 
   return (
     <header className="global-header">
-      <div className="brand-lockup">
-        <button ref={sidebarTriggerRef} type="button" className="mobile-nav-button icon-button" onClick={onOpenSidebar} aria-label="Open navigation">
-          <Icon name="menu" />
+      <div className="header-left">
+        <div className="brand-lockup">
+          <button ref={sidebarTriggerRef} type="button" className="mobile-nav-button icon-button" onClick={onOpenSidebar} aria-label="Open navigation">
+            <Icon name="menu" />
+          </button>
+          <BrandMark size={30} />
+          <span>Neil Agent</span>
+        </div>
+
+        <button type="button" className="workspace-selector" disabled aria-label="Workspace selector is fixed for this local service">
+          <span>workspace</span><b>/</b><strong>{liveSnapshot?.workspace.name ?? 'Neil-Agent'}</strong><span className="selector-chevron"><Icon name="chevron" size={15} /></span>
         </button>
-        <BrandMark size={30} />
-        <span>Neil Agent</span>
       </div>
 
-      <button type="button" className="workspace-selector" disabled aria-label="Workspace selector is fixed for this local service">
-        <span>workspace</span><b>/</b><strong>{liveSnapshot?.workspace.name ?? 'Neil-Agent'}</strong><span className="selector-chevron"><Icon name="chevron" size={15} /></span>
-      </button>
-
-      <div className="mode-switcher" role="group" aria-label="Fixture work mode" onKeyDown={setModeFromKey}>
-        <button type="button" className={mode === 'focus' ? 'is-active' : ''} onClick={() => setMode('focus')} aria-pressed={mode === 'focus'} disabled={interactionLocked} title={interactionLocked ? 'Mode switching is disabled while this fixture run is active.' : undefined}>Focus</button>
-        <button type="button" className={mode === 'build' ? 'is-active' : ''} onClick={() => setMode('build')} aria-pressed={mode === 'build'} disabled={interactionLocked} title={interactionLocked ? 'Mode switching is disabled while this fixture run is active.' : undefined}>Build</button>
+      <div
+        className="mode-switcher"
+        role="radiogroup"
+        aria-label="Preview work mode"
+        aria-describedby={interactionLocked ? 'mode-lock-reason' : 'mode-preview-reason'}
+        onKeyDown={setModeFromKey}
+      >
+        <button ref={focusModeRef} type="button" role="radio" className={mode === 'focus' ? 'is-active' : ''} onClick={() => selectMode('focus')} aria-checked={mode === 'focus'} aria-disabled={interactionLocked} tabIndex={mode === 'focus' ? 0 : -1}>Focus</button>
+        <button ref={buildModeRef} type="button" role="radio" className={mode === 'build' ? 'is-active' : ''} onClick={() => selectMode('build')} aria-checked={mode === 'build'} aria-disabled={interactionLocked} tabIndex={mode === 'build' ? 0 : -1}>Build</button>
       </div>
+      <span className="sr-only" id="mode-lock-reason">Mode switching is unavailable while a run or approval is active.</span>
+      <span className="sr-only" id="mode-preview-reason">Mode is a local interface preview and does not change tool permissions.</span>
 
-      <div className="header-spacer" />
+      <div className="header-right">
+        <button type="button" className="model-selector" disabled aria-describedby="model-lock-reason">
+          <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
+        </button>
+        <span className="sr-only" id="model-lock-reason">Model selection is fixed when the local Web Workbench starts.</span>
 
-      <label className={`scenario-select ${compact ? 'is-compact' : ''}`} htmlFor={scenarioId}>
-        <span>Preview state</span>
-        <select
-          id={scenarioId}
-          aria-label="Preview state"
-          value={scenario.id}
-          onChange={(event) => onScenarioChange(scenarios.find((item) => item.id === event.target.value) ?? scenarios[0])}
-        >
-          {scenarios.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-        </select>
-      </label>
+        <div className={`run-status tone-${connectionState === 'live' ? 'success' : connectionState === 'offline' ? 'danger' : fixtureTone}`} role="status" aria-live="polite">
+          <span className="status-dot" />
+          <span>{connectionState === 'live' ? `Live · ${liveSnapshot?.run.status ?? 'idle'}` : connectionState === 'offline' ? 'Offline · last known' : connectionState === 'connecting' ? 'Reconnecting locally' : `Fixture · ${fixtureStatusLabel}`}</span>
+        </div>
 
-      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P5 service is running">
-        <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
-      </button>
+        <button ref={reviewTriggerRef} type="button" className="review-mobile-button icon-button" onClick={onOpenReview} aria-label="Open review">
+          <Icon name="check" />
+        </button>
 
-      <div className={`run-status tone-${connectionState === 'live' ? 'success' : connectionState === 'offline' ? 'danger' : scenario.runTone}`}>
-        <span className="status-dot" />
-        <span>{connectionState === 'live' ? `Live · ${liveSnapshot?.run.status ?? 'idle'}` : connectionState === 'offline' ? 'Offline · last known' : connectionState === 'connecting' ? 'Reconnecting locally' : scenario.runLabel}</span>
+        <div className="avatar-button" role="img" aria-label="Local Neil Agent profile">NA</div>
       </div>
-
-      <button ref={reviewTriggerRef} type="button" className="review-mobile-button icon-button" onClick={onOpenReview} aria-label="Open review">
-        <Icon name="check" />
-      </button>
-
-      <div className="avatar-button" aria-label="Local fixture profile">NA</div>
     </header>
+  )
+}
+
+function PreviewBanner({
+  scenario,
+  onScenarioChange,
+  connectionState,
+}: {
+  scenario: Scenario
+  onScenarioChange: (scenario: Scenario) => void
+  connectionState: LiveConnectionState
+}) {
+  const scenarioId = useId()
+  const label = connectionState === 'live'
+    ? 'P6 live Agent'
+    : connectionState === 'connecting'
+      ? 'P6 reconnecting'
+      : connectionState === 'offline'
+        ? 'P6 offline · last known'
+        : 'P0 fixture preview'
+  const detail = connectionState === 'live'
+    ? 'Local realtime execution · bounded Git review · preview-gated tools · no aggregate approval or PTY'
+    : connectionState === 'fixture'
+      ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected'
+      : 'Last-known state is preserved while the local event stream reconnects'
+
+  return (
+    <div className="preview-banner">
+      <div className="preview-message" role="status">
+        <strong>{label}</strong>
+        <span>{detail}</span>
+      </div>
+      {connectionState === 'fixture' ? (
+        <label className="scenario-select" htmlFor={scenarioId}>
+          <span>Preview state</span>
+          <select
+            id={scenarioId}
+            aria-label="Preview state"
+            value={scenario.id}
+            onChange={(event) => onScenarioChange(scenarios.find((item) => item.id === event.target.value) ?? scenarios[0])}
+          >
+            {scenarios.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+        </label>
+      ) : null}
+    </div>
   )
 }
 
@@ -1171,8 +1221,11 @@ function App() {
   const overlayOpen = sidebarOpen || reviewOpen
   const sidebarDrawerMode = viewportWidth <= 1380
   const reviewDrawerMode = viewportWidth < 1024
-  const compact = reviewDrawerMode
-  const interactionLocked = scenario.id === 'running' || scenario.id === 'approval'
+  const interactionLocked = liveSnapshot
+    ? liveSnapshot.run.status === 'running'
+      || liveSnapshot.run.status === 'cancelling'
+      || liveSnapshot.approval?.state === 'pending'
+    : scenario.id === 'running' || scenario.id === 'approval'
 
   useEffect(() => {
     const onResize = () => setViewportWidth(window.innerWidth)
@@ -1262,20 +1315,17 @@ function App() {
       data-output-height={outputCollapsed ? 52 : outputHeight}
     >
       <a className="skip-link" href="#workspace-main">Skip to workspace</a>
-      <div className="preview-banner" role="status">
-        <strong>{connectionState === 'live' ? 'P5 live Agent' : connectionState === 'connecting' ? 'P5 reconnecting' : connectionState === 'offline' ? 'P5 offline · last known' : 'P0 fixture preview'}</strong>
-        <span>{connectionState === 'live' ? 'Local realtime execution · bounded Git review · preview-gated tools · no aggregate approval or PTY' : connectionState === 'fixture' ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected' : 'Last-known state is preserved while the local event stream reconnects'}</span>
-      </div>
+      <PreviewBanner scenario={scenario} onScenarioChange={changeScenario} connectionState={connectionState} />
       <Header
-        scenario={scenario}
-        onScenarioChange={changeScenario}
         onOpenSidebar={() => setSidebarOpen(true)}
         onOpenReview={() => setReviewOpen(true)}
-        compact={compact}
         sidebarTriggerRef={sidebarTriggerRef}
         reviewTriggerRef={reviewTriggerRef}
         liveSnapshot={liveSnapshot}
         connectionState={connectionState}
+        interactionLocked={interactionLocked}
+        fixtureStatusLabel={scenario.label}
+        fixtureTone={scenario.runTone}
       />
       <Sidebar
         open={sidebarOpen}

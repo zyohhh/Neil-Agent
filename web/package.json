@@ -9,8 +9,8 @@
     "lint": "oxlint",
     "typecheck": "tsc -b",
     "test": "vitest run",
-    "e2e": "node scripts/e2e-runner.mjs",
-    "capture:baselines": "node scripts/capture-baselines.mjs",
+    "e2e": "npm run build && node scripts/playwright-runner.mjs",
+    "capture:baselines": "npm run build && node scripts/playwright-runner.mjs --grep @visual --update-snapshots=all",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,12 +1,12 @@
 # Neil Agent Web Workbench 开发文档
 
-> 状态：P5 completed · Release candidate v1.0
+> 状态：P6 completed · Reference-aligned release candidate v1.0
 >
-> 更新时间：2026-08-13
+> 更新时间：2026-08-18
 >
 > 适用范围：Neil-Agent 本地 Web 前端、Web 适配层与相关测试
 >
-> 参考界面：用户提供的 1584 × 992 桌面端设计图
+> 参考界面：用户提供的 [`Expected web UI.png`](<Expected web UI.png>)（1586 × 992）
 
 ## 1. 文档目的
 
@@ -24,7 +24,7 @@
 
 ## 2. 当前仓库基线
 
-Neil-Agent 当前是 Python 3.13、`uv`、Rich 与 Textual 构成的本地 Agent/CLI 项目，尚无浏览器前端，也没有 Node 工具链。
+Neil-Agent 的主运行时仍是 Python 3.13、`uv`、Rich 与 Textual 构成的本地 Agent/CLI；`feature/web-workbench` 已在其上增加 React/TypeScript 源码工具链、Python Web 适配层和随 wheel 分发的生产资源。Web 页面是现有领域能力的受限投影，不替代 CLI/TUI。
 
 已有且应复用的领域能力如下：
 
@@ -749,7 +749,22 @@ Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 
 - 完整威胁模型与安全审查记录；
 - CLI/TUI/非交互回归。
 
-PTY 如要实现，必须作为 P5 之后的独立项目立项，不包含在上述里程碑内。
+### P6：参考图驱动的视觉收口与回归门禁
+
+状态：已于 `feature/web-workbench` 完成。P6 将仓库内的 [`Expected web UI.png`](<Expected web UI.png>) 固化为设计参考，重新校准桌面三栏、居中模式开关、Header 控件组、玻璃面板、Output 和 1440/1280/768/390 px 响应式比例。fixture 场景选择从产品 Header 移入始终可辨认的预览条；实时页面继续明确标注本地 Agent、连接状态和能力边界。
+
+参考图是信息层级和视觉比例基准，不是功能事实来源。P6 明确保留以下安全差异：底部仍称 `Output` 且只读，不称 `Terminal`；审批仍是单工具 `Approve`/`Reject`，不实现聚合 `Approve & Apply`；没有有效版本化费率表时 Cost 仍为 `Unavailable`；Focus/Build 仅是本地界面预览，不改变工具权限；模型和 workspace 仍由本地服务启动配置固定。
+
+本阶段同时完成：
+
+- 修复实时任务表单中未定义的颜色/边框设计令牌，统一 focus、muted 和 fallback 表现；
+- Header 使用 radiogroup 语义与 roving focus，活动 run/审批期间保持可聚焦的禁用原因；
+- Output 的分支、日志和本地清除文案区分 live/fixture，不再呈现命令提示符或 PTY 暗示；
+- fixture 不再展示无作用的 Refresh 控件，实时快照下仍保留显式刷新；
+- Playwright 直接管理 Vite preview，`npm run e2e` 可独立构建并运行五档溢出、抽屉、键盘、axe 和网络边界检查；
+- 四张断点截图现在由 `toHaveScreenshot` 与仓库基线实际比较，`npm run capture:baselines` 是显式审核后更新基线的唯一入口。
+
+P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约，继续继承 P5 威胁模型。PTY 如要实现，必须作为独立项目立项，不包含在 P0–P6 里程碑内。
 
 ## 16. 测试策略
 
@@ -864,7 +879,7 @@ feat(api): add tool approval flow
 7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
 8. 已决：P5 采用 wheel 内嵌生产产物；Vite 开发服务器只用于源码开发，不是发布启动项。
 
-P1–P5 已接入真实 Agent、逐工具审批、Review 和 wheel 分发；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
+P1–P6 已接入真实 Agent、逐工具审批、Review、wheel 分发和参考图回归门禁；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
 
 其中第 1、3、5 项会影响后端边界，必须在接真实 Agent 前确定；其他项可在 fixture 原型评审后决定。
 

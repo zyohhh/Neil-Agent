@@ -1,6 +1,6 @@
 # Web Workbench 安装与本地运维
 
-P5 将生产前端内嵌到 `neil-agent` Python wheel。已安装的 `neil-agent-web` 不需要 Node.js，也不依赖启动时的当前目录中存在 `web/dist`。
+P5 将生产前端内嵌到 `neil-agent` Python wheel；P6 只更新受审视觉资源和前端回归门禁，不改变安装或安全协议。已安装的 `neil-agent-web` 不需要 Node.js，也不依赖启动时的当前目录中存在 `web/dist`。
 
 ## 1. 从源码构建 wheel
 
@@ -68,4 +68,4 @@ uv tool uninstall neil-agent
 - `npm run dev` 是源码开发服务器，不能作为发布安装方式。需要连接真实本地 API 时，以 `uv run neil-agent-web --allow-vite-dev-origin --no-browser` 显式允许固定的 5173 loopback Origin；发布启动不要开启该选项。
 - `npm run build` 生成发布资源；wheel 构建前必须执行。
 - 发布运行只使用 wheel 内的资源，不从 CDN、远程字体、分析服务或仓库外路径加载前端代码。
-- PTY、任意 shell 和聚合 `Approve & Apply` 不属于 P5。
+- PTY、任意 shell 和聚合 `Approve & Apply` 不属于 P0–P6。
