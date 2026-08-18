@@ -1,0 +1,77 @@
+.workbench-fatal {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: #f2f5f4;
+  background:
+    radial-gradient(circle at 50% 12%, rgba(158, 231, 98, 0.11), transparent 36%),
+    linear-gradient(145deg, #161b1e, #0d1113 72%);
+}
+
+.workbench-fatal-card {
+  width: min(560px, 100%);
+  padding: clamp(28px, 6vw, 52px);
+  border: 1px solid rgba(225, 236, 230, 0.2);
+  border-radius: 24px;
+  background: rgba(38, 44, 47, 0.78);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.42);
+  text-align: center;
+}
+
+.workbench-fatal-mark {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  margin: 0 auto 20px;
+  place-items: center;
+  border: 1px solid rgba(158, 231, 98, 0.5);
+  border-radius: 50%;
+  color: #a8ee70;
+  font-size: 28px;
+  box-shadow: 0 0 30px rgba(158, 231, 98, 0.16);
+}
+
+.workbench-fatal-eyebrow {
+  margin: 0 0 8px;
+  color: #a8ee70;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.workbench-fatal-card h1 {
+  margin: 0;
+  font-size: clamp(25px, 5vw, 38px);
+  line-height: 1.15;
+}
+
+.workbench-fatal-card p:not(.workbench-fatal-eyebrow) {
+  margin: 18px auto 24px;
+  color: #bec7c4;
+  line-height: 1.65;
+}
+
+.workbench-fatal-card button {
+  min-width: 190px;
+  min-height: 46px;
+  border: 0;
+  border-radius: 999px;
+  color: #101512;
+  background: #dfe5e2;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.workbench-fatal-card button:focus-visible {
+  outline: 3px solid #a8ee70;
+  outline-offset: 4px;
+}
+
+.workbench-fatal-card small {
+  display: block;
+  margin-top: 16px;
+  color: #8f9a96;
+}

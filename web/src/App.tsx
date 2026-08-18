@@ -2,17 +2,23 @@ import { useEffect, useId, useRef, useState } from 'react'
 import './App.css'
 import {
   fetchLiveDiff,
-  fetchLiveFileTree,
-  fetchLiveSnapshot,
-  refreshLiveSnapshot,
-  reduceWorkbenchEvent,
-  WorkbenchRealtimeClient,
   type LiveConnectionState,
-  type LiveFileNode,
   type LiveGitDiff,
   type LiveRuntimeStep,
   type WorkbenchSnapshotV1,
 } from './protocol'
+import {
+  fixtureChangedFiles,
+  fixtureFiles,
+  fixtureSessions,
+  fixtureTimeline,
+  scenarios,
+  toFileNodes,
+  type FileNode,
+  type Scenario,
+  type TimelineStep,
+} from './fixtures'
+import { useWorkbenchConnection } from './useWorkbenchConnection'
 
 type IconName =
   | 'spark'
@@ -30,260 +36,6 @@ type IconName =
   | 'panel'
   | 'x'
   | 'menu'
-
-type RunState = 'loading' | 'idle' | 'running' | 'approval' | 'completed' | 'failed' | 'cancelled' | 'stale' | 'applied' | 'offline' | 'partial-error' | 'stress'
-type ReviewState = 'empty' | 'checking' | 'approval' | 'passed' | 'failed' | 'stale' | 'applied'
-type StepState = 'pending' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'skipped' | 'cancelled'
-
-interface FileNode {
-  id: string
-  name: string
-  kind: 'folder' | 'file'
-  language?: 'ts' | 'tsx' | 'md'
-  children?: FileNode[]
-}
-
-interface TimelineStep {
-  id: string
-  kind: 'search' | 'read' | 'plan' | 'edit' | 'test' | 'summary'
-  title: string
-  subtitle?: string
-  time: string
-  datetime: string
-  status: StepState
-  body?: 'code' | 'plan' | 'test' | 'summary'
-}
-
-interface Scenario {
-  id: RunState
-  label: string
-  runLabel: string
-  runTone: 'live' | 'warning' | 'success' | 'danger' | 'muted'
-  reviewState: ReviewState
-  reviewLabel: string
-  reviewDetail: string
-  objective: string
-  outputLines: string[]
-  source: 'fixture'
-}
-
-const files: FileNode[] = [
-  {
-    id: 'src',
-    name: 'src/',
-    kind: 'folder',
-    children: [
-      { id: 'agent', name: 'agent.py', kind: 'file' },
-      {
-        id: 'tools',
-        name: 'tools/',
-        kind: 'folder',
-        children: [
-          { id: 'registry', name: 'registry.py', kind: 'file' },
-          { id: 'filesystem', name: 'filesystem.py', kind: 'file' },
-        ],
-      },
-      { id: 'events', name: 'events.py', kind: 'file' },
-      { id: 'projections', name: 'projections.py', kind: 'file' },
-    ],
-  },
-  {
-    id: 'web',
-    name: 'web/',
-    kind: 'folder',
-    children: [
-      { id: 'app', name: 'App.tsx', kind: 'file', language: 'tsx' },
-      { id: 'styles', name: 'App.css', kind: 'file' },
-    ],
-  },
-  {
-    id: 'docs',
-    name: 'docs/',
-    kind: 'folder',
-    children: [
-      {
-        id: 'web-doc',
-        name: 'web-workbench-development.md',
-        kind: 'file',
-        language: 'md',
-      },
-    ],
-  },
-]
-
-const sessions = [
-  { id: 'workbench', title: 'Build web workbench', time: '10:24 AM', active: true },
-  { id: 'provider', title: 'Complete provider runtime', time: 'Yesterday' },
-  { id: 'security', title: 'Review sandbox boundary', time: 'Aug 9' },
-  { id: 'context', title: 'Visualize context budget', time: 'Aug 7' },
-]
-
-const liveFileNodes = (nodes: LiveFileNode[]): FileNode[] => nodes.map((node) => ({
-  id: node.path,
-  name: `${node.name}${node.kind === 'directory' ? '/' : ''}`,
-  kind: node.kind === 'directory' ? 'folder' : 'file',
-  language: node.name.endsWith('.tsx') ? 'tsx' : node.name.endsWith('.md') ? 'md' : undefined,
-  children: node.kind === 'directory' ? liveFileNodes(node.children) : undefined,
-}))
-
-const baseSteps: TimelineStep[] = [
-  {
-    id: 'search',
-    kind: 'search',
-    title: 'Search',
-    subtitle: 'Inspecting the current UI and runtime projection boundaries',
-    time: '10:24 AM',
-    datetime: '2026-08-13T10:24:00+08:00',
-    status: 'succeeded',
-  },
-  {
-    id: 'read',
-    kind: 'read',
-    title: 'Read file',
-    subtitle: 'docs/web-workbench-development.md  •  853 lines',
-    time: '10:24 AM',
-    datetime: '2026-08-13T10:24:30+08:00',
-    status: 'succeeded',
-    body: 'code',
-  },
-  {
-    id: 'plan',
-    kind: 'plan',
-    title: 'Plan',
-    time: '10:25 AM',
-    datetime: '2026-08-13T10:25:00+08:00',
-    status: 'succeeded',
-    body: 'plan',
-  },
-  {
-    id: 'edit',
-    kind: 'edit',
-    title: 'Edit file',
-    subtitle: 'web/src/App.tsx   +428   −0',
-    time: '10:26 AM',
-    datetime: '2026-08-13T10:26:00+08:00',
-    status: 'succeeded',
-  },
-  {
-    id: 'test',
-    kind: 'test',
-    title: 'Test',
-    subtitle: 'npm run test',
-    time: '10:28 AM',
-    datetime: '2026-08-13T10:28:00+08:00',
-    status: 'succeeded',
-    body: 'test',
-  },
-  {
-    id: 'summary',
-    kind: 'summary',
-    title: 'Summary',
-    time: '10:28 AM',
-    datetime: '2026-08-13T10:28:30+08:00',
-    status: 'running',
-    body: 'summary',
-  },
-]
-
-const scenarios: Scenario[] = [
-  {
-    id: 'loading', label: 'Loading', runLabel: 'Preview connecting', runTone: 'muted', reviewState: 'empty', reviewLabel: 'Loading fixture', reviewDetail: 'Synthetic snapshot is preparing', objective: 'Load the deterministic workbench fixture.', outputLines: ['… loading fixture snapshot'], source: 'fixture',
-  },
-  {
-    id: 'idle', label: 'Idle / empty', runLabel: 'Preview idle', runTone: 'muted', reviewState: 'empty', reviewLabel: 'No changes', reviewDetail: 'Fixture is ready for a new preview', objective: 'Explore the empty, idle workbench state.', outputLines: ['› fixture ready', 'No synthetic run is active.'], source: 'fixture',
-  },
-  {
-    id: 'running',
-    label: 'Running',
-    runLabel: 'Preview running',
-    runTone: 'live',
-    reviewState: 'checking',
-    reviewLabel: 'Checks in progress',
-    reviewDetail: '1 of 2 checks complete',
-    objective: 'Build a fixture-driven Web Workbench shell for Neil Agent.',
-    outputLines: [
-      '› npm run test',
-      '✓ component state fixtures passed',
-      '✓ keyboard navigation suite passed',
-      '… visual baseline is rendering',
-    ],
-    source: 'fixture',
-  },
-  {
-    id: 'approval',
-    label: 'Approval',
-    runLabel: 'Preview awaiting approval',
-    runTone: 'warning',
-    reviewState: 'approval',
-    reviewLabel: 'Approval required',
-    reviewDetail: 'One fixture tool is waiting',
-    objective: 'Review the fixture file change before allowing one tool action.',
-    outputLines: [
-      '› fixture: write_file web/src/App.tsx',
-      '✓ preview binding generated',
-      '! waiting for a single-tool decision',
-    ],
-    source: 'fixture',
-  },
-  {
-    id: 'completed',
-    label: 'Completed',
-    runLabel: 'Preview complete',
-    runTone: 'success',
-    reviewState: 'passed',
-    reviewLabel: 'All checks passed',
-    reviewDetail: 'Fixture run completed safely',
-    objective: 'Review the completed P0 fixture and responsive workbench layout.',
-    outputLines: [
-      '› npm run build',
-      '✓ 12 fixture tests passed',
-      '✓ production bundle generated',
-      '› ready for visual review',
-    ],
-    source: 'fixture',
-  },
-  {
-    id: 'failed',
-    label: 'Failed',
-    runLabel: 'Preview failed',
-    runTone: 'danger',
-    reviewState: 'failed',
-    reviewLabel: 'One check failed',
-    reviewDetail: 'Responsive layout fixture needs attention',
-    objective: 'Inspect the failed fixture without applying any real changes.',
-    outputLines: [
-      '› npm run test',
-      '✓ component state fixtures passed',
-      '× mobile drawer focus return failed',
-      '› fixture process exited with code 1',
-    ],
-    source: 'fixture',
-  },
-  {
-    id: 'cancelled', label: 'Cancelled', runLabel: 'Preview cancelled', runTone: 'warning', reviewState: 'stale', reviewLabel: 'Preview cancelled', reviewDetail: 'Synthetic remaining steps were skipped', objective: 'Inspect a cancelled fixture run.', outputLines: ['! fixture cancellation requested', '✓ no real operation was interrupted'], source: 'fixture',
-  },
-  {
-    id: 'stale', label: 'Review stale', runLabel: 'Preview idle', runTone: 'warning', reviewState: 'stale', reviewLabel: 'Review is stale', reviewDetail: 'Fixture changed after its synthetic check', objective: 'Review stale fixture information without approval.', outputLines: ['! fixture revision changed', '› re-check required before a synthetic decision'], source: 'fixture',
-  },
-  {
-    id: 'applied', label: 'Applied', runLabel: 'Preview complete', runTone: 'success', reviewState: 'applied', reviewLabel: 'One fixture tool applied', reviewDetail: 'Not staged or committed', objective: 'Inspect the local applied-state fixture.', outputLines: ['✓ one synthetic tool marked applied', '! no file, Git, or Agent side effect occurred'], source: 'fixture',
-  },
-  {
-    id: 'offline', label: 'Offline / last known', runLabel: 'Preview offline · last known running', runTone: 'danger', reviewState: 'stale', reviewLabel: 'Last-known snapshot', reviewDetail: 'Connection fixture is offline', objective: 'Inspect stale last-known state while the fixture connection is offline.', outputLines: ['× fixture connection unavailable', '! displayed run state is last-known only'], source: 'fixture',
-  },
-  {
-    id: 'partial-error', label: 'Partial error', runLabel: 'Preview degraded', runTone: 'danger', reviewState: 'failed', reviewLabel: 'Review fixture unavailable', reviewDetail: 'Other preview panels remain available', objective: 'Verify the workbench shell survives a partial fixture error.', outputLines: ['× synthetic review projection failed', '✓ workspace fixture remains readable'], source: 'fixture',
-  },
-  {
-    id: 'stress', label: 'Stress / i18n', runLabel: '预览长文本压力场景', runTone: 'live', reviewState: 'checking', reviewLabel: '长文本检查中', reviewDetail: '验证 200% 缩放和超长内容', objective: '验证超长中文目标、超长模型名称、深层路径和代码行不会撑破工作台布局，并保持所有关键状态可读。', outputLines: ['› 验证超长路径 docs/研究项目/上下文断层图/非常长的工作台开发说明.md', '✓ 页面级水平溢出为 0', '… 100+ 条事件由有界 fixture 表示'], source: 'fixture',
-  },
-]
-
-const changedFiles = [
-  { id: 'app', name: 'App.tsx', added: 428, deleted: 0 },
-  { id: 'css', name: 'App.css', added: 612, deleted: 0 },
-  { id: 'fixture', name: 'workbench.ts', added: 184, deleted: 0 },
-]
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -421,7 +173,7 @@ function Sidebar({
   const [selectedSession, setSelectedSession] = useState('workbench')
   const [activeTreeItem, setActiveTreeItem] = useState('src')
   const closeButtonRef = useRef<HTMLButtonElement>(null)
-  const visibleFiles = liveSnapshot ? liveFileNodes(liveSnapshot.files.items) : files
+  const visibleFiles = liveSnapshot ? toFileNodes(liveSnapshot.files.items) : fixtureFiles
   const visibleSessions = liveSnapshot
     ? liveSnapshot.sessions.items.map((session, index) => ({
       id: session.session_id,
@@ -429,7 +181,7 @@ function Sidebar({
       time: new Date(session.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
       active: index === 0,
     }))
-    : sessions
+    : fixtureSessions
 
   useEffect(() => {
     if (liveSnapshot?.sessions.items[0]) setSelectedSession(liveSnapshot.sessions.items[0].session_id)
@@ -586,7 +338,7 @@ function TimelineBody({ type }: { type?: TimelineStep['body'] }) {
 
 function Timeline({ scenario }: { scenario: Scenario }) {
   const [expandedSteps, setExpandedSteps] = useState<string[]>(['read', 'plan', 'test', 'summary'])
-  const steps = baseSteps.map((step) => {
+  const steps = fixtureTimeline.map((step) => {
     if (scenario.id === 'loading') return { ...step, status: 'pending' as const }
     if (scenario.id === 'idle') return { ...step, status: 'skipped' as const }
     if (scenario.id === 'cancelled') {
@@ -722,8 +474,12 @@ function ReviewPanel({
   onRefreshReview: () => void
 }) {
   const [decision, setDecision] = useState<'none' | 'approved' | 'rejected'>('none')
+  const [fixtureReviewRecovered, setFixtureReviewRecovered] = useState(false)
   const [selectedDiff, setSelectedDiff] = useState<LiveGitDiff | null>(null)
   const [diffState, setDiffState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const fixtureReviewUnavailable = !liveSnapshot
+    && scenario.id === 'partial-error'
+    && !fixtureReviewRecovered
   const liveApproval = liveSnapshot?.approval ?? null
   const approvalAvailable = liveSnapshot
     ? Boolean(liveApproval?.state === 'pending' && liveSnapshot.capabilities.can_approve_tool && hasControl)
@@ -737,7 +493,7 @@ function ReviewPanel({
       deleted: file.deletions,
       status: file.status,
     }))
-    : changedFiles.map((file) => ({ ...file, status: null }))
+    : fixtureChangedFiles.map((file) => ({ ...file, status: null }))
   const reviewLabel = liveSnapshot
     ? ({
       empty: 'Working tree clean',
@@ -748,15 +504,24 @@ function ReviewPanel({
       applied: 'One approved tool executed',
       unavailable: 'Review unavailable',
     } as const)[liveSnapshot.review.state]
-    : scenario.reviewLabel
+    : fixtureReviewRecovered && scenario.id === 'partial-error'
+      ? 'Review fixture restored'
+      : scenario.reviewLabel
   const reviewDetail = liveSnapshot
     ? `${liveSnapshot.git.change_count} read-only Git change${liveSnapshot.git.change_count === 1 ? '' : 's'}`
-    : scenario.reviewDetail
+    : fixtureReviewRecovered && scenario.id === 'partial-error'
+      ? 'Local retry restored synthetic panel data'
+      : scenario.reviewDetail
   const reviewState = liveSnapshot
     ? liveSnapshot.review.state === 'unavailable' ? 'failed' : liveSnapshot.review.state
-    : scenario.reviewState
+    : fixtureReviewRecovered && scenario.id === 'partial-error'
+      ? 'stale'
+      : scenario.reviewState
 
-  useEffect(() => setDecision('none'), [scenario.id])
+  useEffect(() => {
+    setDecision('none')
+    setFixtureReviewRecovered(false)
+  }, [scenario.id])
   useEffect(() => {
     setSelectedDiff(null)
     setDiffState('idle')
@@ -764,6 +529,37 @@ function ReviewPanel({
   useEffect(() => {
     if (open && drawerMode) closeButtonRef.current?.focus()
   }, [drawerMode, open])
+
+  if (fixtureReviewUnavailable) {
+    return (
+      <aside
+        className={`review-panel panel ${open ? 'is-open' : ''}`}
+        aria-labelledby="review-heading"
+        aria-hidden={drawerMode && !open ? true : undefined}
+        aria-modal={drawerMode && open ? true : undefined}
+        inert={drawerMode && !open ? true : undefined}
+        role={drawerMode && open ? 'dialog' : undefined}
+        tabIndex={drawerMode ? -1 : 0}
+      >
+        <div className="panel-title-row">
+          <div className="panel-title"><BrandMark size={23} /><h2 id="review-heading">Review</h2></div>
+          <button ref={closeButtonRef} className="icon-button mobile-close" type="button" onClick={onClose} aria-label="Close review">
+            <Icon name="x" />
+          </button>
+        </div>
+        <section className="review-recovery" role="alert" tabIndex={0} aria-labelledby="review-recovery-heading">
+          <span className="recovery-icon" aria-hidden="true"><Icon name="x" size={22} /></span>
+          <p className="eyebrow">Panel unavailable</p>
+          <h3 id="review-recovery-heading">Review fixture could not render</h3>
+          <p>The workspace and Output remain available. No Agent, file, Git, or tool action was attempted.</p>
+          <button type="button" className="recovery-button" onClick={() => setFixtureReviewRecovered(true)}>
+            Retry fixture panel
+          </button>
+          <small>Local preview recovery only · no network request</small>
+        </section>
+      </aside>
+    )
+  }
 
   return (
     <aside
@@ -1093,11 +889,11 @@ function PreviewBanner({
 }) {
   const scenarioId = useId()
   const label = connectionState === 'live'
-    ? 'P6 live Agent'
+    ? 'P7 live Agent'
     : connectionState === 'connecting'
-      ? 'P6 reconnecting'
+      ? 'P7 reconnecting'
       : connectionState === 'offline'
-        ? 'P6 offline · last known'
+        ? 'P7 offline · last known'
         : 'P0 fixture preview'
   const detail = connectionState === 'live'
     ? 'Local realtime execution · bounded Git review · preview-gated tools · no aggregate approval or PTY'
@@ -1211,11 +1007,18 @@ function App() {
   const [outputCollapsed, setOutputCollapsed] = useState(false)
   const [outputHeight, setOutputHeight] = useState(176)
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
-  const [liveSnapshot, setLiveSnapshot] = useState<WorkbenchSnapshotV1 | null>(null)
-  const [connectionState, setConnectionState] = useState<LiveConnectionState>(scenarioFromLocation ? 'fixture' : 'connecting')
-  const [hasControl, setHasControl] = useState(false)
-  const [commandError, setCommandError] = useState<string | null>(null)
-  const realtimeClientRef = useRef<WorkbenchRealtimeClient | null>(null)
+  const {
+    liveSnapshot,
+    connectionState,
+    hasControl,
+    commandError,
+    startTurn,
+    cancelTurn,
+    approveTool,
+    rejectTool,
+    refreshFiles,
+    refreshReview,
+  } = useWorkbenchConnection(Boolean(scenarioFromLocation))
   const sidebarTriggerRef = useRef<HTMLButtonElement | null>(null)
   const reviewTriggerRef = useRef<HTMLButtonElement | null>(null)
   const overlayOpen = sidebarOpen || reviewOpen
@@ -1231,36 +1034,6 @@ function App() {
     const onResize = () => setViewportWidth(window.innerWidth)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [])
-
-  useEffect(() => {
-    let active = true
-    fetchLiveSnapshot()
-      .then((snapshot) => {
-        if (!active) return
-        if (snapshot) {
-          setLiveSnapshot(snapshot)
-          const client = new WorkbenchRealtimeClient({
-            onConnection: setConnectionState,
-            onSnapshot: setLiveSnapshot,
-            onEvent: (event) => setLiveSnapshot((current) => current ? reduceWorkbenchEvent(current, event) : current),
-            onControl: setHasControl,
-            onCommandError: setCommandError,
-          })
-          realtimeClientRef.current = client
-          client.start(snapshot)
-        } else {
-          setConnectionState('fixture')
-        }
-      })
-      .catch(() => {
-        if (active) setConnectionState('offline')
-      })
-    return () => {
-      active = false
-      realtimeClientRef.current?.stop()
-      realtimeClientRef.current = null
-    }
   }, [])
 
   const closeSidebar = () => {
@@ -1333,15 +1106,7 @@ function App() {
         interactionLocked={interactionLocked}
         drawerMode={sidebarDrawerMode}
         liveSnapshot={liveSnapshot}
-        onRefreshFiles={() => {
-          if (!liveSnapshot) return
-          void fetchLiveFileTree(liveSnapshot.files.revision)
-            .then((tree) => {
-              if (tree.unchanged) return
-              setLiveSnapshot((current) => current ? { ...current, files: tree } : current)
-            })
-            .catch(() => setCommandError('File tree refresh unavailable'))
-        }}
+        onRefreshFiles={refreshFiles}
       />
       <div id="workspace-main" className="workspace-cell" tabIndex={-1}>
         <WorkspacePanel
@@ -1349,8 +1114,8 @@ function App() {
           liveSnapshot={liveSnapshot}
           hasControl={hasControl}
           commandError={commandError}
-          onStartTurn={(prompt) => realtimeClientRef.current?.startTurn(prompt)}
-          onCancelTurn={() => realtimeClientRef.current?.cancelTurn()}
+          onStartTurn={startTurn}
+          onCancelTurn={cancelTurn}
         />
       </div>
       <ReviewPanel
@@ -1360,15 +1125,9 @@ function App() {
         drawerMode={reviewDrawerMode}
         liveSnapshot={liveSnapshot}
         hasControl={hasControl}
-        onApproveTool={(requestId) => realtimeClientRef.current?.approveTool(requestId)}
-        onRejectTool={(requestId) => realtimeClientRef.current?.rejectTool(requestId)}
-        onRefreshReview={() => {
-          void refreshLiveSnapshot()
-            .then((snapshot) => {
-              if (snapshot) setLiveSnapshot(snapshot)
-            })
-            .catch(() => setCommandError('Review refresh unavailable'))
-        }}
+        onApproveTool={approveTool}
+        onRejectTool={rejectTool}
+        onRefreshReview={refreshReview}
       />
       <OutputPanel
         scenario={scenario}

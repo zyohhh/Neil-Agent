@@ -70,7 +70,33 @@ describe('WebWorkbenchApp', () => {
     container.remove()
   })
 
-  it('exchanges a launch secret and prepares the P6 realtime workbench', async () => {
+  it('recovers a failed fixture panel locally without a network or tool action', async () => {
+    window.history.replaceState({}, '', '/?scene=partial-error')
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    await act(async () => root.render(<App />))
+
+    expect(document.body.textContent).toContain('Review fixture could not render')
+    expect(document.body.textContent).toContain('No Agent, file, Git, or tool action was attempted')
+    const retryButton = Array.from(document.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('Retry fixture panel'))
+    expect(retryButton).toBeDefined()
+
+    await act(async () => retryButton?.click())
+
+    expect(document.body.textContent).toContain('Review fixture restored')
+    expect(document.body.textContent).toContain('Local retry restored synthetic panel data')
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await act(async () => root.unmount())
+    container.remove()
+    fetchMock.mockRestore()
+  })
+
+  it('exchanges a launch secret and prepares the P7 realtime workbench', async () => {
     window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
     document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
     const fetchMock = vi.spyOn(globalThis, 'fetch')
@@ -89,7 +115,7 @@ describe('WebWorkbenchApp', () => {
       method: 'POST',
       headers: { 'X-Neil-CSRF': 'test-csrf-token' },
     })
-    expect(document.body.textContent).toContain('P6 offline · last known')
+    expect(document.body.textContent).toContain('P7 offline · last known')
     expect(document.body.textContent).toContain('Neil-Agent-Live')
     expect(document.body.textContent).toContain('deepseek-live')
     expect(document.body.textContent).toContain('Run Agent')

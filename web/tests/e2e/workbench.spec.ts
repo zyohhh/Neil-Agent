@@ -94,6 +94,27 @@ test('traps and restores focus for mobile review and navigation drawers', async 
   await expectNoSeriousA11yViolations(page)
 })
 
+test('recovers the partial review fixture without contacting the local API', async ({ page }) => {
+  const apiRequests: string[] = []
+  page.on('request', (request) => {
+    const url = new URL(request.url())
+    if (url.pathname.startsWith('/api/')) apiRequests.push(url.pathname)
+  })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/?scene=partial-error', { waitUntil: 'networkidle' })
+
+  const recovery = page.getByRole('alert')
+  await expect(recovery).toContainText('Review fixture could not render')
+  await expect(recovery).toContainText('No Agent, file, Git, or tool action was attempted')
+  await expectNoSeriousA11yViolations(page)
+
+  await page.getByRole('button', { name: 'Retry fixture panel' }).click()
+  await expect(page.getByText('Review fixture restored')).toBeVisible()
+  await expect(page.getByText('Local retry restored synthetic panel data')).toBeVisible()
+  expect(apiRequests).toEqual([])
+})
+
 test('@visual matches the approved P6 fixture baselines', async ({ page }) => {
   for (const viewport of checkedViewports.slice(0, 4)) {
     await page.setViewportSize(viewport)

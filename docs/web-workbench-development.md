@@ -1,6 +1,6 @@
 # Neil Agent Web Workbench 开发文档
 
-> 状态：P6 completed · Reference-aligned release candidate v1.0
+> 状态：P7 completed · Resilient frontend architecture v1.1
 >
 > 更新时间：2026-08-18
 >
@@ -417,17 +417,12 @@ Neil-Agent/
 │  └─ ...                       # 现有 Agent 领域代码
 ├─ web/
 │  ├─ src/
-│  │  ├─ app/
-│  │  ├─ components/
-│  │  ├─ features/
-│  │  │  ├─ workspace/
-│  │  │  ├─ sessions/
-│  │  │  ├─ timeline/
-│  │  │  ├─ review/
-│  │  │  └─ output/
-│  │  ├─ protocol/
-│  │  ├─ styles/
-│  │  └─ test/
+│  │  ├─ App.tsx                       # 页面区域和抽屉的组合层
+│  │  ├─ fixtures.ts                  # 确定性场景、文件、会话和时间线
+│  │  ├─ protocol.ts                  # 版本化 DTO、HTTP 与 WebSocket 客户端
+│  │  ├─ useWorkbenchConnection.ts    # 快照、实时连接和命令编排
+│  │  ├─ WorkbenchErrorBoundary.tsx   # 顶层安全恢复边界
+│  │  └─ *.test.tsx                   # 组件与恢复行为测试
 │  ├─ package.json
 │  ├─ tsconfig.json
 │  └─ vite.config.ts
@@ -764,7 +759,22 @@ Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 
 - Playwright 直接管理 Vite preview，`npm run e2e` 可独立构建并运行五档溢出、抽屉、键盘、axe 和网络边界检查；
 - 四张断点截图现在由 `toHaveScreenshot` 与仓库基线实际比较，`npm run capture:baselines` 是显式审核后更新基线的唯一入口。
 
-P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约，继续继承 P5 威胁模型。PTY 如要实现，必须作为独立项目立项，不包含在 P0–P6 里程碑内。
+P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约，继续继承 P5 威胁模型。PTY 如要实现，必须作为独立项目立项，不包含在 P0–P7 里程碑内。
+
+### P7：前端架构拆分与故障恢复
+
+状态：已于 `feature/web-workbench` 完成。P7 不增加新的 Agent 权限或产品开关，而是把 P6 已验证的工作台变成更容易维护、能够安全降级的前端架构。确定性 fixture、实时连接生命周期与页面组合不再全部堆叠在 `App.tsx`：fixture 数据和类型集中在 `fixtures.ts`，快照获取、WebSocket 客户端生命周期、命令和只读刷新集中在 `useWorkbenchConnection.ts`，页面组件只消费稳定状态与回调。
+
+顶层 `WorkbenchErrorBoundary` 在未预期的 React 渲染错误发生时停止继续渲染，显示可聚焦的安全恢复页面；它不在界面中回显异常、工具参数或运行正文，也不会声称 Agent、文件、Git 或待审批工具已改变。`partial-error` fixture 现在具有真实的局部降级：Review 可独立显示错误说明，Workspace 与 Output 保持可用，用户可执行一次仅更新本地 fixture 状态的重试；该操作不请求 API、不发送 WebSocket 命令，也不触发工具。
+
+本阶段同时完成：
+
+- 保持 P6 页面布局、视觉令牌、四张断点截图和全部安全差异不变；
+- 为顶层边界增加异常正文不泄漏和恢复按钮自动聚焦测试；
+- 为局部 Review 故障增加本地恢复、零 API 请求和 axe 回归；
+- 继续用已有实时快照测试覆盖 bootstrap、连接初始化和有界 Git diff，证明职责拆分未改变协议行为。
+
+P7 不修改 Python DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约。Focus/Build 权限、运行时模型切换、会话恢复和 PTY 仍需独立产品决策，不能通过前端恢复机制间接实现。
 
 ## 16. 测试策略
 
@@ -879,7 +889,7 @@ feat(api): add tool approval flow
 7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
 8. 已决：P5 采用 wheel 内嵌生产产物；Vite 开发服务器只用于源码开发，不是发布启动项。
 
-P1–P6 已接入真实 Agent、逐工具审批、Review、wheel 分发和参考图回归门禁；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
+P1–P7 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁和前端故障恢复；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
 
 其中第 1、3、5 项会影响后端边界，必须在接真实 Agent 前确定；其他项可在 fixture 原型评审后决定。
 
