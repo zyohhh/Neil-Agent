@@ -324,7 +324,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 
 function BrandMark({ size = 28 }: { size?: number }) {
   return (
-    <span className="brand-mark" style={{ width: size, height: size }} aria-hidden="true">
+    <span className={`brand-mark brand-mark-${size}`} aria-hidden="true">
       <Icon name="spark" size={size} />
     </span>
   )
@@ -350,7 +350,7 @@ function FileTreeNode({
         <button
           type="button"
           className="tree-row"
-          style={{ '--tree-level': level } as React.CSSProperties}
+          data-level={Math.min(level, 4)}
           role="treeitem"
           data-tree-id={node.id}
           aria-expanded={expanded}
@@ -387,7 +387,7 @@ function FileTreeNode({
       <button
         type="button"
         className="tree-row tree-file"
-        style={{ '--tree-level': level } as React.CSSProperties}
+        data-level={Math.min(level, 4)}
         role="treeitem"
         data-tree-id={node.id}
         tabIndex={activeId === node.id ? 0 : -1}
@@ -690,7 +690,7 @@ function ContextGauge({ liveSnapshot }: { liveSnapshot: WorkbenchSnapshotV1 | nu
     <div className="context-gauge" role="progressbar" aria-label={hasLiveUsage ? 'Last server-reported token usage' : liveSnapshot ? 'Context usage unavailable' : 'Fixture context usage'} aria-valuemin={0} aria-valuemax={progressMax} aria-valuenow={hasLiveUsage || !liveSnapshot ? totalTokens : undefined}>
       <svg viewBox="0 0 160 94" aria-hidden="true">
         <path className="gauge-track" d="M18 80a62 62 0 0 1 124 0" pathLength="100" />
-        <path className="gauge-value" d="M18 80a62 62 0 0 1 124 0" pathLength="100" style={{ strokeDasharray: `${progressPercent} 100` }} />
+        <path className="gauge-value" d="M18 80a62 62 0 0 1 124 0" pathLength="100" strokeDasharray={`${progressPercent} 100`} />
       </svg>
       <span>
         <strong>{hasLiveUsage ? totalTokens.toLocaleString() : liveSnapshot ? 'Unavailable' : '142K'}</strong>
@@ -925,7 +925,11 @@ function OutputPanel({
 
   useEffect(() => setCleared(false), [scenario.id])
 
-  const updateHeight = (nextHeight: number) => onHeightChange(Math.max(128, Math.min(window.innerHeight * 0.45, nextHeight)))
+  const outputMaximum = Math.max(128, Math.min(720, Math.floor((window.innerHeight * 0.45) / 16) * 16))
+  const updateHeight = (nextHeight: number) => {
+    const snapped = Math.round(nextHeight / 16) * 16
+    onHeightChange(Math.max(128, Math.min(outputMaximum, snapped)))
+  }
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -953,7 +957,7 @@ function OutputPanel({
           aria-label="Resize fixture output"
           aria-orientation="horizontal"
           aria-valuemin={128}
-          aria-valuemax={Math.round(window.innerHeight * 0.45)}
+          aria-valuemax={outputMaximum}
           aria-valuenow={Math.round(height)}
           tabIndex={0}
           onPointerDown={startResize}
@@ -961,7 +965,7 @@ function OutputPanel({
             if (event.key === 'ArrowUp') updateHeight(height + 16)
             if (event.key === 'ArrowDown') updateHeight(height - 16)
             if (event.key === 'Home') updateHeight(128)
-            if (event.key === 'End') updateHeight(window.innerHeight * 0.45)
+            if (event.key === 'End') updateHeight(outputMaximum)
           }}
         />
       ) : null}
@@ -976,7 +980,7 @@ function OutputPanel({
           <span>feature/web-workbench</span>
           <span className="status-dot" />
           <button type="button" className="icon-button" aria-label="Clear fixture output" onClick={() => setCleared(true)}><Icon name="x" size={16} /></button>
-          <button type="button" className="icon-button" onClick={() => updateHeight(300)} aria-label="Expand output"><Icon name="plus" size={17} /></button>
+          <button type="button" className="icon-button" onClick={() => updateHeight(304)} aria-label="Expand output"><Icon name="plus" size={17} /></button>
         </div>
       </div>
       {!collapsed ? (
@@ -1056,7 +1060,7 @@ function Header({
         </select>
       </label>
 
-      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P4 service is running">
+      <button type="button" className="model-selector" disabled title="Model switching is disabled while this P5 service is running">
         <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
       </button>
 
@@ -1155,7 +1159,7 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
   const [outputCollapsed, setOutputCollapsed] = useState(false)
-  const [outputHeight, setOutputHeight] = useState(174)
+  const [outputHeight, setOutputHeight] = useState(176)
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const [liveSnapshot, setLiveSnapshot] = useState<WorkbenchSnapshotV1 | null>(null)
   const [connectionState, setConnectionState] = useState<LiveConnectionState>(scenarioFromLocation ? 'fixture' : 'connecting')
@@ -1255,15 +1259,11 @@ function App() {
   return (
     <div
       className="app-shell"
-      style={{
-        '--output-height': `${outputCollapsed ? 52 : outputHeight}px`,
-        '--header-height': viewportWidth <= 767 ? '56px' : '64px',
-        '--banner-height': viewportWidth <= 767 ? '30px' : '28px',
-      } as React.CSSProperties}
+      data-output-height={outputCollapsed ? 52 : outputHeight}
     >
       <a className="skip-link" href="#workspace-main">Skip to workspace</a>
       <div className="preview-banner" role="status">
-        <strong>{connectionState === 'live' ? 'P4 live Agent' : connectionState === 'connecting' ? 'P4 reconnecting' : connectionState === 'offline' ? 'P4 offline · last known' : 'P0 fixture preview'}</strong>
+        <strong>{connectionState === 'live' ? 'P5 live Agent' : connectionState === 'connecting' ? 'P5 reconnecting' : connectionState === 'offline' ? 'P5 offline · last known' : 'P0 fixture preview'}</strong>
         <span>{connectionState === 'live' ? 'Local realtime execution · bounded Git review · preview-gated tools · no aggregate approval or PTY' : connectionState === 'fixture' ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected' : 'Last-known state is preserved while the local event stream reconnects'}</span>
       </div>
       <Header

@@ -196,6 +196,12 @@ const getBootstrapSecret = () => {
   return secret
 }
 
+const getCookie = (name: string) => document.cookie
+  .split(';')
+  .map((part) => part.trim())
+  .find((part) => part.startsWith(`${name}=`))
+  ?.slice(name.length + 1)
+
 let liveSnapshotRequest: Promise<WorkbenchSnapshotV1 | null> | null = null
 
 const requestSnapshot = async (exchangeBootstrap: boolean): Promise<WorkbenchSnapshotV1 | null> => {
@@ -318,7 +324,14 @@ export class WorkbenchRealtimeClient {
   private async connect() {
     if (this.stopped) return
     this.handlers.onConnection('connecting')
-    const ticketResponse = await fetch('/api/v1/ws-ticket', { credentials: 'include', cache: 'no-store' })
+    const csrfToken = getCookie('neil_workbench_csrf')
+    if (!csrfToken) throw new Error('Realtime CSRF token unavailable')
+    const ticketResponse = await fetch('/api/v1/ws-ticket', {
+      method: 'POST',
+      headers: { 'X-Neil-CSRF': csrfToken },
+      credentials: 'include',
+      cache: 'no-store',
+    })
     if (!ticketResponse.ok) throw new Error('Realtime ticket unavailable')
     const ticketPayload = await ticketResponse.json() as { ticket: string }
     const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'

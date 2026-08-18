@@ -28,6 +28,7 @@ const snapshot = {
 describe('WebWorkbenchApp', () => {
   beforeEach(() => {
     resetLiveSnapshotRequestForTests()
+    document.cookie = 'neil_workbench_csrf=; Max-Age=0; Path=/'
     window.history.replaceState({}, '', '/?scene=running')
   })
 
@@ -67,8 +68,9 @@ describe('WebWorkbenchApp', () => {
     container.remove()
   })
 
-  it('exchanges a launch secret and prepares the P4 realtime workbench', async () => {
+  it('exchanges a launch secret and prepares the P5 realtime workbench', async () => {
     window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
+    document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(snapshot), { status: 200, headers: { 'Content-Type': 'application/json' } }))
@@ -81,7 +83,11 @@ describe('WebWorkbenchApp', () => {
     await act(async () => Promise.resolve())
 
     expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(document.body.textContent).toContain('P4 offline · last known')
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
+      method: 'POST',
+      headers: { 'X-Neil-CSRF': 'test-csrf-token' },
+    })
+    expect(document.body.textContent).toContain('P5 offline · last known')
     expect(document.body.textContent).toContain('Neil-Agent-Live')
     expect(document.body.textContent).toContain('deepseek-live')
     expect(document.body.textContent).toContain('Run Agent')
@@ -137,6 +143,7 @@ describe('WebWorkbenchApp', () => {
 
   it('loads one bounded live Git diff from a selected changed file', async () => {
     window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
+    document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
     const diff = {
       path: 'src/live.py',
       previous_path: null,

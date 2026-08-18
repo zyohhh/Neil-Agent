@@ -1,6 +1,6 @@
 # Neil Agent Web Workbench 开发文档
 
-> 状态：P0 implemented · Draft v0.2
+> 状态：P5 completed · Release candidate v1.0
 >
 > 更新时间：2026-08-13
 >
@@ -735,6 +735,12 @@ Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 
 
 ### P5：打包与安全加固
 
+状态：已于 `feature/web-workbench` 完成。Vite 生产产物现在写入 Python 包内并生成确定性的 SHA-256 资源清单；`neil-agent-web` 从安装位置解析资源，不再依赖仓库当前目录或 `web/dist`。服务创建前拒绝资源缺失、额外文件、链接、路径逃逸或哈希不符；HTML/API 保持 no-store，内容哈希 JS/CSS 使用 immutable 缓存，避免升级时新旧资源错配。
+
+启动器先验证资源和端口，再生成 bootstrap，并只在自己的 Uvicorn 实例实际取得 loopback 端口后打开浏览器。自定义端口会生成对应的精确 Origin allowlist；端口冲突、资源损坏或配置错误均不会把 secret 投递给其他进程。前端已移除 inline style，CSP 不再需要 `unsafe-inline`。所有非安全 HTTP 方法要求可信 Origin；WebSocket ticket 改为 POST，并同时要求 SameSite CSRF cookie、`X-Neil-CSRF` 和服务端 session 绑定。WS 帧/消息限制为 64 KiB，session/ticket 存储并发操作已串行化。
+
+完整威胁模型与残余风险见 [`web-workbench-security-review.md`](web-workbench-security-review.md)，Windows 构建、安装、启动、停止、冲突、升级、回退和卸载见 [`web-workbench-operations.md`](web-workbench-operations.md)。P5 验证包含资源篡改、Origin/Host/CSRF/bootstrap/ticket、超大消息、并发交换、端口占用、启动后浏览器投递、wheel 内容和隔离安装，以及既有 CLI/TUI/非交互全量回归。
+
 交付：
 
 - 前端生产产物随 Python 包分发；
@@ -856,9 +862,9 @@ feat(api): add tool approval flow
 5. 模型切换是否由 Web 进程独立拥有，还是沿用启动时环境配置？
 6. 质量检查输出允许显示多少正文、保留多久？
 7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
-8. 前端产物采用 wheel 内嵌，还是开发期先作为独立启动项？
+8. 已决：P5 采用 wheel 内嵌生产产物；Vite 开发服务器只用于源码开发，不是发布启动项。
 
-P0 只使用 fixture，尚未接入模型切换或真实 Agent。进入 P1 前需明确 Provider 提交在目标远端分支中的合并关系，避免 Web API 在未稳定的 Provider 所有权之上实现。
+P1–P5 已接入真实 Agent、逐工具审批、Review 和 wheel 分发；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
 
 其中第 1、3、5 项会影响后端边界，必须在接真实 Agent 前确定；其他项可在 fixture 原型评审后决定。
 

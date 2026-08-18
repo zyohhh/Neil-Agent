@@ -158,7 +158,7 @@ class ClientCommand(BaseModel):
     command_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     expected_revision: int = Field(ge=0)
     command: CommandName
-    payload: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict, max_length=8)
 
 
 class CommandError(Exception):

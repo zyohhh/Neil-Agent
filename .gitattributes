@@ -1,0 +1,2 @@
+# Packaged frontend files are covered by byte-exact SHA-256 hashes.
+/src/neil_agent/web/static/** -text

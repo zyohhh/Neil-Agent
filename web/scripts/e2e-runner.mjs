@@ -80,7 +80,7 @@ try {
     variable: getComputedStyle(element).getPropertyValue('--output-height'),
   }))
   assert(
-    expandedLayout.variable.trim() === '300px' && expandedLayout.row !== initialLayout.row,
+    expandedLayout.variable.trim() === '304px' && expandedLayout.row !== initialLayout.row,
     `Expanding Output did not resize the parent layout row (${JSON.stringify({ initialLayout, expandedLayout })}).`,
   )
   await page.getByRole('button', { name: 'Output fixture', exact: true }).click()

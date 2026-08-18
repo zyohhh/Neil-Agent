@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -12,6 +13,7 @@ from threading import Event
 from typing import Any
 
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from neil_agent.config import Settings
@@ -208,6 +210,7 @@ def _authenticate(client: TestClient) -> None:
     assert response.status_code == 204
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=strict" in response.headers["set-cookie"]
+    assert client.cookies.get("neil_workbench_csrf")
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -276,7 +279,47 @@ def test_rejects_untrusted_host_origin_and_all_write_routes(tmp_path: Path) -> N
 
     assert bad_host.status_code == 400
     assert bad_origin.status_code == 403
-    assert no_route.status_code == 405
+    assert no_route.status_code == 403
+
+
+def test_security_headers_and_state_changes_require_origin_and_csrf(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+
+    health = client.get("/api/v1/health")
+    missing_origin = client.post(
+        "/api/v1/bootstrap", headers={"X-Neil-Bootstrap": BOOTSTRAP}
+    )
+    _authenticate(client)
+    csrf = client.cookies.get("neil_workbench_csrf")
+    assert csrf is not None
+    missing_ticket_origin = client.post(
+        "/api/v1/ws-ticket", headers={"X-Neil-CSRF": csrf}
+    )
+    missing_csrf = client.post(
+        "/api/v1/ws-ticket", headers={"Origin": "http://127.0.0.1:5173"}
+    )
+    wrong_csrf = client.post(
+        "/api/v1/ws-ticket",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "X-Neil-CSRF": "wrong-token-that-cannot-match",
+        },
+    )
+    get_ticket = client.get("/api/v1/ws-ticket")
+
+    assert missing_origin.status_code == 403
+    assert missing_ticket_origin.status_code == 403
+    assert missing_csrf.status_code == 403
+    assert wrong_csrf.status_code == 403
+    assert get_ticket.status_code == 405
+    assert "'unsafe-inline'" not in health.headers["content-security-policy"]
+    assert "default-src 'none'" in health.headers["content-security-policy"]
+    assert health.headers["x-frame-options"] == "DENY"
+    assert health.headers["cross-origin-opener-policy"] == "same-origin"
+    assert health.headers["cross-origin-resource-policy"] == "same-origin"
+    assert health.headers["referrer-policy"] == "no-referrer"
 
 
 def test_snapshot_projects_saved_metadata_without_message_or_quality_bodies(
@@ -564,7 +607,7 @@ def test_bootstrap_and_session_expiry_fail_closed() -> None:
 
     bootstrap_store = BootstrapSessionStore(BOOTSTRAP, clock=clock)
 
-    now += timedelta(minutes=3)
+    now += timedelta(minutes=2)
 
     assert bootstrap_store.exchange(BOOTSTRAP) is None
 
@@ -574,13 +617,43 @@ def test_bootstrap_and_session_expiry_fail_closed() -> None:
     assert session is not None
     assert session_store.validate(session.token) is True
 
-    now += timedelta(hours=9)
+    now += timedelta(hours=8)
 
     assert session_store.validate(session.token) is False
 
 
+def test_bootstrap_exchange_is_atomic_and_csrf_and_ticket_expire() -> None:
+    now = NOW
+
+    def clock() -> datetime:
+        return now
+
+    store = BootstrapSessionStore(BOOTSTRAP, clock=clock)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        sessions = list(executor.map(store.exchange, [BOOTSTRAP] * 8))
+    accepted = [session for session in sessions if session is not None]
+    assert len(accepted) == 1
+    session = accepted[0]
+    assert store.validate_csrf(session.token, session.csrf_token) is True
+    assert store.validate_csrf(session.token, "wrong") is False
+    ticket = store.issue_ws_ticket(session.token)
+    assert ticket is not None
+
+    now += timedelta(seconds=30)
+
+    assert store.consume_ws_ticket(ticket.token) is False
+
+
 def _ticket(client: TestClient) -> str:
-    response = client.get("/api/v1/ws-ticket")
+    csrf = client.cookies.get("neil_workbench_csrf")
+    assert csrf is not None
+    response = client.post(
+        "/api/v1/ws-ticket",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "X-Neil-CSRF": csrf,
+        },
+    )
     assert response.status_code == 200
     return str(response.json()["ticket"])
 
@@ -634,12 +707,44 @@ def test_ws_ticket_is_single_use_and_origin_is_required(tmp_path: Path) -> None:
     except WebSocketDisconnect as error:
         assert error.code == 4401
 
+    third = _ticket(client)
+    try:
+        with client.websocket_connect(
+            f"/api/v1/events?ticket={third}&after=0",
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                "Host": "evil.example",
+            },
+        ):
+            raise AssertionError("untrusted WebSocket Host unexpectedly connected")
+    except WebSocketDenialResponse as error:
+        assert error.status_code == 400
+
     second = _ticket(client)
     try:
         with client.websocket_connect(f"/api/v1/events?ticket={second}&after=0"):
             raise AssertionError("origin-less websocket unexpectedly connected")
     except WebSocketDisconnect as error:
         assert error.code == 4401
+
+
+def test_websocket_rejects_oversized_commands(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    _authenticate(client)
+
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        assert socket.receive_json()["message_type"] == "connected"
+        socket.send_text("x" * (64 * 1024 + 1))
+        error = socket.receive_json()
+        assert error["code"] == "message_too_large"
+        try:
+            socket.receive_json()
+            raise AssertionError("oversized WebSocket command remained connected")
+        except WebSocketDisconnect as disconnect:
+            assert disconnect.code == 4409
 
 
 def test_realtime_start_stream_completion_and_idempotency(tmp_path: Path) -> None:
