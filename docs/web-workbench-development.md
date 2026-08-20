@@ -405,15 +405,17 @@ FastAPI 支持 WebSocket 收发 JSON、依赖注入和 TestClient 测试。参�
 ```text
 Neil-Agent/
 ├─ src/neil_agent/
+│  ├─ host_runtime.py           # CLI / 非交互 / Web 共享工具装配与 HostProfile
 │  ├─ web/
 │  │  ├─ __init__.py
 │  │  ├─ app.py                 # 应用工厂、路由装配、静态资源挂载
 │  │  ├─ controller.py          # 单活动 turn、控制租约、取消与审批编排
 │  │  ├─ dto.py                 # 版本化 Pydantic DTO
-│  │  ├─ projections.py         # 领域对象 -> Web DTO
-│  │  ├─ protocol.py            # 命令、事件 envelope 和错误码
-│  │  ├─ security.py            # Origin、bootstrap token、host/路径校验
-│  │  └─ resources.py           # 文件树、Git review 的只读适配
+│  │  ├─ service.py             # 只读快照、Git review、文件树与会话列表投影
+│  │  ├─ security.py            # Origin、bootstrap token、会话与 CSRF
+│  │  ├─ assets.py              # 静态 bundle SHA-256 校验
+│  │  ├─ pricing.py             # 可选 token 成本估算
+│  │  └─ runtime.py             # neil-agent-web loopback 启动器
 │  └─ ...                       # 现有 Agent 领域代码
 ├─ web/
 │  ├─ src/
@@ -423,13 +425,15 @@ Neil-Agent/
 │  │  ├─ useWorkbenchConnection.ts    # 快照、实时连接和命令编排
 │  │  ├─ WorkbenchErrorBoundary.tsx   # 顶层安全恢复边界
 │  │  └─ *.test.tsx                   # 组件与恢复行为测试
+│  ├─ tests/e2e/                      # Playwright E2E 与视觉回归
 │  ├─ package.json
 │  ├─ tsconfig.json
 │  └─ vite.config.ts
-├─ tests/web/
-├─ tests/e2e/
+├─ tests/test_web_workbench.py
 └─ docs/web-workbench-development.md
 ```
+
+协议 envelope 与事件名称的权威实现分别在 `web/src/protocol.ts` 与 `web/controller.py`；若本文档与代码不一致，以代码与 `tests/test_web_workbench.py` 为准。
 
 生产构建可将 `web/dist` 打包为 Python wheel 资源，但开发阶段保持前后端进程分离和显式代理配置。
 
@@ -470,7 +474,7 @@ Neil-Agent/
 | `GET` | `/api/v1/files/tree` | 工作区内有界文件树 | 无 |
 | `GET` | `/api/v1/review` | Git 状态、文件统计和检查摘要 | 无 |
 | `GET` | `/api/v1/review/diff?path=...` | 单文件有界只读 diff | 无 |
-| `GET` | `/api/v1/ws-ticket` | 生成短时、单次 WebSocket ticket | 创建临时凭据 |
+| `POST` | `/api/v1/ws-ticket` | 生成短时、单次 WebSocket ticket（需会话 cookie 与 `X-Neil-CSRF`） | 创建临时凭据 |
 | `WS` | `/api/v1/events?ticket=...` | 命令和实时事件 | 取决于命令 |
 
 不要把长期 secret 放在 URL 查询参数中。WebSocket ticket 必须短时、单次消费，且服务端日志不记录其原文。
@@ -530,31 +534,22 @@ ping
 
 ### 11.5 服务端事件
 
-建议事件类型：
+当前实现使用下列事件类型（与早期设计草案中的 `run_started`、`command_accepted` 等名称不同；前端 `protocol.ts` 与 `controller.py` 保持一致）：
 
 ```text
 snapshot_invalidated
 control_changed
-command_accepted
-command_rejected
-run_started
-run_status_changed
-timeline_step_upserted
+command_result
+run_state
 assistant_text_delta
-activity_added
+activity
+runtime_step
 approval_requested
 approval_resolved
-review_updated
-context_updated
-session_updated
-output_appended
-run_finished
-protocol_error
+service_closing
 ```
 
-`assistant_text_delta` 和 `output_appended` 必须带所属 `run_id`、流 ID、offset 或 chunk sequence，以便检测缺块。发现间隙后前端停止拼接并重新获取快照。
-
-每个命令先返回带原始 `command_id` 的 `command_accepted` 或 `command_rejected`；接受只表示通过校验并进入处理，不代表副作用已经成功。最终结果由对应的领域事件表达。
+`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期。`select_session` 与 `set_model_for_next_turn` 尚未实现。
 
 ### 11.6 重连流程
 

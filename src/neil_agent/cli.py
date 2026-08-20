@@ -25,6 +25,7 @@ from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import AuditError, NeilAgentError, SessionError, ToolError
 from .events import EventBus
+from .host_runtime import HostMode, build_host_runtime, windows_sandbox_backend
 from .hooks import LifecycleHooks
 from .instructions import (
     ProjectInstructionManager,
@@ -53,8 +54,8 @@ from .session import (
     normalize_session_title,
 )
 from .task import TaskTracker
-from .sandbox import SandboxCapabilities, WindowsSandboxBackend
-from .tools import FileSystemTools, SandboxCommandTools, ShellTools, ToolRegistry
+from .sandbox import SandboxCapabilities
+from .tools import FileSystemTools, ShellTools, ToolRegistry
 
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 CLEAR_COMMANDS = {"clear", "/clear"}
@@ -293,50 +294,31 @@ def run(console: Console) -> None:
         _show_config_error(console, error)
         raise SystemExit(1) from None
 
-    registry = ToolRegistry()
+    renderer = TerminalRenderer(console)
     try:
-        filesystem_tools = FileSystemTools(settings.workspace_root)
+        host_runtime = build_host_runtime(
+            settings,
+            mode=HostMode.CLI,
+            task_change_handler=renderer.show_plan,
+        )
     except ValueError as error:
         console.print(f"[bold red]工作区配置错误：[/bold red]{error}")
         raise SystemExit(1) from None
-    filesystem_tools.register(registry)
-    lifecycle_hooks: LifecycleHooks | None = None
-    audit_sink: JsonlAuditSink | None = None
-    if settings.audit_log_enabled:
-        try:
-            lifecycle_hooks = LifecycleHooks()
-            audit_sink = JsonlAuditSink(
-                filesystem_tools.root,
-                max_bytes=settings.audit_log_max_bytes,
-            )
-            audit_sink.register(lifecycle_hooks)
-        except AuditError as error:
-            console.print(f"[bold red]审计日志配置错误：[/bold red]{error}")
-            raise SystemExit(1) from None
-    instruction_target = _instruction_target(filesystem_tools.root)
-    instruction_manager = ProjectInstructionManager(
-        filesystem_tools.root,
-        instruction_target,
-    )
+    except AuditError as error:
+        console.print(f"[bold red]审计日志配置错误：[/bold red]{error}")
+        raise SystemExit(1) from None
+    filesystem_tools = host_runtime.filesystem
+    shell_tools = host_runtime.shell
+    registry = host_runtime.registry
+    lifecycle_hooks = host_runtime.hooks
+    audit_sink = host_runtime.audit_sink
+    instruction_manager = host_runtime.instruction_manager
     project_instructions = instruction_manager.current
     session_store = SessionStore(filesystem_tools.root)
     current_session = session_store.new_session()
-    shell_tools = ShellTools(
-        settings.workspace_root,
-        timeout=settings.command_timeout,
-        max_output_chars=settings.max_command_output_chars,
-    )
-    shell_tools.register(registry)
-    if settings.sandbox_backend == "windows-sandbox":
-        SandboxCommandTools(
-            filesystem_tools.root,
-            _windows_sandbox_backend(settings),
-            timeout_seconds=settings.command_timeout,
-            max_output_bytes=settings.max_command_output_chars,
-        ).register_if_ready(registry)
-    renderer = TerminalRenderer(console)
-    task_tracker = TaskTracker(change_handler=renderer.show_plan)
-    task_tracker.register(registry)
+    task_tracker = host_runtime.task_tracker
+    if task_tracker is None:
+        raise RuntimeError("CLI host runtime must include a task tracker.")
 
     try:
         llm = cast(
@@ -961,19 +943,11 @@ def _observe_security(
         sandbox_backend=settings.sandbox_backend,
         audit_enabled=settings.audit_log_enabled,
         sandbox_probe=(
-            _windows_sandbox_backend(settings).probe
+            windows_sandbox_backend(settings).probe
             if settings.sandbox_backend == "windows-sandbox"
             else None
         ),
         audit_probe=audit_probe,
-    )
-
-
-def _windows_sandbox_backend(settings: Settings) -> WindowsSandboxBackend:
-    return WindowsSandboxBackend(
-        certification_root=settings.sandbox_certification_root,
-        trusted_reviewer=settings.sandbox_trusted_reviewer,
-        trusted_review_sha256=settings.sandbox_trusted_review_sha256,
     )
 
 
@@ -1461,17 +1435,6 @@ def _initialize_instructions(
             "请修复提示的问题后运行 /reload-instructions。[/yellow]"
         )
     return reloaded
-
-
-def _instruction_target(workspace_root: Path) -> Path:
-    """Use the launch directory when it is safely inside the configured workspace."""
-
-    try:
-        current = Path.cwd().resolve(strict=True)
-        current.relative_to(workspace_root)
-    except (OSError, ValueError):
-        return workspace_root
-    return current if current.is_dir() else workspace_root
 
 
 def _compact_session(

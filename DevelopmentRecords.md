@@ -1311,3 +1311,28 @@ CLI 展示修改预览并等待用户输入 y/yes
 3. 将导入流程接入非交互 v2 request/approve、metadata-only audit 与离线评测，
    覆盖审批重放、证书轮换、工作区竞态、部分写入失败和恢复一致性；v1 与
    read-only 模式继续禁止导入。
+
+## 2026-08-20：文档同步与 host_runtime 准备工作
+
+### 文档
+
+- 更新 `docs/architecture.md`：补充 Web Workbench 分层、`host_runtime.py`、五 Provider 配置项与 Phase 2B 状态。
+- 重写 `docs/claude-code-review.md`：纳入 Web、多 Provider、沙箱认证与当前测试规模；列出 Web/CLI 已知差距。
+- 修正 `docs/web-workbench-development.md`：`POST /api/v1/ws-ticket`、实际目录结构、已实现的事件类型。
+- 新增 `docs/host-runtime.md`：三入口能力矩阵、迁移状态与待对齐项。
+
+### host_runtime 准备工作
+
+- 新增 `src/neil_agent/host_runtime.py`：`HostMode`、`HostProfile`、`build_host_runtime()`、共享 `instruction_target()` 与 `windows_sandbox_backend()`。
+- `cli.py`、`noninteractive.py`、`web/controller.py` 改为通过 `build_host_runtime()` 装配工具与指令上下文，消除三处重复代码。
+- 新增 `tests/test_host_runtime.py`：指令目标、各 HostMode 工具矩阵与 Web 已知差距断言。
+
+### 已知待办（未在本批实现）
+
+- Web 注册 `SandboxCommandTools` 与 `instruction_target` 作用域。
+- Web 会话 `SessionStore` load/save 与 `select_session` 命令。
+- 共享 `SecurityShield` / cockpit DTO 映射供 Web 快照使用。
+
+### 验证
+
+- `tests/test_host_runtime.py` 与既有 Web/CLI 回归应全部通过。

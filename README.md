@@ -41,7 +41,7 @@ Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
 [`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前五个 Provider 均可显式选择，兼容端点未声明的能力会在网络请求前 fail closed。
 浏览器端 Web Workbench 的产品边界、fixture 原型和实时接入路线见
-[`docs/web-workbench-development.md`](docs/web-workbench-development.md)。仓库内的 [`docs/Expected web UI.png`](<docs/Expected web UI.png>) 是 P6 视觉参考；稳定的 `?scene=` fixture 用于状态与截图回归，正常启动则进入保留 P5 安全边界并加入 P7 故障恢复的本地工作台。安全评审见 [`docs/web-workbench-security-review.md`](docs/web-workbench-security-review.md)，Windows 安装与升级见 [`docs/web-workbench-operations.md`](docs/web-workbench-operations.md)。
+[`docs/web-workbench-development.md`](docs/web-workbench-development.md)。三入口共享装配与能力矩阵见 [`docs/host-runtime.md`](docs/host-runtime.md)。仓库内的 [`docs/Expected web UI.png`](<docs/Expected web UI.png>) 是 P6 视觉参考；稳定的 `?scene=` fixture 用于状态与截图回归，正常启动则进入保留 P5 安全边界并加入 P7 故障恢复的本地工作台。安全评审见 [`docs/web-workbench-security-review.md`](docs/web-workbench-security-review.md)，Windows 安装与升级见 [`docs/web-workbench-operations.md`](docs/web-workbench-operations.md)。
 
 P0 本地预览与验证：
 

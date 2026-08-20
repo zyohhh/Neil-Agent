@@ -13,7 +13,6 @@ from .approval import (
     ApprovalStore,
     NoninteractiveApprovalBroker,
 )
-from .audit import JsonlAuditSink
 from .config import Settings
 from .errors import (
     AgentError,
@@ -26,13 +25,11 @@ from .errors import (
     SessionError,
     ToolError,
 )
+from .host_runtime import HostMode, build_host_runtime
 from .hooks import LifecycleHooks
-from .instructions import ProjectInstructionManager
 from .providers.factory import create_provider
 from .schemas import ActivityEvent, TokenUsage
 from .session import SessionStore
-from .sandbox import WindowsSandboxBackend
-from .tools import FileSystemTools, SandboxCommandTools, ShellTools, ToolRegistry
 
 OutputFormat = Literal["text", "json", "stream-json"]
 ProtocolVersion = Literal[1, 2]
@@ -305,34 +302,20 @@ def run_noninteractive(
         )
         return 2
     try:
-        filesystem = FileSystemTools(settings.workspace_root)
-        registry = ToolRegistry()
-        shell = ShellTools(
-            filesystem.root,
-            timeout=settings.command_timeout,
-            max_output_chars=settings.max_command_output_chars,
+        host_mode = (
+            HostMode.NONINTERACTIVE_READONLY
+            if permission_mode == "read-only"
+            else HostMode.NONINTERACTIVE_WRITE
         )
-        if permission_mode == "read-only":
-            filesystem.register_read_only(registry)
-            shell.register_read_only(registry)
-        else:
-            filesystem.register(registry)
-            shell.register(registry)
-            if settings.sandbox_backend == "windows-sandbox":
-                SandboxCommandTools(
-                    filesystem.root,
-                    WindowsSandboxBackend(
-                        certification_root=settings.sandbox_certification_root,
-                        trusted_reviewer=settings.sandbox_trusted_reviewer,
-                        trusted_review_sha256=(settings.sandbox_trusted_review_sha256),
-                    ),
-                    timeout_seconds=settings.command_timeout,
-                    max_output_bytes=settings.max_command_output_chars,
-                ).register_if_ready(registry)
-        instruction_manager = ProjectInstructionManager(
-            filesystem.root,
-            _instruction_target(filesystem.root),
+        host_runtime = build_host_runtime(
+            settings,
+            mode=host_mode,
+            base_hooks=hooks,
         )
+        filesystem = host_runtime.filesystem
+        registry = host_runtime.registry
+        instruction_manager = host_runtime.instruction_manager
+        active_hooks = host_runtime.hooks
         approval_broker: NoninteractiveApprovalBroker | None = None
         if permission_mode != "read-only":
             approval_broker = NoninteractiveApprovalBroker(
@@ -346,12 +329,6 @@ def run_noninteractive(
         session_store = SessionStore(filesystem.root)
         session = session_store.new_session()
         model = llm or create_provider(settings, retry_handler=writer.activity)
-        active_hooks = hooks.copy() if hooks is not None else LifecycleHooks()
-        if settings.audit_log_enabled:
-            JsonlAuditSink(
-                filesystem.root,
-                max_bytes=settings.audit_log_max_bytes,
-            ).register(active_hooks)
         agent = Agent(
             model,
             system_prompt=settings.system_prompt,
@@ -465,15 +442,6 @@ def write_startup_error(
         exit_code=2,
         error_code="configuration_error",
     )
-
-
-def _instruction_target(workspace_root: Path) -> Path:
-    try:
-        current = Path.cwd().resolve(strict=True)
-        current.relative_to(workspace_root)
-    except (OSError, ValueError):
-        return workspace_root
-    return current if current.is_dir() else workspace_root
 
 
 def _safe_protocol_text(value: str) -> str:

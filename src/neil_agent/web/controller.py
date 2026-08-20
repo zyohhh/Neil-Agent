@@ -14,15 +14,11 @@ from typing import Any, Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..agent import Agent
-from ..audit import JsonlAuditSink
 from ..config import Settings
 from ..events import EventBus, RuntimeEvent
-from ..instructions import ProjectInstructionManager
-from ..hooks import LifecycleHooks
+from ..host_runtime import HostMode, build_host_runtime
 from ..providers.factory import create_provider
 from ..schemas import ActivityEvent, ToolCall
-from ..task import TaskTracker
-from ..tools import FileSystemTools, ShellTools, ToolRegistry
 from .dto import (
     ApprovalRequestDto,
     OutputEntryDto,
@@ -85,23 +81,13 @@ class AgentTurnWorker:
         request_approval: ApprovalSink,
     ) -> None:
         settings = self._settings
-        filesystem = FileSystemTools(settings.workspace_root)
-        registry = ToolRegistry()
-        filesystem.register(registry)
-        shell = ShellTools(
-            filesystem.root,
-            timeout=settings.command_timeout,
-            max_output_chars=settings.max_command_output_chars,
-        )
-        shell.register(registry)
-        task_tracker = TaskTracker()
-        task_tracker.register(registry)
-        instruction_manager = ProjectInstructionManager(filesystem.root)
-        hooks = LifecycleHooks()
-        if settings.audit_log_enabled:
-            JsonlAuditSink(
-                filesystem.root, max_bytes=settings.audit_log_max_bytes
-            ).register(hooks)
+        host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
+        registry = host_runtime.registry
+        instruction_manager = host_runtime.instruction_manager
+        hooks = host_runtime.hooks
+        task_tracker = host_runtime.task_tracker
+        if task_tracker is None:
+            raise RuntimeError("Web host runtime must include a task tracker.")
         bus = EventBus(queue_size=256, max_observers=1)
         subscription = bus.subscribe(on_runtime)
         model = create_provider(settings, retry_handler=on_activity)
@@ -118,7 +104,7 @@ class AgentTurnWorker:
             instruction_scope_handler=instruction_manager.resolve_tool_call,
             task_tracker=task_tracker,
             event_bus=bus,
-            file_checkpoints=filesystem.checkpoints,
+            file_checkpoints=host_runtime.filesystem.checkpoints,
             approval_handler=request_approval,
             hooks=hooks,
         )

@@ -2,21 +2,24 @@
 
 ## 目标
 
-Neil Agent 是一个运行在终端中的本地 Coding Agent。当前版本能够与 DeepSeek V4 Flash 多轮对话，在瞬时失败后进行可观察的有界重试，加载分层项目指令，显式压缩长会话，在限定工作区内读写文件、执行检查和创建本地提交，并管理可搜索、可恢复的本地会话。
+Neil Agent 是一个运行在终端与本地浏览器中的 Coding Agent。当前版本支持 DeepSeek、Claude、OpenAI、Ollama 与 vLLM 五类 Provider，能够在瞬时失败后进行可观察的有界重试，加载分层项目指令，显式压缩长会话，在限定工作区内读写文件、执行检查和创建本地提交，并管理可搜索、可恢复的本地会话。除 Rich/Textual 终端外，还提供绑定 `127.0.0.1` 的 Web Workbench（`neil-agent-web`）。
 
 ## 分层结构
 
 ```text
-cli.py
-  参数路由、终端输入、活动与流式文本协调、高风险操作审批、会话命令
-    ↘ noninteractive.py
-      一次性运行、版本化协议、显式退出码和双阶段审批协调
-        ↘ approval.py
-          有界审批记录、精确预览绑定、过期检查和一次性消费
-    ├→ cockpit.py
-    │    任务、上下文、安全边界和工作区信号的只读 Rich 投影
+cli.py                          neil-agent-web (web/runtime.py)
+  参数路由、终端输入、活动与流式文本协调、高风险操作审批、会话命令    本地 loopback 启动器、静态资源校验、Uvicorn
+    ↘ noninteractive.py              ↘ web/app.py
+      一次性运行、版本化协议、显式退出码和双阶段审批协调                  FastAPI 路由、CORS/CSP、会话 cookie 与 WebSocket
+        ↘ approval.py                    ↘ web/controller.py
+          有界审批记录、精确预览绑定、过期检查和一次性消费                    单活动 turn、控制租约、取消与审批编排
+    ├→ cockpit.py                          ↘ web/service.py
+    │    任务、上下文、安全边界和工作区信号的只读 Rich 投影                    只读快照、Git review、文件树与会话列表 DTO
     └→ live_cockpit.py
          Textual 实时执行树、线程桥接、筛选、详情和审批界面
+    ↓
+host_runtime.py
+  CLI / 非交互 / Web 共享的工具注册、指令作用域、审计 hooks 与 HostProfile 能力矩阵
     ↓
 agent.py
   对话历史、工具循环、活动事件、生命周期 hooks、审批协调、修改后验证工作流
@@ -46,10 +49,10 @@ agent.py
       本进程 Agent 回合级多文件检查点、内容哈希与恢复候选
     ↓
 llm.py
-  DeepSeek 向后兼容入口、流式事件、ToolCall 与 usage 解析
+  DeepSeek 向后兼容 facade（计划在 0.2.0 移除）；生产路径使用 ProviderFactory
     ↓
 providers/
-  Provider 身份/能力/错误/重试/工厂，以及 Anthropic Messages 协议编码边界
+  Provider 身份/能力/错误/重试/工厂，以及 Anthropic Messages 与 OpenAI Responses 编解码边界
     ↓
 tools/registry.py
   工具注册、参数绑定、预览和执行分发
@@ -63,9 +66,12 @@ sandbox.py
 
 evals.py
   默认离线场景执行器、双重显式开启的真实 DeepSeek 协议验收
+
+web/ (React + TypeScript)
+  本地 Workbench UI；生产构建写入 src/neil_agent/web/static/ 并随 wheel 分发
 ```
 
-`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置。沙箱适配层不会注册工具；通用命令是否可见仍必须由宿主在平台安全门禁通过后显式决定。
+`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置。沙箱适配层不会注册工具；通用命令是否可见仍必须由宿主在平台安全门禁通过后显式决定。三条入口（CLI、非交互、Web）通过 `host_runtime.py` 共享工具装配；各入口仍独立负责审批、会话、输出与 UI。能力矩阵与已知差距见 [`host-runtime.md`](host-runtime.md)。Web 产品与协议细节见 [`web-workbench-development.md`](web-workbench-development.md)。
 
 ## 项目指令边界
 
@@ -143,7 +149,15 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - `Agent.context_what_if()` 接受 1–1,000,000 个字符，使用明确标注的 ASCII（约 0.3 token/字符）合成输入重新运行同一完整轮次选择路径，生成版本 1 的只含计数 `ContextWhatIf`。它不调用模型、工具或 hook，不发布运行时事件，也不修改历史或最近服务端 usage。
 - Textual 使用同一个工作区槽位承载 DAG 和 Context，`F3`（或 `Ctrl+T`）切换，不再增加会压缩回答区的第三个纵向面板。Context 视图按 `F4` 打开本地模拟对话框，输入 `0` 可清除；Agent 回合执行时禁用模拟，避免与历史写入并发。宽屏显示完整前后对照，窄屏压缩为四行洞察，矮屏将基础与模拟压力收进边框副标题，完整保留五层和回答区。
 - 快照只在驾驶舱挂载、用户提交和回合结束时计算，不由 250 ms 指标刷新反复扫描历史。提交态的 `CURRENT CHAIN` 目前只表示规范化后的当前用户消息，界面明确标记 `SUBMIT SNAPSHOT`；工具循环追加消息和 `before_model` hook 的动态上下文尚未纳入本切片。
-- Phase 2A 的三批交付已全部完成；下一可视化阶段是 Phase 2B Security Shield。
+- Phase 2A 的三批交付已全部完成；Phase 2B Security Shield 亦已收口；下一可视化阶段是 Phase 3A Time Machine 只读回放。
+
+### Web Workbench（P7 已完成）
+
+- `neil-agent-web` 只绑定 `127.0.0.1`；启动器校验 wheel 内静态资源 SHA-256 清单后才打开浏览器，端口冲突或资源损坏时 fail-closed。
+- HTTP 提供健康检查、一次性 bootstrap、完整快照、只读会话/文件树/Git review；WebSocket 使用短时单次 ticket，命令带 `expected_revision` 与 `command_id` 去重。
+- `WorkbenchController` 在后台线程运行 `Agent.stream_chat()`，通过 `EventBus` 与 `asyncio` 队列向浏览器推送有界元数据事件；审批仍逐工具、预览重校验，默认拒绝。
+- 浏览器可开始/取消单个 Agent turn、接收流式回答与活动、审批高风险工具；Review 使用固定只读 Git 命令，不向浏览器开放任意 shell 或 thinking 正文。
+- Web 每轮仍新建 `Agent`，尚未接入 `SessionStore` 多轮恢复；`SecurityShield` 与条件 `run_command` 亦未在 Web 路径注册。详见 [`host-runtime.md`](host-runtime.md)。
 
 ## 上下文预算
 
@@ -355,5 +369,8 @@ NeilAgentError
 | `COMMAND_TIMEOUT` | 本地命令超时时间（秒） | `120` |
 | `MAX_COMMAND_OUTPUT_CHARS` | 返回模型的命令输出上限 | `20000` |
 | `SANDBOX_BACKEND` | 可选 OS 沙箱能力门禁（`disabled` / `windows-sandbox`） | `disabled` |
+| `LLM_PROVIDER` | 模型 Provider（`deepseek` / `claude` / `openai` / `ollama` / `vllm`） | `deepseek` |
+| `LLM_MODEL` | 显式模型 ID（Claude/OpenAI/Ollama/vLLM 必填） | 随 Provider |
+| `WEB_RATE_TABLE` | Web 可选 token 单价表 JSON，用于成本估算 | 未配置 |
 | `AUDIT_LOG_ENABLED` | 是否启用元数据专用 JSONL 生命周期审计 | `false` |
 | `AUDIT_LOG_MAX_BYTES` | 审计日志单文件轮转上限 | `1000000` |
