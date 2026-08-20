@@ -33,8 +33,8 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | 文件写工具 | ✅ | ❌ | ✅ | ✅ |
 | Git 写工具 | ✅ | ❌ | ✅ | ✅ |
 | 计划工具 `set_task_plan` | ✅ | ❌ | ❌ | ✅ |
-| Windows `run_command` | 认证后 | 认证后 | 认证后 | **❌ 待对齐** |
-| 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | 工作区根 **待对齐** |
+| Windows `run_command` | 认证后 | 认证后 | 认证后 | 认证后（与 CLI 同路径） |
+| 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
 | 审计 hooks | 可选 | 可选 | 可选 | 可选 |
 | 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | **❌ 每轮新建 Agent** |
 | Security Shield 投影 | ✅ `/cockpit` | ❌ | ❌ | **❌ 待对齐** |
@@ -80,8 +80,8 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | 抽出 `instruction_target` / `windows_sandbox_backend` | ✅ |
 | 引入 `build_host_runtime` 与 `HostProfile` | ✅ |
 | CLI / 非交互 / Web 改用共享装配 | ✅ |
-| Web 注册沙箱工具 | 待办 |
-| Web 使用 `instruction_target` | 待办 |
+| Web 注册沙箱工具 | ✅ |
+| Web 使用 `instruction_target` | ✅ |
 | Web 会话 load/save | 待办 |
 | 跨入口 parity 回归测试 | ✅ `tests/test_host_runtime.py` |
 

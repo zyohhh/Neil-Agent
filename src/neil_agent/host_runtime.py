@@ -95,11 +95,8 @@ def _register_sandbox_tools(
 
 
 def _instruction_scope_for_mode(
-    mode: HostMode,
     workspace_root: Path,
 ) -> tuple[ProjectInstructionManager, InstructionScope]:
-    if mode is HostMode.WEB:
-        return ProjectInstructionManager(workspace_root), "workspace_root"
     target = instruction_target(workspace_root)
     return ProjectInstructionManager(workspace_root, target), "cwd"
 
@@ -128,11 +125,10 @@ def build_host_runtime(
         shell.register(registry)
 
     sandbox_tools_enabled = False
-    if mode in {HostMode.CLI, HostMode.NONINTERACTIVE_WRITE}:
+    if mode in {HostMode.CLI, HostMode.NONINTERACTIVE_WRITE, HostMode.WEB}:
         sandbox_tools_enabled = _register_sandbox_tools(settings, filesystem, registry)
 
     instruction_manager, instruction_scope = _instruction_scope_for_mode(
-        mode,
         filesystem.root,
     )
 
