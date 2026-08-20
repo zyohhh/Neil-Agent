@@ -72,13 +72,39 @@ def test_build_host_runtime_noninteractive_readonly_is_read_only(tmp_path: Path)
     assert runtime.task_tracker is None
 
 
-def test_build_host_runtime_web_matches_documented_gaps(tmp_path: Path) -> None:
+def test_build_host_runtime_web_matches_cli_instruction_and_sandbox_policy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
     settings = _settings(tmp_path)
     runtime = build_host_runtime(settings, mode=HostMode.WEB)
     assert "write_file" in runtime.profile.tool_names
-    assert runtime.profile.instruction_scope == "workspace_root"
+    assert runtime.profile.instruction_scope == "cwd"
+    assert runtime.instruction_manager.current.target == nested.resolve()
     assert runtime.profile.sandbox_tools_enabled is False
     assert runtime.profile.task_tools_enabled is True
+
+
+def test_build_host_runtime_web_registers_sandbox_when_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "neil_agent.host_runtime._register_sandbox_tools",
+        lambda *_args, **_kwargs: True,
+    )
+    settings = _settings(
+        tmp_path,
+        sandbox_backend="windows-sandbox",
+        sandbox_certification_root=str(tmp_path / "cert"),
+        sandbox_trusted_reviewer="reviewer@example.com",
+        sandbox_trusted_review_sha256="a" * 64,
+    )
+    runtime = build_host_runtime(settings, mode=HostMode.WEB)
+    assert runtime.profile.sandbox_tools_enabled is True
 
 
 def test_windows_sandbox_backend_uses_settings(tmp_path: Path) -> None:

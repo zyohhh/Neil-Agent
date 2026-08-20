@@ -1329,10 +1329,24 @@ CLI 展示修改预览并等待用户输入 y/yes
 
 ### 已知待办（未在本批实现）
 
-- Web 注册 `SandboxCommandTools` 与 `instruction_target` 作用域。
 - Web 会话 `SessionStore` load/save 与 `select_session` 命令。
 - 共享 `SecurityShield` / cockpit DTO 映射供 Web 快照使用。
 
 ### 验证
 
 - `tests/test_host_runtime.py` 与既有 Web/CLI 回归应全部通过。
+
+## 2026-08-20：Web 与 CLI 沙箱及指令作用域对齐
+
+### 运行时
+
+- `HostMode.WEB` 现在与 CLI、非交互写入模式共用 `_register_sandbox_tools()`；认证未 ready 时仍不注册 `run_command`。
+- 移除 Web 专用的 `workspace_root` 指令作用域；三入口统一使用 `instruction_target()`，即启动目录在工作区内时按子目录加载 `AGENTS.md` 链。
+
+### 文档
+
+- 更新 `docs/host-runtime.md` 能力矩阵与迁移状态。
+
+### 验证
+
+- `tests/test_host_runtime.py` 新增 Web cwd 作用域与沙箱注册路径回归。
