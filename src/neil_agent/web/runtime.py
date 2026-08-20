@@ -11,6 +11,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,9 @@ DEFAULT_WEB_PORT = 8765
 MIN_WEB_PORT = 1_024
 MAX_WEB_PORT = 65_535
 STARTUP_WAIT_SECONDS = 15.0
+GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 10
+SERVER_LOG_LEVEL = "warning"
+WEBSOCKET_IMPLEMENTATION = "websockets-sansio"
 
 
 class WebWorkbenchStartupError(RuntimeError):
@@ -69,6 +73,15 @@ def ensure_port_available(port: int) -> None:
         ) from error
 
 
+def ensure_websocket_runtime() -> None:
+    """Fail before startup when the wheel cannot serve the advertised realtime API."""
+
+    if find_spec("websockets") is None:
+        raise WebWorkbenchStartupError(
+            "the WebSocket runtime is not installed; reinstall a complete Neil Agent wheel"
+        )
+
+
 def run_workbench(
     settings: Settings,
     *,
@@ -85,6 +98,7 @@ def run_workbench(
         raise WebWorkbenchStartupError(
             f"port must be between {MIN_WEB_PORT} and {MAX_WEB_PORT}"
         )
+    ensure_websocket_runtime()
     bundle_root = static_root or packaged_static_root()
     try:
         bundle = verify_static_bundle(bundle_root)
@@ -107,7 +121,12 @@ def run_workbench(
         host="127.0.0.1",
         port=port,
         access_log=False,
+        # Uvicorn's WebSocket INFO message includes the full request target;
+        # keep short-lived authentication tickets out of terminal output.
+        log_level=SERVER_LOG_LEVEL,
         server_header=False,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+        ws=WEBSOCKET_IMPLEMENTATION,
         ws_max_size=MAX_WEBSOCKET_MESSAGE_BYTES,
     )
     server = (server_factory or uvicorn.Server)(config)
@@ -125,7 +144,12 @@ def run_workbench(
             name="neil-agent-web-browser",
             daemon=True,
         ).start()
-    server.run()
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        # Uvicorn restores and re-raises the captured SIGINT after completing its
+        # graceful ASGI shutdown. Treat that expected operator action as success.
+        return
 
 
 def _open_browser_after_start(

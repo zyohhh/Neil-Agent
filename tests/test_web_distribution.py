@@ -7,13 +7,17 @@ import json
 import socket
 import time
 import urllib.request
+from http.cookiejar import CookieJar
+from importlib.metadata import requires
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
+from websockets.sync.client import connect
 
 from neil_agent.config import Settings
 from neil_agent.web.app import MAX_WEBSOCKET_MESSAGE_BYTES, create_app
@@ -24,8 +28,12 @@ from neil_agent.web.assets import (
     verify_static_bundle,
 )
 from neil_agent.web.runtime import (
+    GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+    SERVER_LOG_LEVEL,
+    WEBSOCKET_IMPLEMENTATION,
     WebWorkbenchStartupError,
     ensure_port_available,
+    ensure_websocket_runtime,
     run_workbench,
 )
 
@@ -75,6 +83,25 @@ def test_packaged_frontend_is_complete_and_verified() -> None:
     assert ASSET_MANIFEST in names
     assert any(name.startswith("assets/") and name.endswith(".js") for name in names)
     assert any(name.startswith("assets/") and name.endswith(".css") for name in names)
+
+
+def test_distribution_declares_and_loads_websocket_runtime() -> None:
+    project_requirements = requires("neil-agent") or []
+
+    assert any(
+        requirement.lower().startswith("websockets")
+        for requirement in project_requirements
+    )
+    ensure_websocket_runtime()
+
+
+def test_missing_websocket_runtime_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("neil_agent.web.runtime.find_spec", lambda _name: None)
+
+    with pytest.raises(WebWorkbenchStartupError, match="WebSocket runtime"):
+        ensure_websocket_runtime()
 
 
 def test_static_bundle_fails_closed_on_tamper_extra_file_and_unsafe_manifest(
@@ -201,7 +228,10 @@ def test_launcher_binds_loopback_limits_websockets_and_opens_after_start(
     assert config.port == port
     assert config.ws_max_size == MAX_WEBSOCKET_MESSAGE_BYTES
     assert config.access_log is False
+    assert config.log_level == SERVER_LOG_LEVEL
     assert config.server_header is False
+    assert config.timeout_graceful_shutdown == GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+    assert config.ws == WEBSOCKET_IMPLEMENTATION
     assert len(captured_url) == 1
     assert captured_url[0].startswith(f"http://127.0.0.1:{port}/#bootstrap=")
     output = capsys.readouterr().out
@@ -209,12 +239,35 @@ def test_launcher_binds_loopback_limits_websockets_and_opens_after_start(
     assert "#bootstrap=" not in output
 
 
+def test_launcher_treats_operator_interrupt_as_clean_stop(tmp_path: Path) -> None:
+    captured_config: list[Any] = []
+
+    class InterruptServer:
+        def __init__(self, config: Any) -> None:
+            captured_config.append(config)
+
+        def run(self) -> None:
+            captured_config[0].app.state.workbench_controller.close()
+            raise KeyboardInterrupt
+
+    run_workbench(
+        _settings(tmp_path),
+        port=_free_port(),
+        open_browser=False,
+        static_root=packaged_static_root(),
+        server_factory=InterruptServer,
+    )
+
+
 def test_real_loopback_server_starts_serves_health_and_shuts_down(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     port = _free_port()
     server_ready = Event()
+    launch_url_ready = Event()
     captured_server: list[uvicorn.Server] = []
+    captured_launch_url: list[str] = []
     failures: list[BaseException] = []
 
     def server_factory(config: uvicorn.Config) -> uvicorn.Server:
@@ -223,13 +276,18 @@ def test_real_loopback_server_starts_serves_health_and_shuts_down(
         server_ready.set()
         return server
 
+    def capture_launch_url(url: str, **_kwargs: Any) -> bool:
+        captured_launch_url.append(url)
+        launch_url_ready.set()
+        return True
+
     def serve() -> None:
         try:
             run_workbench(
                 _settings(tmp_path),
                 port=port,
-                open_browser=False,
                 static_root=packaged_static_root(),
+                browser_open=capture_launch_url,
                 server_factory=server_factory,
             )
         except BaseException as error:  # pragma: no cover - surfaced below
@@ -244,16 +302,53 @@ def test_real_loopback_server_starts_serves_health_and_shuts_down(
         time.sleep(0.02)
     assert failures == []
     assert server.started is True
+    assert launch_url_ready.wait(2)
 
-    with urllib.request.urlopen(  # noqa: S310 - fixed loopback smoke target
-        f"http://127.0.0.1:{port}/api/v1/health",
+    origin = f"http://127.0.0.1:{port}"
+    cookie_jar = CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    with opener.open(  # noqa: S310 - fixed loopback smoke target
+        f"{origin}/api/v1/health",
         timeout=2,
     ) as response:
         assert response.status == 200
         assert response.headers["Content-Security-Policy"]
+
+    bootstrap = parse_qs(urlparse(captured_launch_url[0]).fragment)["bootstrap"][0]
+    bootstrap_request = urllib.request.Request(
+        f"{origin}/api/v1/bootstrap",
+        data=b"",
+        method="POST",
+        headers={"Origin": origin, "X-Neil-Bootstrap": bootstrap},
+    )
+    with opener.open(bootstrap_request, timeout=2) as response:  # noqa: S310
+        assert response.status == 204
+    csrf = next(
+        cookie.value for cookie in cookie_jar if cookie.name == "neil_workbench_csrf"
+    )
+    ticket_request = urllib.request.Request(
+        f"{origin}/api/v1/ws-ticket",
+        data=b"",
+        method="POST",
+        headers={"Origin": origin, "X-Neil-CSRF": csrf},
+    )
+    with opener.open(ticket_request, timeout=2) as response:  # noqa: S310
+        ticket = json.load(response)["ticket"]
+
+    with connect(
+        f"ws://127.0.0.1:{port}/api/v1/events?ticket={ticket}&after=0",
+        origin=origin,
+        open_timeout=2,
+        close_timeout=2,
+    ) as websocket:
+        connected = json.loads(websocket.recv(timeout=2))
+        assert connected["message_type"] == "connected"
 
     server.should_exit = True
     thread.join(5)
     assert thread.is_alive() is False
     assert failures == []
     ensure_port_available(port)
+    captured = capsys.readouterr()
+    assert ticket not in captured.out
+    assert ticket not in captured.err

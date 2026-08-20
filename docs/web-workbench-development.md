@@ -776,6 +776,8 @@ P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSock
 
 P7 不修改 Python DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约。Focus/Build 权限、运行时模型切换、会话恢复和 PTY 仍需独立产品决策，不能通过前端恢复机制间接实现。
 
+P7 基本验收后的发布整改不新增产品阶段或能力：wheel 现在显式携带 WebSocket 运行时，启动器固定使用 `websockets-sansio` 并在运行时缺失时 fail closed；Ctrl+C 在 Uvicorn 完成 ASGI 关闭后按正常停止处理，优雅关闭上限为 10 秒。Uvicorn 协议日志使用 warning 级别，避免把查询参数中的单次 WebSocket ticket 写入终端。隔离 wheel 已完成真实 upgrade、控制租约、刷新重载、活动连接关闭、退出码和无残留进程复验；记录见 [`web-workbench-basic-acceptance.md`](web-workbench-basic-acceptance.md)。
+
 ## 16. 测试策略
 
 ### 16.1 Python

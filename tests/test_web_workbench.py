@@ -960,6 +960,37 @@ def test_process_close_signals_active_worker(tmp_path: Path) -> None:
     assert worker.cancelled.wait(1)
 
 
+def test_process_close_rejects_pending_approval(tmp_path: Path) -> None:
+    worker = ApprovalWorker()
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("control-close", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "turn-close",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Create one file"},
+            )
+        ),
+    )
+    assert worker.requested.wait(1)
+
+    controller.close()
+
+    assert worker.finished.wait(1)
+    assert worker.approved is False
+    approval = controller.snapshot().approval
+    assert approval is not None
+    assert approval.state == "stale"
+    assert approval.decision_detail == "Workbench is shutting down"
+
+
 def test_reconnect_replays_events_after_snapshot_sequence(tmp_path: Path) -> None:
     service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
     controller = WorkbenchController(service, EchoWorker(), clock=lambda: NOW)

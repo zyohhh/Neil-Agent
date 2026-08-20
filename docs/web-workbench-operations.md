@@ -1,6 +1,6 @@
 # Web Workbench 安装与本地运维
 
-P5 将生产前端内嵌到 `neil-agent` Python wheel；P6 只更新受审视觉资源和前端回归门禁，不改变安装或安全协议。已安装的 `neil-agent-web` 不需要 Node.js，也不依赖启动时的当前目录中存在 `web/dist`。
+P5 将生产前端内嵌到 `neil-agent` Python wheel；P6/P7 更新受审视觉资源、回归门禁和前端故障恢复。已安装的 `neil-agent-web` 不需要 Node.js，也不依赖启动时的当前目录中存在 `web/dist`。wheel 会显式安装实时协议所需的 WebSocket 运行时；若运行时缺失，启动器会在监听端口和生成 bootstrap 前失败关闭。
 
 ## 1. 从源码构建 wheel
 
@@ -35,11 +35,11 @@ neil-agent-web --port 8877
 neil-agent-web --no-browser
 ```
 
-模型、API Key 与工作区仍使用 Neil Agent 的现有环境变量/`.env` 配置。启动日志不会打印 bootstrap secret；secret 只短时放在自动打开页面的 URL fragment 中，交换后立即从地址栏移除。
+模型、API Key 与工作区仍使用 Neil Agent 的现有环境变量/`.env` 配置。启动日志不会打印 bootstrap secret 或 WebSocket ticket；bootstrap 只短时放在自动打开页面的 URL fragment 中，交换后立即从地址栏移除。
 
 ## 3. 停止、端口冲突与恢复
 
-- 在启动服务的终端按 `Ctrl+C` 停止。服务退出会取消活动 turn，并使待审批、session 和 ticket 全部失效。
+- 在启动服务的终端按 `Ctrl+C` 停止。正常停止返回成功状态；服务最多等待 10 秒完成优雅关闭，并会取消活动 turn，使待审批、session 和 ticket 全部失效。
 - 关闭浏览器标签页不会停止本地进程；需要在终端停止。
 - 若端口已占用，启动器会在创建/交付 bootstrap 之前退出并提示选择其他 `--port`，不会打开指向占用进程的浏览器。
 - 若提示静态资源缺失或完整性失败，不要绕过检查；停止进程并从可信 wheel 强制重装。
@@ -68,4 +68,4 @@ uv tool uninstall neil-agent
 - `npm run dev` 是源码开发服务器，不能作为发布安装方式。需要连接真实本地 API 时，以 `uv run neil-agent-web --allow-vite-dev-origin --no-browser` 显式允许固定的 5173 loopback Origin；发布启动不要开启该选项。
 - `npm run build` 生成发布资源；wheel 构建前必须执行。
 - 发布运行只使用 wheel 内的资源，不从 CDN、远程字体、分析服务或仓库外路径加载前端代码。
-- PTY、任意 shell 和聚合 `Approve & Apply` 不属于 P0–P6。
+- PTY、任意 shell 和聚合 `Approve & Apply` 不属于 P0–P7。
