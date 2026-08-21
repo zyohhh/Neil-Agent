@@ -36,10 +36,10 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | Windows `run_command` | 认证后 | 认证后 | 认证后 | 认证后（与 CLI 同路径） |
 | 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
 | 审计 hooks | 可选 | 可选 | 可选 | 可选 |
-| 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | **❌ 每轮新建 Agent** |
+| 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | ✅ 成功回合保存；`select_session` / `new_session` |
 | Security Shield 投影 | ✅ `/cockpit` | ❌ | ❌ | **❌ 待对齐** |
 
-“待对齐”项是有意记录在案的已知差距，不是 `host_runtime.py` 的遗漏说明错误。后续迁移应优先补齐 Web 的沙箱注册、指令 `cwd` 作用域和会话 load/save。
+“待对齐”项是有意记录在案的已知差距，不是 `host_runtime.py` 的遗漏说明错误。后续迁移应优先补齐共享 `SecurityShield` / cockpit DTO 映射。
 
 ## 使用方式
 
@@ -70,7 +70,8 @@ runtime = build_host_runtime(settings, mode=mode, base_hooks=hooks)
 
 ```python
 runtime = build_host_runtime(settings, mode=HostMode.WEB)
-# WorkbenchController 仍为每轮 turn 创建 EventBus 与 approval_handler
+# WorkbenchController 为每轮 turn 注入已选会话历史，成功后写入 SessionStore
+# 浏览器通过 select_session / new_session 切换；启动时自动恢复最近一次已保存会话
 ```
 
 ## 迁移状态
@@ -82,7 +83,7 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | CLI / 非交互 / Web 改用共享装配 | ✅ |
 | Web 注册沙箱工具 | ✅ |
 | Web 使用 `instruction_target` | ✅ |
-| Web 会话 load/save | 待办 |
+| Web 会话 load/save | ✅ |
 | 跨入口 parity 回归测试 | ✅ `tests/test_host_runtime.py` |
 
 ## 相关文档

@@ -95,6 +95,12 @@ class WorkbenchSnapshotService:
             max_output_chars=max(settings.max_command_output_chars, 1_000),
         )
 
+    @property
+    def session_store(self) -> SessionStore:
+        """Return the workspace session store used by snapshot projections."""
+
+        return self._sessions
+
     def health(self) -> dict[str, object]:
         """Return generic liveness facts without workspace metadata."""
 

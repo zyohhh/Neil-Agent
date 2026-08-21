@@ -1350,3 +1350,19 @@ CLI 展示修改预览并等待用户输入 y/yes
 ### 验证
 
 - `tests/test_host_runtime.py` 新增 Web cwd 作用域与沙箱注册路径回归。
+
+## 2026-08-21：Web 会话恢复
+
+### 运行时
+
+- `WorkbenchController` 启动时恢复最近一次已保存会话；成功回合通过 `SessionStore.save` 持久化消息、计划、质量检查与 usage。
+- 新增 `select_session` 与 `new_session` 命令，运行中或待审批时拒绝切换。
+- `AgentTurnWorker` 在 `stream_chat` 前 `restore_messages`，并把成功历史作为 `TurnResult` 交回控制器。
+
+### 前端
+
+- 会话列表使用 `active_session_id`；live 模式下点击会话发送 `select_session`，Sessions 区提供 New 按钮。
+
+### 验证
+
+- `tests/test_web_workbench.py` 覆盖回合保存、跨会话恢复、`new_session` 隔离以及运行中拒绝切换。

@@ -14,12 +14,12 @@ const snapshot = {
   run: { status: 'idle', run_id: null, objective: null, started_at: null, finished_at: null, error_type: null },
   revision: 0,
   last_sequence: 0,
-  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_approve_tool: false, can_show_diff: true, can_estimate_cost: false, tool_permission_mode: 'approval_gated', has_pty: false },
+  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_select_session: true, can_approve_tool: false, can_show_diff: true, can_estimate_cost: false, tool_permission_mode: 'approval_gated', has_pty: false },
   timeline: [],
   output: [],
   approval: null,
   git: { available: true, branch: 'feature/web-workbench', revision: '0123456789abcdef', change_count: 1, files: [{ path: 'src/live.py', previous_path: null, status: 'M', kind: 'modified', additions: 2, deletions: 1, diff_available: true, diff_reason: 'available' }], truncated: false },
-  sessions: { available: true, items: [], invalid_count: 0, total_count: 0 },
+  sessions: { available: true, items: [], invalid_count: 0, total_count: 0, active_session_id: null },
   files: { root: '', items: [{ name: 'src', path: 'src', kind: 'directory', children: [] }], truncated: false, revision: 'fedcba9876543210', unchanged: false },
   task: { source: 'unavailable', session_id: null, steps: [] },
   context: { source: 'unavailable', input_tokens: null, output_tokens: null, total_tokens: null, limit_tokens: 200000 },
@@ -140,6 +140,46 @@ describe('WebWorkbenchApp', () => {
     expect(reduced.output[0].text).toBe('Hello from Agent')
     expect(reduced.workspace.name).toBe('Neil-Agent-Live')
     expect(reduced.last_sequence).toBe(1)
+  })
+
+  it('reduces session_changed onto the active session list', () => {
+    const reduced = reduceWorkbenchEvent(snapshot, {
+      protocol_version: 1,
+      message_type: 'event',
+      event_type: 'session_changed',
+      sequence: 1,
+      revision: 1,
+      timestamp: '2026-08-13T08:00:01Z',
+      payload: {
+        session: {
+          session_id: '20260813T080000000000Z-abcd1234',
+          title: 'Restored session',
+          updated_at: '2026-08-13T08:00:00Z',
+          round_count: 2,
+          preview: 'Visible bounded preview',
+          has_plan: true,
+          failed_check: false,
+          has_compaction: false,
+        },
+        task: {
+          source: 'saved_session',
+          session_id: '20260813T080000000000Z-abcd1234',
+          steps: [{ title: 'Inspect metadata', status: 'completed' }],
+        },
+        context: {
+          source: 'server_reported',
+          input_tokens: 12,
+          output_tokens: 4,
+          total_tokens: 16,
+          limit_tokens: 200000,
+        },
+      },
+    })
+
+    expect(reduced.sessions.active_session_id).toBe('20260813T080000000000Z-abcd1234')
+    expect(reduced.sessions.items[0].title).toBe('Restored session')
+    expect(reduced.task.steps[0]?.title).toBe('Inspect metadata')
+    expect(reduced.context.total_tokens).toBe(16)
   })
 
   it('reduces one live approval request into an actionable review state', () => {

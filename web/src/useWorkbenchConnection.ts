@@ -18,6 +18,8 @@ export interface WorkbenchConnection {
   cancelTurn: () => void
   approveTool: (requestId: string) => void
   rejectTool: (requestId: string) => void
+  selectSession: (sessionId: string) => void
+  newSession: () => void
   refreshFiles: () => void
   refreshReview: () => void
 }
@@ -79,6 +81,14 @@ export function useWorkbenchConnection(fixtureMode: boolean): WorkbenchConnectio
     realtimeClientRef.current?.rejectTool(requestId)
   }, [])
 
+  const selectSession = useCallback((sessionId: string) => {
+    realtimeClientRef.current?.selectSession(sessionId)
+  }, [])
+
+  const newSession = useCallback(() => {
+    realtimeClientRef.current?.newSession()
+  }, [])
+
   const refreshFiles = useCallback(() => {
     if (!liveSnapshot) return
     void fetchLiveFileTree(liveSnapshot.files.revision)
@@ -106,6 +116,8 @@ export function useWorkbenchConnection(fixtureMode: boolean): WorkbenchConnectio
     cancelTurn,
     approveTool,
     rejectTool,
+    selectSession,
+    newSession,
     refreshFiles,
     refreshReview,
   }

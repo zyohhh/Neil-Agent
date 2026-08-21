@@ -161,30 +161,37 @@ function Sidebar({
   interactionLocked,
   drawerMode,
   liveSnapshot,
+  hasControl,
   onRefreshFiles,
+  onSelectSession,
+  onNewSession,
 }: {
   open: boolean
   onClose: () => void
   interactionLocked: boolean
   drawerMode: boolean
   liveSnapshot: WorkbenchSnapshotV1 | null
+  hasControl: boolean
   onRefreshFiles: () => void
+  onSelectSession: (sessionId: string) => void
+  onNewSession: () => void
 }) {
   const [selectedSession, setSelectedSession] = useState('workbench')
   const [activeTreeItem, setActiveTreeItem] = useState('src')
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const visibleFiles = liveSnapshot ? toFileNodes(liveSnapshot.files.items) : fixtureFiles
+  const activeSessionId = liveSnapshot?.sessions.active_session_id ?? selectedSession
   const visibleSessions = liveSnapshot
-    ? liveSnapshot.sessions.items.map((session, index) => ({
+    ? liveSnapshot.sessions.items.map((session) => ({
       id: session.session_id,
       title: session.title,
       time: new Date(session.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
-      active: index === 0,
+      active: session.session_id === activeSessionId,
     }))
     : fixtureSessions
 
   useEffect(() => {
-    if (liveSnapshot?.sessions.items[0]) setSelectedSession(liveSnapshot.sessions.items[0].session_id)
+    if (liveSnapshot?.sessions.active_session_id) setSelectedSession(liveSnapshot.sessions.active_session_id)
   }, [liveSnapshot])
 
   useEffect(() => {
@@ -277,7 +284,19 @@ function Sidebar({
       </section>
 
       <section className="sidebar-section sessions-section" aria-labelledby="sessions-heading">
-        <p className="eyebrow" id="sessions-heading">Sessions</p>
+        <div className="section-heading-row">
+          <p className="eyebrow" id="sessions-heading">Sessions</p>
+          {liveSnapshot ? (
+            <button
+              type="button"
+              className="text-button"
+              onClick={onNewSession}
+              disabled={interactionLocked || !hasControl || liveSnapshot.capabilities.can_select_session === false}
+            >
+              New
+            </button>
+          ) : null}
+        </div>
         <div className="session-list">
           {visibleSessions.map((session) => (
             <button
@@ -285,7 +304,13 @@ function Sidebar({
               key={session.id}
               className={`session-item ${selectedSession === session.id ? 'is-active' : ''}`}
               onClick={() => {
-                if (!interactionLocked) setSelectedSession(session.id)
+                if (interactionLocked) return
+                if (liveSnapshot) {
+                  if (!hasControl || liveSnapshot.capabilities.can_select_session === false) return
+                  onSelectSession(session.id)
+                  return
+                }
+                setSelectedSession(session.id)
               }}
               aria-pressed={selectedSession === session.id}
               aria-disabled={interactionLocked && selectedSession !== session.id}
@@ -297,7 +322,7 @@ function Sidebar({
             </button>
           ))}
         </div>
-        <span className="sr-only" id="session-lock-reason">Session switching is disabled while this fixture run is active.</span>
+        <span className="sr-only" id="session-lock-reason">Session switching is disabled while a run or approval is active.</span>
       </section>
 
       <button type="button" className="settings-button" aria-label="Fixture settings are not implemented in P0" disabled>
@@ -1016,6 +1041,8 @@ function App() {
     cancelTurn,
     approveTool,
     rejectTool,
+    selectSession,
+    newSession,
     refreshFiles,
     refreshReview,
   } = useWorkbenchConnection(Boolean(scenarioFromLocation))
@@ -1106,7 +1133,10 @@ function App() {
         interactionLocked={interactionLocked}
         drawerMode={sidebarDrawerMode}
         liveSnapshot={liveSnapshot}
+        hasControl={hasControl}
         onRefreshFiles={refreshFiles}
+        onSelectSession={selectSession}
+        onNewSession={newSession}
       />
       <div id="workspace-main" className="workspace-cell" tabIndex={-1}>
         <WorkspacePanel

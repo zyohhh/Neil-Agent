@@ -546,10 +546,11 @@ activity
 runtime_step
 approval_requested
 approval_resolved
+session_changed
 service_closing
 ```
 
-`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期。`select_session` 与 `set_model_for_next_turn` 尚未实现。
+`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期。`select_session` 与 `new_session` 已实现：成功回合写入 `SessionStore`，启动时恢复最近保存的会话。`set_model_for_next_turn` 尚未实现。
 
 ### 11.6 重连流程
 

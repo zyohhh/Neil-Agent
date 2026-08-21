@@ -15,18 +15,26 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..agent import Agent
 from ..config import Settings
+from ..errors import SessionError
 from ..events import EventBus, RuntimeEvent
 from ..host_runtime import HostMode, build_host_runtime
 from ..providers.factory import create_provider
-from ..schemas import ActivityEvent, ToolCall
+from ..schemas import ActivityEvent, Message, TokenUsage, ToolCall
+from ..session import SessionSnapshot
+from ..task import QualityCheckRecord, TaskStep
 from .dto import (
     ApprovalRequestDto,
+    ContextDto,
     OutputEntryDto,
     QualityCheckDto,
     ReviewState,
     RunDto,
     RuntimeCapabilitiesDto,
     RuntimeStepDto,
+    SessionDto,
+    SessionListDto,
+    TaskDto,
+    TaskStepDto,
     WorkbenchSnapshotDto,
 )
 from .service import WorkbenchSnapshotService
@@ -51,6 +59,26 @@ RuntimeSink = Callable[[RuntimeEvent], None]
 ApprovalSink = Callable[[ToolCall, str], bool]
 
 
+@dataclass(frozen=True, slots=True)
+class TurnContext:
+    """Persisted conversation state restored into one Agent turn."""
+
+    messages: tuple[Message, ...] = ()
+    last_usage: TokenUsage | None = None
+    steps: tuple[TaskStep, ...] = ()
+    latest_quality_check: QualityCheckRecord | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TurnResult:
+    """Successful Agent history that the controller may persist."""
+
+    messages: tuple[Message, ...]
+    last_usage: TokenUsage | None = None
+    steps: tuple[TaskStep, ...] = ()
+    latest_quality_check: QualityCheckRecord | None = None
+
+
 class TurnWorker(Protocol):
     """Synchronous worker boundary executed on one daemon thread."""
 
@@ -62,7 +90,8 @@ class TurnWorker(Protocol):
         on_activity: ActivitySink,
         on_runtime: RuntimeSink,
         request_approval: ApprovalSink,
-    ) -> None: ...
+        context: TurnContext | None = None,
+    ) -> TurnResult | None: ...
 
 
 class AgentTurnWorker:
@@ -79,7 +108,8 @@ class AgentTurnWorker:
         on_activity: ActivitySink,
         on_runtime: RuntimeSink,
         request_approval: ApprovalSink,
-    ) -> None:
+        context: TurnContext | None = None,
+    ) -> TurnResult:
         settings = self._settings
         host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
         registry = host_runtime.registry
@@ -88,6 +118,9 @@ class AgentTurnWorker:
         task_tracker = host_runtime.task_tracker
         if task_tracker is None:
             raise RuntimeError("Web host runtime must include a task tracker.")
+        restored = context or TurnContext()
+        if restored.steps or restored.latest_quality_check is not None:
+            task_tracker.restore(restored.steps, restored.latest_quality_check)
         bus = EventBus(queue_size=256, max_observers=1)
         subscription = bus.subscribe(on_runtime)
         model = create_provider(settings, retry_handler=on_activity)
@@ -108,6 +141,8 @@ class AgentTurnWorker:
             approval_handler=request_approval,
             hooks=hooks,
         )
+        if restored.messages:
+            agent.restore_messages(restored.messages, restored.last_usage)
         stream = agent.stream_chat(prompt)
         try:
             for chunk in stream:
@@ -121,6 +156,12 @@ class AgentTurnWorker:
         finally:
             subscription.close()
             bus.close(timeout=0.5)
+        return TurnResult(
+            messages=agent.messages,
+            last_usage=agent.last_usage,
+            steps=task_tracker.steps,
+            latest_quality_check=task_tracker.latest_quality_check,
+        )
 
 
 CommandName = Literal[
@@ -130,6 +171,8 @@ CommandName = Literal[
     "cancel_turn",
     "approve_tool",
     "reject_tool",
+    "select_session",
+    "new_session",
     "ping",
 ]
 
@@ -202,6 +245,13 @@ class WorkbenchController:
         self._approval: PendingApproval | None = None
         self._closed = False
         self._command_results: dict[str, dict[str, Any]] = {}
+        self._session_store = service.session_store
+        self._session_handle = self._session_store.new_session()
+        self._session_messages: tuple[Message, ...] = ()
+        self._session_usage: TokenUsage | None = None
+        self._session_steps: tuple[TaskStep, ...] = ()
+        self._session_quality: QualityCheckRecord | None = None
+        self._resume_latest_session()
 
     @classmethod
     def production(
@@ -214,7 +264,9 @@ class WorkbenchController:
         with self._lock:
             running = self._run.status in {"running", "cancelling"}
             approval = None if self._approval is None else self._approval.request
-            quality_checks = tuple(self._quality_checks) or base.review.quality_checks
+            quality_checks = tuple(
+                self._quality_checks
+            ) or self._restored_quality_checks(base.review.quality_checks)
             latest_quality = quality_checks[-1] if quality_checks else None
             return base.model_copy(
                 update={
@@ -224,6 +276,7 @@ class WorkbenchController:
                     "capabilities": RuntimeCapabilitiesDto(
                         can_start_turn=not running and not self._closed,
                         can_cancel_turn=running and not self._closed,
+                        can_select_session=not running and not self._closed,
                         can_approve_tool=(
                             approval is not None
                             and approval.state == "pending"
@@ -235,6 +288,9 @@ class WorkbenchController:
                     "timeline": tuple(self._steps.values())[-MAX_RUNTIME_STEPS:],
                     "output": tuple(self._output),
                     "approval": approval,
+                    "sessions": self._sessions_overlay(base.sessions),
+                    "task": self._task_dto(),
+                    "context": self._context_dto(),
                     "review": base.review.model_copy(
                         update={
                             "state": self._review_state(base.review.state, approval),
@@ -318,6 +374,10 @@ class WorkbenchController:
                 result = self._decide_approval(client_id, command, approved=True)
             elif command.command == "reject_tool":
                 result = self._decide_approval(client_id, command, approved=False)
+            elif command.command == "select_session":
+                result = self._select_session(client_id, command)
+            elif command.command == "new_session":
+                result = self._new_session(client_id, command)
             else:  # pragma: no cover - Pydantic rejects unknown commands.
                 raise CommandError("unknown_command", "Unknown command")
         except CommandError as error:
@@ -415,8 +475,16 @@ class WorkbenchController:
         return self._result(command, "accepted", "Cancellation requested")
 
     def _execute_turn(self, run_id: str, prompt: str, cancel: Event) -> None:
+        with self._lock:
+            context = TurnContext(
+                messages=self._session_messages,
+                last_usage=self._session_usage,
+                steps=self._session_steps,
+                latest_quality_check=self._session_quality,
+            )
+        result: TurnResult | None = None
         try:
-            self._worker.run(
+            result = self._worker.run(
                 prompt,
                 cancel,
                 lambda text: self._record_text(run_id, text),
@@ -425,6 +493,7 @@ class WorkbenchController:
                 lambda call, preview: self._request_approval(
                     run_id, call, preview, cancel
                 ),
+                context,
             )
         except TurnCancelled:
             self._finish_run(run_id, "cancelled")
@@ -434,7 +503,12 @@ class WorkbenchController:
             else:
                 self._finish_run(run_id, "failed", error_type=type(error).__name__)
         else:
-            self._finish_run(run_id, "cancelled" if cancel.is_set() else "completed")
+            if cancel.is_set():
+                self._finish_run(run_id, "cancelled")
+                return
+            if result is not None:
+                self._persist_turn(result)
+            self._finish_run(run_id, "completed")
 
     def _record_text(self, run_id: str, text: str) -> None:
         if not text:
@@ -549,6 +623,196 @@ class WorkbenchController:
             self._cancel = None
             self._reject_pending_locked("Run ended before approval resolved")
         self._publish("run_state", self._run.model_dump(mode="json"))
+
+    def _resume_latest_session(self) -> None:
+        try:
+            index = self._session_store.list_sessions(page=1, page_size=1)
+        except SessionError:
+            return
+        if not index.sessions:
+            return
+        try:
+            snapshot = self._session_store.load(index.sessions[0].session_id)
+        except SessionError:
+            return
+        self._apply_loaded_snapshot(snapshot)
+
+    def _apply_loaded_snapshot(self, snapshot: SessionSnapshot) -> None:
+        self._session_handle = self._session_store.handle_for(snapshot)
+        self._session_messages = snapshot.messages
+        self._session_usage = snapshot.last_usage
+        self._session_steps = snapshot.restored_steps()
+        self._session_quality = snapshot.restored_quality_check()
+
+    def _reset_unsaved_session(self) -> None:
+        self._session_handle = self._session_store.new_session()
+        self._session_messages = ()
+        self._session_usage = None
+        self._session_steps = ()
+        self._session_quality = None
+
+    def _persist_turn(self, result: TurnResult) -> None:
+        with self._lock:
+            self._session_messages = result.messages
+            self._session_usage = result.last_usage
+            self._session_steps = result.steps
+            self._session_quality = result.latest_quality_check
+            handle = self._session_handle
+        try:
+            snapshot = self._session_store.save(
+                handle,
+                result.messages,
+                result.steps,
+                result.latest_quality_check,
+                last_usage=result.last_usage,
+            )
+        except SessionError:
+            self._publish_session_state()
+            return
+        with self._lock:
+            self._apply_loaded_snapshot(snapshot)
+        self._publish_session_state()
+
+    def _select_session(self, client_id: str, command: ClientCommand) -> dict[str, Any]:
+        session_id = command.payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise CommandError("invalid_session", "Session ID is required")
+        session_id = session_id.strip()
+        with self._lock:
+            self._require_control(client_id)
+            self._require_revision(command.expected_revision)
+            self._require_idle_session_command()
+            current_id = self._session_handle.session_id
+            unsaved = not self._session_store.has_saved(current_id)
+        if session_id == current_id and unsaved:
+            return self._result(
+                command, "accepted", "Current session is already selected"
+            )
+        try:
+            snapshot = self._session_store.load(session_id)
+        except SessionError as error:
+            raise CommandError("session_unavailable", str(error)) from error
+        with self._lock:
+            self._apply_loaded_snapshot(snapshot)
+        self._publish_session_state()
+        return self._result(command, "accepted", "Session restored")
+
+    def _new_session(self, client_id: str, command: ClientCommand) -> dict[str, Any]:
+        with self._lock:
+            self._require_control(client_id)
+            self._require_revision(command.expected_revision)
+            self._require_idle_session_command()
+            self._reset_unsaved_session()
+        self._publish_session_state()
+        return self._result(command, "accepted", "New session started")
+
+    def _require_idle_session_command(self) -> None:
+        if self._run.status in {"running", "cancelling"}:
+            raise CommandError(
+                "run_conflict", "Session cannot change while a turn is active"
+            )
+        if self._approval is not None and self._approval.request.state == "pending":
+            raise CommandError(
+                "approval_pending", "Session cannot change while a tool is waiting"
+            )
+
+    def _publish_session_state(self) -> None:
+        with self._lock:
+            payload = {
+                "session": self._active_session_dto().model_dump(mode="json"),
+                "task": self._task_dto().model_dump(mode="json"),
+                "context": self._context_dto().model_dump(mode="json"),
+            }
+        self._publish("session_changed", payload)
+
+    def _sessions_overlay(self, base: SessionListDto) -> SessionListDto:
+        active = self._active_session_dto()
+        saved_ids = {item.session_id for item in base.items}
+        items = [item for item in base.items if item.session_id != active.session_id]
+        items.insert(0, active)
+        extra = 0 if active.session_id in saved_ids else 1
+        return SessionListDto(
+            available=True,
+            items=tuple(items[:20]),
+            invalid_count=base.invalid_count,
+            total_count=base.total_count + extra,
+            active_session_id=active.session_id,
+        )
+
+    def _active_session_dto(self) -> SessionDto:
+        try:
+            if self._session_store.has_saved(self._session_handle.session_id):
+                summary = self._session_store.get_summary(
+                    self._session_handle.session_id
+                )
+                return SessionDto(
+                    session_id=summary.session_id,
+                    title=summary.title,
+                    updated_at=summary.updated_at,
+                    round_count=summary.round_count,
+                    preview=summary.preview,
+                    has_plan=summary.has_plan,
+                    failed_check=summary.failed_check,
+                    has_compaction=summary.has_compaction,
+                )
+        except SessionError:
+            pass
+        quality = self._session_quality
+        return SessionDto(
+            session_id=self._session_handle.session_id,
+            title=self._session_handle.title or "New session",
+            updated_at=self._session_handle.created_at,
+            round_count=sum(
+                1 for message in self._session_messages if message.role == "user"
+            ),
+            preview="",
+            has_plan=bool(self._session_steps),
+            failed_check=quality is not None and quality.status == "failed",
+            has_compaction=False,
+        )
+
+    def _task_dto(self) -> TaskDto:
+        has_state = bool(self._session_messages or self._session_steps)
+        saved = False
+        try:
+            saved = self._session_store.has_saved(self._session_handle.session_id)
+        except SessionError:
+            saved = False
+        return TaskDto(
+            source="saved_session" if has_state or saved else "unavailable",
+            session_id=self._session_handle.session_id,
+            steps=tuple(
+                TaskStepDto(title=step.title, status=step.status)
+                for step in self._session_steps
+            ),
+        )
+
+    def _context_dto(self) -> ContextDto:
+        usage = self._session_usage
+        limit = self._service.settings.max_context_tokens
+        if usage is None:
+            return ContextDto(source="unavailable", limit_tokens=limit)
+        return ContextDto(
+            source="server_reported",
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+            limit_tokens=limit,
+        )
+
+    def _restored_quality_checks(
+        self, fallback: tuple[QualityCheckDto, ...]
+    ) -> tuple[QualityCheckDto, ...]:
+        record = self._session_quality
+        if record is None:
+            return fallback
+        return (
+            QualityCheckDto(
+                check=record.check,
+                status=record.status,
+                exit_code=record.exit_code,
+            ),
+        )
 
     def _request_approval(
         self,

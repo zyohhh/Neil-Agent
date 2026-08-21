@@ -113,6 +113,7 @@ class SessionListDto(WorkbenchDto):
     items: tuple[SessionDto, ...] = Field(default=(), max_length=20)
     invalid_count: int = Field(default=0, ge=0)
     total_count: int = Field(default=0, ge=0)
+    active_session_id: str | None = Field(default=None, max_length=128)
 
 
 class FileNodeDto(WorkbenchDto):
@@ -246,6 +247,7 @@ class RuntimeCapabilitiesDto(WorkbenchDto):
     can_start_turn: bool
     can_cancel_turn: bool
     can_request_control: bool = True
+    can_select_session: bool = True
     can_approve_tool: bool
     can_show_diff: bool = True
     can_estimate_cost: bool = False

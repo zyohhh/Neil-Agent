@@ -15,7 +15,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 | 项目指令 | 根到目标的 `AGENTS.md` 链，首次文件访问前按作用域刷新 | 与官方“上层启动加载、下层按访问加载”的核心思路一致 |
 | 权限 | 只读文件/Git 直接执行；写入、检查、暂存和提交逐次预览批准 | 与官方分层权限方向一致，且权限由代码而非提示词执行 |
 | 命令 | 不提供任意 shell，只提供固定检查与受限 Git；认证后可选 `run_command` | 对当前学习阶段比实现复杂 Bash 规则更安全 |
-| 会话 | 严格本地快照、恢复、搜索、分页、导入导出和分支 | CLI 已覆盖；Web 仅只读列表，尚未多轮恢复 |
+| 会话 | 严格本地快照、恢复、搜索、分页、导入导出和分支 | CLI 已覆盖；Web 成功回合保存，`select_session` / `new_session`，启动时恢复最近会话 |
 | 上下文 | 完整轮次裁剪、字符/token 双软预算、服务端 usage、显式压缩 | 请求前仍是软估算；最近成功回合保留服务端实测 |
 | 可观察性 | 模型、工具、审批、计划和重试都有实时活动；TUI 驾驶舱与 Web 工作台 | 已达到可理解的执行轨迹，不暴露思维链 |
 | 自动化 | 离线评测，以及一次性 `text`、`json`、`stream-json` | v1 默认只读；v2 以两阶段精确审批开放受限写操作 |
@@ -51,12 +51,12 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 - Claude Code 把项目 `CLAUDE.md` 作为上下文而非安全配置。Neil Agent 仍把包裹后的项目段拼入系统字符串，这是当前多 Provider 接口的简化；低信任声明和代码权限边界降低了优先级混淆风险，但后续仍可把项目上下文改为独立消息块。
 - Claude Code 的 `/export` 面向人类可读文本。Neil Agent 的 `/export` 仍是为安全导入设计的严格 JSON 信封；`-p --output-format json|stream-json` 才是脚本协议，两者语义必须持续区分。
 - Claude Code 的检查点可以按对话持续恢复多文件状态。Neil Agent 按单次 Agent 回合恢复多文件正文，但仍只存在于本进程；Git 仍是跨进程和持久化回退的可靠机制。
-- Claude Code 在 IDE/终端中提供持续会话。Neil Agent Web Workbench 当前每轮新建 `Agent`，左侧会话列表为只读投影，尚未 `select_session` 恢复历史。
+- Claude Code 在 IDE/终端中提供持续会话。Neil Agent Web Workbench 现在会保存成功回合并支持 `select_session` / `new_session`；每轮仍新建 `Agent` 并从快照恢复历史，而不是进程内长期持有同一个 Agent。
 - Claude Code 同时使用权限规则和已投入执行的 OS 级沙箱。Neil Agent 已有认证契约与条件 `run_command`，但 Web 路径尚未注册沙箱工具；没有通过认证的宿主不能声称 OS 隔离等价。
 
 ## 后续优先级
 
-1. 对齐 Web 与 CLI 的运行时差距：沙箱工具、`instruction_target` 作用域、会话 load/save、共享安全投影。
+1. 对齐 Web 与 CLI 的运行时差距：共享安全投影（`SecurityShield` / cockpit DTO）。
 2. 在专用 Windows runner 完成三轮强制安全 workflow、独立 review 与运行时认证；随后评估 guest 产物导出与二次批准导入。
 3. 可视化 Phase 3A：Time Machine 只读回放（事件与会话检查点浏览，不重新调用模型）。
 

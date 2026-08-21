@@ -101,6 +101,7 @@ export interface WorkbenchSnapshotV1 {
     can_start_turn: boolean
     can_cancel_turn: boolean
     can_request_control: boolean
+    can_select_session: boolean
     can_approve_tool: boolean
     can_show_diff: boolean
     can_estimate_cost: boolean
@@ -111,7 +112,7 @@ export interface WorkbenchSnapshotV1 {
   output: LiveOutputEntry[]
   approval: LiveApproval | null
   git: { available: boolean; branch: string | null; revision: string | null; change_count: number; files: LiveGitFile[]; truncated: boolean }
-  sessions: { available: boolean; items: LiveSession[]; invalid_count: number; total_count: number }
+  sessions: { available: boolean; items: LiveSession[]; invalid_count: number; total_count: number; active_session_id: string | null }
   files: LiveFileTree
   task: {
     source: 'saved_session' | 'unavailable'
@@ -154,14 +155,14 @@ export type LiveConnectionState = 'fixture' | 'connecting' | 'live' | 'offline'
 export interface WorkbenchEventV1 {
   protocol_version: 1
   message_type: 'event'
-  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'approval_requested' | 'approval_resolved' | 'control_changed' | 'snapshot_invalidated' | 'service_closing'
+  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'approval_requested' | 'approval_resolved' | 'control_changed' | 'session_changed' | 'snapshot_invalidated' | 'service_closing'
   sequence: number
   revision: number
   timestamp: string
   payload: Record<string, unknown>
 }
 
-type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn' | 'approve_tool' | 'reject_tool'
+type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn' | 'approve_tool' | 'reject_tool' | 'select_session' | 'new_session'
 
 interface PendingCommand {
   command: CommandName
@@ -321,6 +322,14 @@ export class WorkbenchRealtimeClient {
     return this.send('reject_tool', { request_id: requestId })
   }
 
+  selectSession(sessionId: string) {
+    return this.send('select_session', { session_id: sessionId })
+  }
+
+  newSession() {
+    return this.send('new_session', {})
+  }
+
   private async connect() {
     if (this.stopped) return
     this.handlers.onConnection('connecting')
@@ -460,7 +469,25 @@ export const reduceWorkbenchEvent = (
     return {
       ...base,
       run,
-      capabilities: { ...snapshot.capabilities, can_start_turn: !active, can_cancel_turn: active },
+      capabilities: { ...snapshot.capabilities, can_start_turn: !active, can_cancel_turn: active, can_select_session: !active },
+    }
+  }
+  if (event.event_type === 'session_changed') {
+    const session = event.payload.session as LiveSession
+    const task = event.payload.task as WorkbenchSnapshotV1['task']
+    const context = event.payload.context as WorkbenchSnapshotV1['context']
+    const remaining = snapshot.sessions.items.filter((item) => item.session_id !== session.session_id)
+    return {
+      ...base,
+      sessions: {
+        ...snapshot.sessions,
+        available: true,
+        items: [session, ...remaining].slice(0, 20),
+        active_session_id: session.session_id,
+      },
+      task,
+      context,
+      capabilities: { ...snapshot.capabilities, can_select_session: snapshot.run.status !== 'running' && snapshot.run.status !== 'cancelling' },
     }
   }
   if (event.event_type === 'runtime_step') {

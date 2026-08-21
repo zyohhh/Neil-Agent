@@ -157,7 +157,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - HTTP 提供健康检查、一次性 bootstrap、完整快照、只读会话/文件树/Git review；WebSocket 使用短时单次 ticket，命令带 `expected_revision` 与 `command_id` 去重。
 - `WorkbenchController` 在后台线程运行 `Agent.stream_chat()`，通过 `EventBus` 与 `asyncio` 队列向浏览器推送有界元数据事件；审批仍逐工具、预览重校验，默认拒绝。
 - 浏览器可开始/取消单个 Agent turn、接收流式回答与活动、审批高风险工具；Review 使用固定只读 Git 命令，不向浏览器开放任意 shell 或 thinking 正文。
-- Web 每轮仍新建 `Agent`，尚未接入 `SessionStore` 多轮恢复；`SecurityShield` 与条件 `run_command` 亦未在 Web 路径注册。详见 [`host-runtime.md`](host-runtime.md)。
+- Web 每轮仍新建 `Agent`，但会从当前选中的 `SessionStore` 快照恢复历史，并在成功回合后写回；`select_session` / `new_session` 切换会话。启动时自动恢复最近一次已保存会话。`SecurityShield` 尚未在 Web 路径投影。详见 [`host-runtime.md`](host-runtime.md)。
 
 ## 上下文预算
 

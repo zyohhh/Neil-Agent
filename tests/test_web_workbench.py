@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -27,6 +28,7 @@ from neil_agent.web.controller import (
     ClientCommand,
     ControllerSubscription,
     TurnCancelled,
+    TurnResult,
 )
 from neil_agent.web.security import BootstrapSessionStore
 from neil_agent.web.pricing import ModelRate, ProviderRateTable, load_rate_table
@@ -46,7 +48,17 @@ def _settings(root: Path) -> Settings:
 
 
 class EchoWorker:
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
+    def run(  # type: ignore[no-untyped-def]
+        self,
+        prompt,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+        context=None,
+    ):
+        history = () if context is None else context.messages
         on_activity(ActivityEvent(status="running", message="Model request started"))
         factory = RuntimeEventFactory()
         correlation = factory.new_correlation_id("agent_turn")
@@ -64,6 +76,13 @@ class EchoWorker:
                 metadata={"model_requests": 1, "tool_calls": 0},
             )
         )
+        return TurnResult(
+            messages=(
+                *history,
+                Message(role="user", content=prompt),
+                Message(role="assistant", content=f"Echo: {prompt}"),
+            )
+        )
 
 
 class BlockingWorker:
@@ -71,7 +90,16 @@ class BlockingWorker:
         self.started = Event()
         self.cancelled = Event()
 
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
+    def run(
+        self,
+        prompt,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+        context=None,
+    ):  # type: ignore[no-untyped-def]
         self.started.set()
         if not cancel.wait(2):
             raise AssertionError("test worker was not cancelled")
@@ -93,6 +121,7 @@ class ApprovalWorker:
         on_activity,
         on_runtime,
         request_approval,
+        context=None,
     ):
         self.requested.set()
         self.approved = request_approval(
@@ -118,6 +147,7 @@ class DoubleApprovalWorker:
         on_activity,
         on_runtime,
         request_approval,
+        context=None,
     ):
         self.first_requested.set()
         self.decisions.append(
@@ -135,7 +165,16 @@ class DoubleApprovalWorker:
 
 
 class QualityHistoryWorker:
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
+    def run(
+        self,
+        prompt,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+        context=None,
+    ):  # type: ignore[no-untyped-def]
         factory = RuntimeEventFactory()
         for status in ("succeeded", "failed", "skipped"):
             correlation = factory.new_correlation_id("quality_check")
@@ -1400,3 +1439,194 @@ def test_control_lease_allows_only_one_tab_and_disconnect_releases(
             _command("control07", "acquire_control", connected["revision"])
         )
         assert _receive_result(replacement, "control07")["status"] == "accepted"
+
+
+def _wait_for_status(controller: WorkbenchController, status: str) -> None:
+    for _ in range(100):
+        if controller.snapshot().run.status == status:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for run status {status}")
+
+
+def test_completed_web_turn_persists_session_and_restores_history(
+    tmp_path: Path,
+) -> None:
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, EchoWorker(), clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("persist01", "acquire_control", 0)),
+    )
+    first = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "persist02",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Remember this"},
+            )
+        ),
+    )
+    assert first["status"] == "accepted"
+    _wait_for_status(controller, "completed")
+
+    snapshot = controller.snapshot()
+    session_id = snapshot.sessions.active_session_id
+    assert session_id is not None
+    loaded = service.session_store.load(session_id)
+    assert [message.content for message in loaded.messages] == [
+        "Remember this",
+        "Echo: Remember this",
+    ]
+
+    second = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "persist03",
+                "start_turn",
+                snapshot.revision,
+                {"prompt": "Continue"},
+            )
+        ),
+    )
+    assert second["status"] == "accepted"
+    _wait_for_status(controller, "completed")
+    restored = service.session_store.load(session_id)
+    assert [message.content for message in restored.messages] == [
+        "Remember this",
+        "Echo: Remember this",
+        "Continue",
+        "Echo: Continue",
+    ]
+
+
+def test_select_session_and_new_session_restore_isolated_histories(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path, clock=lambda: NOW, id_factory=lambda: "aaaaaaaa")
+    first_handle = store.new_session()
+    store.save(
+        first_handle,
+        (
+            Message(role="user", content="First session prompt"),
+            Message(role="assistant", content="First session answer"),
+        ),
+        (),
+        None,
+    )
+    later = NOW + timedelta(seconds=1)
+    store = SessionStore(tmp_path, clock=lambda: later, id_factory=lambda: "bbbbbbbb")
+    second_handle = store.new_session()
+    store.save(
+        second_handle,
+        (
+            Message(role="user", content="Second session prompt"),
+            Message(role="assistant", content="Second session answer"),
+        ),
+        (TaskStep("Later work", "in_progress"),),
+        None,
+    )
+
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, EchoWorker(), clock=lambda: NOW)
+    snapshot = controller.snapshot()
+    assert snapshot.sessions.active_session_id == second_handle.session_id
+    assert snapshot.task.steps[0].title == "Later work"
+
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("select01", "acquire_control", 0)),
+    )
+    selected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "select02",
+                "select_session",
+                int(control["revision"]),
+                {"session_id": first_handle.session_id},
+            )
+        ),
+    )
+    assert selected["status"] == "accepted"
+    snapshot = controller.snapshot()
+    assert snapshot.sessions.active_session_id == first_handle.session_id
+    assert snapshot.task.steps == ()
+
+    created = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("select03", "new_session", snapshot.revision)
+        ),
+    )
+    assert created["status"] == "accepted"
+    snapshot = controller.snapshot()
+    assert snapshot.sessions.active_session_id != first_handle.session_id
+    assert snapshot.sessions.active_session_id != second_handle.session_id
+    assert snapshot.task.source == "unavailable"
+
+    started = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "select04",
+                "start_turn",
+                snapshot.revision,
+                {"prompt": "Fresh"},
+            )
+        ),
+    )
+    assert started["status"] == "accepted"
+    _wait_for_status(controller, "completed")
+    active_id = controller.snapshot().sessions.active_session_id
+    assert active_id is not None
+    loaded = service.session_store.load(active_id)
+    assert [message.content for message in loaded.messages] == [
+        "Fresh",
+        "Echo: Fresh",
+    ]
+
+
+def test_select_session_rejected_during_active_turn(tmp_path: Path) -> None:
+    worker = BlockingWorker()
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("lockctrl", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "lockturn1",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Hold"},
+            )
+        ),
+    )
+    assert worker.started.wait(1)
+    rejected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "locksess1",
+                "new_session",
+                controller.snapshot().revision,
+            )
+        ),
+    )
+    assert rejected["status"] == "rejected"
+    assert rejected["code"] == "run_conflict"
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("lockcanc1", "cancel_turn", controller.snapshot().revision)
+        ),
+    )
+    assert worker.cancelled.wait(1)
+    _wait_for_status(controller, "cancelled")
