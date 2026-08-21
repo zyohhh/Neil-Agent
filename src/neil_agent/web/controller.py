@@ -788,16 +788,9 @@ class WorkbenchController:
         )
 
     def _context_dto(self) -> ContextDto:
-        usage = self._session_usage
-        limit = self._service.settings.max_context_tokens
-        if usage is None:
-            return ContextDto(source="unavailable", limit_tokens=limit)
-        return ContextDto(
-            source="server_reported",
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-            limit_tokens=limit,
+        return self._service.context_dto(
+            messages=self._session_messages,
+            last_usage=self._session_usage,
         )
 
     def _restored_quality_checks(

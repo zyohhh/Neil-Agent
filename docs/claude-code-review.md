@@ -6,7 +6,7 @@
 
 Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工具，注册表只暴露固定定义，文件和 Git 写操作需要预览与批准，会话与项目指令都受工作区边界约束。它适合继续作为一个可学习、可测试的小型 Coding Agent，而不是提前引入任意 shell、插件市场或多 Agent 调度。
 
-除终端 CLI 与 Textual 驾驶舱外，仓库现已包含本地 Web Workbench（`neil-agent-web`）、五类 LLM Provider 适配层，以及 Windows Sandbox 认证契约代码。三条运行入口通过 `host_runtime.py` 共享工具装配；Web 在 `ContextTomography` richer 投影上仍与 CLI 存在已知差距。
+除终端 CLI 与 Textual 驾驶舱外，仓库现已包含本地 Web Workbench（`neil-agent-web`）、五类 LLM Provider 适配层，以及 Windows Sandbox 认证契约代码。三条运行入口通过 `host_runtime.py` 共享工具装配，Web 快照现已投影 Security Shield 与 ContextTomography 元数据。
 
 ## 对照结果
 
@@ -56,9 +56,9 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 
 ## 后续优先级
 
-1. Web `ContextTomography` richer 投影，对齐 CLI `/context` 与驾驶舱断层图。
-2. 在专用 Windows runner 完成三轮强制安全 workflow、独立 review 与运行时认证；随后评估 guest 产物导出与二次批准导入。
-3. 可视化 Phase 3A：Time Machine 只读回放（事件与会话检查点浏览，不重新调用模型）。
+1. 在专用 Windows runner 完成三轮强制安全 workflow、独立 review 与运行时认证；随后评估 guest 产物导出与二次批准导入。
+2. 可视化 Phase 3A：Time Machine 只读回放（事件与会话检查点浏览，不重新调用模型）。
+3. Web Context 面板 richer UI（五层断层图、what-if 与 tool footprint 可视化）。
 
 ## 相关文档
 

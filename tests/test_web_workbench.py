@@ -25,7 +25,7 @@ from neil_agent.schemas import ModelResponse, ToolCall
 from neil_agent.session import SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 from neil_agent.web import WorkbenchController, WorkbenchSnapshotService, create_app
-from neil_agent.web.dto import SecurityDto
+from neil_agent.web.dto import ContextDto, SecurityDto
 from neil_agent.web.controller import (
     ClientCommand,
     ControllerSubscription,
@@ -328,6 +328,20 @@ def test_snapshot_security_matches_observed_host_shield(tmp_path: Path) -> None:
     assert snapshot.json()["security"] == expected
 
 
+def test_snapshot_context_matches_host_tomography(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    runtime = build_host_runtime(settings, mode=HostMode.WEB)
+    service = WorkbenchSnapshotService(settings, host_runtime=runtime, clock=lambda: NOW)
+    expected = service.context_dto().model_dump(mode="json")
+
+    client = _client(tmp_path)
+    _authenticate(client)
+    snapshot = client.get("/api/v1/snapshot")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["context"] == expected
+
+
 def test_rejects_untrusted_host_origin_and_all_write_routes(tmp_path: Path) -> None:
     client = _client(tmp_path)
 
@@ -420,7 +434,10 @@ def test_snapshot_projects_saved_metadata_without_message_or_quality_bodies(
     assert payload["task"]["steps"] == [
         {"title": "Inspect metadata", "status": "completed"}
     ]
+    assert payload["context"]["source"] == "local_estimate"
     assert payload["context"]["total_tokens"] == 150
+    assert payload["context"]["estimated_tokens"] is not None
+    assert len(payload["context"]["layers"]) == 5
     assert payload["review"]["quality_check"] == {
         "check": "pytest",
         "status": "passed",

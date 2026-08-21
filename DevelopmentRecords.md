@@ -1377,3 +1377,14 @@ CLI 展示修改预览并等待用户输入 y/yes
 ### 验证
 
 - `tests/test_security_projection.py` 与 `tests/test_web_workbench.py` 覆盖 DTO 映射与快照一致性。
+
+## 2026-08-21：Web ContextTomography 快照投影
+
+### 运行时
+
+- 新增 `context_projection.py`：`build_host_context_tomography()` 复用 Agent 上下文选择规则。
+- `ContextDto.from_tomography()` 投影五层估算、压力、检查点状态与服务端 usage；`WorkbenchSnapshotService.context_dto()` 供快照与控制器共用。
+
+### 验证
+
+- `tests/test_context_projection.py` 与 `tests/test_web_workbench.py` 覆盖层序、无正文泄漏与快照一致性。

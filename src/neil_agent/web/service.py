@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
@@ -13,9 +13,11 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from ..config import Settings
+from ..context_projection import build_host_context_tomography
 from ..errors import SessionError, ToolError
 from ..host_runtime import HostMode, HostRuntime, build_host_runtime, observe_host_security
 from ..providers.factory import describe_provider
+from ..schemas import Message, TokenUsage
 from ..session import SessionSnapshot, SessionStore
 from ..tools.shell import (
     BLOCKED_GIT_DIRECTORIES,
@@ -314,7 +316,10 @@ class WorkbenchSnapshotService:
             sessions=sessions,
             files=self.files(depth=2),
             task=self._task(latest),
-            context=self._context(latest),
+            context=self.context_dto(
+                messages=() if latest is None else latest.messages,
+                last_usage=None if latest is None else latest.last_usage,
+            ),
             review=review,
             security=self._security(),
         )
@@ -354,19 +359,21 @@ class WorkbenchSnapshotService:
             ),
         )
 
-    def _context(self, latest: SessionSnapshot | None) -> ContextDto:
-        usage = None if latest is None else latest.last_usage
-        if usage is None:
-            return ContextDto(
-                source="unavailable", limit_tokens=self.settings.max_context_tokens
-            )
-        return ContextDto(
-            source="server_reported",
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-            limit_tokens=self.settings.max_context_tokens,
+    def context_dto(
+        self,
+        *,
+        messages: tuple[Message, ...] | Sequence[Message] = (),
+        last_usage: TokenUsage | None = None,
+        current_input: str = "",
+    ) -> ContextDto:
+        tomography = build_host_context_tomography(
+            self.settings,
+            self._host_runtime,
+            tuple(messages),
+            last_server_usage=last_usage,
+            current_input=current_input,
         )
+        return ContextDto.from_tomography(tomography)
 
     def _review_from(self, git: GitDto, latest: SessionSnapshot | None) -> ReviewDto:
         quality = None

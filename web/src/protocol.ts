@@ -120,11 +120,41 @@ export interface WorkbenchSnapshotV1 {
     steps: Array<{ title: string; status: 'pending' | 'in_progress' | 'completed' }>
   }
   context: {
-    source: 'server_reported' | 'unavailable'
+    source: 'local_estimate' | 'unavailable'
+    tomography_schema_version: 2
+    budget_chars: number | null
+    limit_tokens: number | null
+    estimated_chars: number | null
+    estimated_tokens: number | null
+    stored_rounds: number | null
+    selected_rounds: number | null
+    omitted_rounds: number | null
+    stored_history_chars: number | null
+    omitted_history_chars: number | null
+    checkpoint_state: 'none' | 'kept' | 'omitted' | null
+    layers: Array<{
+      kind: 'system' | 'tool_schemas' | 'project_instructions' | 'selected_history' | 'current_chain'
+      chars: number
+      estimated_tokens: number
+      item_count: number
+    }>
+    pressure: {
+      level: 'safe' | 'warning' | 'critical' | 'exceeded'
+      limiting_dimension: 'characters' | 'tokens'
+      character_basis_points: number
+      token_basis_points: number | null
+      character_headroom: number
+      token_headroom: number | null
+    } | null
+    largest_tool_footprint: {
+      ordinal: number
+      chars: number
+      estimated_tokens: number
+      state: 'kept' | 'omitted'
+    } | null
     input_tokens: number | null
     output_tokens: number | null
     total_tokens: number | null
-    limit_tokens: number | null
   }
   review: {
     state: 'empty' | 'passed' | 'failed' | 'approval_required' | 'stale' | 'applied' | 'unavailable'
