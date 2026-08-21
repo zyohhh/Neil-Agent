@@ -25,7 +25,12 @@ from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import AuditError, NeilAgentError, SessionError, ToolError
 from .events import EventBus
-from .host_runtime import HostMode, build_host_runtime, windows_sandbox_backend
+from .host_runtime import (
+    HostMode,
+    build_host_runtime,
+    observe_host_security,
+    windows_sandbox_backend,
+)
 from .hooks import LifecycleHooks
 from .instructions import (
     ProjectInstructionManager,
@@ -935,18 +940,9 @@ def _observe_security(
 ) -> SecurityShield:
     """Capture a metadata-only security snapshot for one explicit UI request."""
 
-    return observe_security_shield(
-        {
-            definition.name: registry.requires_approval(definition.name)
-            for definition in registry.definitions
-        },
-        sandbox_backend=settings.sandbox_backend,
-        audit_enabled=settings.audit_log_enabled,
-        sandbox_probe=(
-            windows_sandbox_backend(settings).probe
-            if settings.sandbox_backend == "windows-sandbox"
-            else None
-        ),
+    return observe_host_security(
+        settings,
+        registry,
         audit_probe=audit_probe,
     )
 

@@ -11,6 +11,7 @@ from neil_agent.host_runtime import (
     HostMode,
     build_host_runtime,
     instruction_target,
+    observe_host_security,
     windows_sandbox_backend,
 )
 
@@ -117,6 +118,17 @@ def test_windows_sandbox_backend_uses_settings(tmp_path: Path) -> None:
     )
     backend = windows_sandbox_backend(settings)
     assert backend._runtime_certification_root == (tmp_path / "cert").resolve()
+
+
+def test_observe_host_security_uses_registry_permissions(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    runtime = build_host_runtime(settings, mode=HostMode.WEB)
+    shield = observe_host_security(settings, runtime.registry)
+
+    assert shield.tool_count == len(runtime.profile.tool_names)
+    assert shield.direct_tool_count + shield.approval_tool_count == shield.tool_count
+    assert shield.audit_enabled is False
+    assert shield.audit_status == "disabled"
 
 
 @pytest.mark.parametrize(

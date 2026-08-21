@@ -24,7 +24,45 @@ const snapshot = {
   task: { source: 'unavailable', session_id: null, steps: [] },
   context: { source: 'unavailable', input_tokens: null, output_tokens: null, total_tokens: null, limit_tokens: 200000 },
   review: { state: 'stale', quality_check: null, quality_checks: [], approval_available: false, cost_available: false, cost: { source: 'unavailable', estimated_usd: null, rate_table_version: null, rate_effective_date: null, model: null, reason: 'no_rate_table' } },
-  security: { mode: 'approval_gated', binding: 'loopback', bootstrap_token_required: true, write_routes: 0, agent_connected: true },
+  security: {
+    mode: 'approval_gated',
+    binding: 'loopback',
+    bootstrap_token_required: true,
+    write_routes: 0,
+    agent_connected: true,
+    shield_schema_version: 2,
+    sandbox_backend: 'disabled',
+    audit_enabled: false,
+    audit_status: 'disabled',
+    tool_count: 12,
+    direct_tool_count: 4,
+    approval_tool_count: 8,
+    application: {
+      layer: 'application',
+      status: 'enforced',
+      headline: 'ALLOWLIST ENFORCED',
+      details: ['12 tools · 4 direct · 8 approval', 'workspace + sensitive paths constrained', 'host shell + local-tool network absent', 'metadata audit disabled'],
+    },
+    os_sandbox: {
+      layer: 'os',
+      status: 'disabled',
+      headline: 'DISABLED BY CONFIG',
+      details: ['windows-sandbox backend not selected', 'run_command absent from registry', 'application allowlist still enforced'],
+    },
+    capabilities: [{ key: 'host-shell', label: 'ARBITRARY HOST SHELL', state: 'forbidden', layer: 'application', tool_count: 0, summary: 'permanently absent from the application tool surface' }],
+    capability_legend: { direct: 4, approval: 8, forbidden: 1, unavailable: 0 },
+    boundary_watch: {
+      observation_count: 1,
+      warning_count: 1,
+      changes_stable: true,
+      signals: [
+        { key: 'path', state: 'application_only', layer: 'application', qualifier: 'os_disabled', label: 'PATH APP' },
+        { key: 'network', state: 'absent', layer: 'application', qualifier: 'os_disabled', label: 'NETWORK ABSENT' },
+        { key: 'command', state: 'restricted', layer: 'application', qualifier: 'application', label: 'COMMAND FIXED' },
+        { key: 'audit', state: 'disabled', layer: 'application', qualifier: 'application', label: 'AUDIT DISABLED' },
+      ],
+    },
+  },
 } satisfies WorkbenchSnapshotV1
 
 describe('WebWorkbenchApp', () => {

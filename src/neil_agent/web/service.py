@@ -14,6 +14,7 @@ from typing import Literal
 
 from ..config import Settings
 from ..errors import SessionError, ToolError
+from ..host_runtime import HostMode, HostRuntime, build_host_runtime, observe_host_security
 from ..providers.factory import describe_provider
 from ..session import SessionSnapshot, SessionStore
 from ..tools.shell import (
@@ -80,6 +81,7 @@ class WorkbenchSnapshotService:
         *,
         clock: Callable[[], datetime] | None = None,
         rate_table: ProviderRateTable | None = None,
+        host_runtime: HostRuntime | None = None,
     ) -> None:
         root = settings.workspace_root.expanduser().resolve(strict=True)
         if not root.is_dir():
@@ -89,6 +91,9 @@ class WorkbenchSnapshotService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._rate_table = rate_table or load_rate_table(settings.web_rate_table)
         self._sessions = SessionStore(root)
+        self._host_runtime = host_runtime or build_host_runtime(
+            settings, mode=HostMode.WEB
+        )
         self._shell = ShellTools(
             root,
             timeout=min(settings.command_timeout, 5.0),
@@ -311,10 +316,19 @@ class WorkbenchSnapshotService:
             task=self._task(latest),
             context=self._context(latest),
             review=review,
-            security=SecurityDto(
-                sandbox_backend=self.settings.sandbox_backend,
-                audit_enabled=self.settings.audit_log_enabled,
-            ),
+            security=self._security(),
+        )
+
+    def _security(self) -> SecurityDto:
+        audit_sink = self._host_runtime.audit_sink
+        shield = observe_host_security(
+            self.settings,
+            self._host_runtime.registry,
+            audit_probe=audit_sink.inspect if audit_sink is not None else None,
+        )
+        return SecurityDto.from_security_shield(
+            shield,
+            sandbox_backend=self.settings.sandbox_backend,
         )
 
     def _latest_session(

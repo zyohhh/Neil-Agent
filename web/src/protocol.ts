@@ -147,6 +147,51 @@ export interface WorkbenchSnapshotV1 {
     bootstrap_token_required: true
     write_routes: 0
     agent_connected: true
+    shield_schema_version: 2
+    sandbox_backend: 'disabled' | 'windows-sandbox'
+    audit_enabled: boolean
+    audit_status: 'recording' | 'busy' | 'disabled' | 'degraded' | 'unavailable'
+    tool_count: number
+    direct_tool_count: number
+    approval_tool_count: number
+    application: {
+      layer: 'application' | 'os'
+      status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
+      headline: string
+      details: string[]
+    }
+    os_sandbox: {
+      layer: 'application' | 'os'
+      status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
+      headline: string
+      details: string[]
+    }
+    capabilities: Array<{
+      key: string
+      label: string
+      state: 'direct' | 'approval' | 'forbidden' | 'unavailable'
+      layer: 'application' | 'os'
+      tool_count: number
+      summary: string
+    }>
+    capability_legend: {
+      direct: number
+      approval: number
+      forbidden: number
+      unavailable: number
+    }
+    boundary_watch: {
+      observation_count: number
+      warning_count: number
+      changes_stable: boolean
+      signals: Array<{
+        key: 'path' | 'network' | 'command' | 'audit'
+        state: 'enforced' | 'application_only' | 'restricted' | 'absent' | 'recording' | 'busy' | 'disabled' | 'degraded' | 'unavailable'
+        layer: 'application' | 'os'
+        qualifier: 'os_ready' | 'os_disabled' | 'os_fail_closed' | 'application'
+        label: string
+      }>
+    }
   }
 }
 

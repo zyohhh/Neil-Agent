@@ -1366,3 +1366,14 @@ CLI 展示修改预览并等待用户输入 y/yes
 ### 验证
 
 - `tests/test_web_workbench.py` 覆盖回合保存、跨会话恢复、`new_session` 隔离以及运行中拒绝切换。
+
+## 2026-08-21：Web Security Shield 快照投影
+
+### 运行时
+
+- 新增 `security_projection.py`：`project_security_shield_basic()` 与 `basic_boundary_label()`，供 cockpit 与 Web 共用。
+- 新增 `observe_host_security()`；`WorkbenchSnapshotService` 通过 `SecurityDto.from_security_shield()` 投影与 CLI `/cockpit` 同源的 Security Shield 事实。
+
+### 验证
+
+- `tests/test_security_projection.py` 与 `tests/test_web_workbench.py` 覆盖 DTO 映射与快照一致性。

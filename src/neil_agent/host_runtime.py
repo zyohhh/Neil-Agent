@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from .audit import JsonlAuditSink
+from .audit import AuditLogStatus, JsonlAuditSink
 from .config import Settings
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
@@ -17,6 +18,7 @@ from .tools.registry import ToolRegistry
 from .tools.sandbox import SandboxCommandTools
 from .tools.shell import ShellTools
 from .sandbox import WindowsSandboxBackend
+from .security import SecurityShield, observe_security_shield
 
 
 class HostMode(str, Enum):
@@ -163,4 +165,28 @@ def build_host_runtime(
         audit_sink=audit_sink,
         task_tracker=task_tracker,
         profile=profile,
+    )
+
+
+def observe_host_security(
+    settings: Settings,
+    registry: ToolRegistry,
+    *,
+    audit_probe: Callable[[], AuditLogStatus] | None = None,
+) -> SecurityShield:
+    """Capture one metadata-only Security Shield snapshot for the active host registry."""
+
+    return observe_security_shield(
+        {
+            definition.name: registry.requires_approval(definition.name)
+            for definition in registry.definitions
+        },
+        sandbox_backend=settings.sandbox_backend,
+        audit_enabled=settings.audit_log_enabled,
+        sandbox_probe=(
+            windows_sandbox_backend(settings).probe
+            if settings.sandbox_backend == "windows-sandbox"
+            else None
+        ),
+        audit_probe=audit_probe,
     )

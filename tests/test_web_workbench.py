@@ -18,12 +18,14 @@ from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from neil_agent.config import Settings
+from neil_agent.host_runtime import HostMode, build_host_runtime, observe_host_security
 from neil_agent.events import RuntimeEventFactory
 from neil_agent.schemas import ActivityEvent, Message, TokenUsage
 from neil_agent.schemas import ModelResponse, ToolCall
 from neil_agent.session import SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 from neil_agent.web import WorkbenchController, WorkbenchSnapshotService, create_app
+from neil_agent.web.dto import SecurityDto
 from neil_agent.web.controller import (
     ClientCommand,
     ControllerSubscription,
@@ -302,8 +304,28 @@ def test_health_is_generic_and_snapshot_requires_one_time_bootstrap(
     assert snapshot.headers["cache-control"] == "no-store"
     assert snapshot.json()["security"]["write_routes"] == 0
     assert snapshot.json()["security"]["agent_connected"] is True
+    assert snapshot.json()["security"]["shield_schema_version"] == 2
+    assert snapshot.json()["security"]["boundary_watch"]["changes_stable"] is True
+    assert len(snapshot.json()["security"]["boundary_watch"]["signals"]) == 4
     assert "not-exposed" not in snapshot.text
     assert str(tmp_path.resolve()) not in snapshot.text
+
+
+def test_snapshot_security_matches_observed_host_shield(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    runtime = build_host_runtime(settings, mode=HostMode.WEB)
+    service = WorkbenchSnapshotService(settings, host_runtime=runtime, clock=lambda: NOW)
+    expected = SecurityDto.from_security_shield(
+        observe_host_security(settings, runtime.registry),
+        sandbox_backend=settings.sandbox_backend,
+    ).model_dump(mode="json")
+
+    client = _client(tmp_path)
+    _authenticate(client)
+    snapshot = client.get("/api/v1/snapshot")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["security"] == expected
 
 
 def test_rejects_untrusted_host_origin_and_all_write_routes(tmp_path: Path) -> None:

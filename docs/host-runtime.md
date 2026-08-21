@@ -37,9 +37,9 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
 | 审计 hooks | 可选 | 可选 | 可选 | 可选 |
 | 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | ✅ 成功回合保存；`select_session` / `new_session` |
-| Security Shield 投影 | ✅ `/cockpit` | ❌ | ❌ | **❌ 待对齐** |
+| Security Shield 投影 | ✅ `/cockpit` | ❌ | ❌ | ✅ 快照 `security` DTO（与 CLI 同源） |
 
-“待对齐”项是有意记录在案的已知差距，不是 `host_runtime.py` 的遗漏说明错误。后续迁移应优先补齐共享 `SecurityShield` / cockpit DTO 映射。
+“待对齐”项是有意记录在案的已知差距，不是 `host_runtime.py` 的遗漏说明错误。Web 上下文 `ContextTomography` 仍待 richer 投影。
 
 ## 使用方式
 
@@ -84,6 +84,7 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | Web 注册沙箱工具 | ✅ |
 | Web 使用 `instruction_target` | ✅ |
 | Web 会话 load/save | ✅ |
+| Web Security Shield 快照投影 | ✅ |
 | 跨入口 parity 回归测试 | ✅ `tests/test_host_runtime.py` |
 
 ## 相关文档
