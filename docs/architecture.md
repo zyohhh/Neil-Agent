@@ -151,13 +151,15 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - 快照只在驾驶舱挂载、用户提交和回合结束时计算，不由 250 ms 指标刷新反复扫描历史。提交态的 `CURRENT CHAIN` 目前只表示规范化后的当前用户消息，界面明确标记 `SUBMIT SNAPSHOT`；工具循环追加消息和 `before_model` hook 的动态上下文尚未纳入本切片。
 - Phase 2A 的三批交付已全部完成；Phase 2B Security Shield 亦已收口；下一可视化阶段是 Phase 3A Time Machine 只读回放。
 
-### Web Workbench（P7 已完成）
+### Web Workbench（P8 已完成）
 
 - `neil-agent-web` 只绑定 `127.0.0.1`；启动器校验 wheel 内静态资源 SHA-256 清单后才打开浏览器，端口冲突或资源损坏时 fail-closed。
 - HTTP 提供健康检查、一次性 bootstrap、完整快照、只读会话/文件树/Git review；WebSocket 使用短时单次 ticket，命令带 `expected_revision` 与 `command_id` 去重。
 - `WorkbenchController` 在后台线程运行 `Agent.stream_chat()`，通过 `EventBus` 与 `asyncio` 队列向浏览器推送有界元数据事件；审批仍逐工具、预览重校验，默认拒绝。
 - 浏览器可开始/取消单个 Agent turn、接收流式回答与活动、审批高风险工具；Review 使用固定只读 Git 命令，不向浏览器开放任意 shell 或 thinking 正文。
-- Web 每轮仍新建 `Agent`，尚未接入 `SessionStore` 多轮恢复；`SecurityShield` 与条件 `run_command` 亦未在 Web 路径注册。详见 [`host-runtime.md`](host-runtime.md)。
+- Web 每轮构造隔离的 `Agent`，随后恢复当前选中的严格 `SessionSnapshot`；成功 turn 原子保存，失败/取消不落盘，保存失败会闭锁后续 turn 直到显式新建或重选会话。
+- `new_session` / `select_session` 受控制租约、精确 revision 与 idle 状态约束；跨 Provider/模型私有状态在发网前拒绝，消息正文不进入浏览器快照或 `session_changed` 事件。
+- Web 与 CLI 共用 `observe_host_security()`；条件 `run_command`、应用工具边界、OS 沙箱和审计状态使用同一注册与观察语义。详见 [`host-runtime.md`](host-runtime.md)。
 
 ## 上下文预算
 

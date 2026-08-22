@@ -21,6 +21,7 @@ src/neil_agent/host_runtime.py
   HostRuntime
   instruction_target()
   windows_sandbox_backend()
+  observe_host_security()
   build_host_runtime()
 ```
 
@@ -36,10 +37,10 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | Windows `run_command` | 认证后 | 认证后 | 认证后 | 认证后（与 CLI 同路径） |
 | 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
 | 审计 hooks | 可选 | 可选 | 可选 | 可选 |
-| 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | **❌ 每轮新建 Agent** |
-| Security Shield 投影 | ✅ `/cockpit` | ❌ | ❌ | **❌ 待对齐** |
+| 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | ✅ 选择、恢复、成功后原子保存 |
+| Security Shield 投影 | ✅ `/cockpit` | ❌（无对应 UI） | ❌（无对应 UI） | ✅ 与 CLI 共用观察函数 |
 
-“待对齐”项是有意记录在案的已知差距，不是 `host_runtime.py` 的遗漏说明错误。后续迁移应优先补齐 Web 的沙箱注册、指令 `cwd` 作用域和会话 load/save。
+Web 与 CLI 的沙箱注册、指令 `cwd` 作用域、会话连续性和安全投影现已对齐。入口仍保留各自的交互语义：CLI 长驻一个 Agent；Web 每个 turn 构造隔离的 Agent，再从控制器选中的严格快照恢复，且只在成功完成后保存。
 
 ## 使用方式
 
@@ -70,7 +71,8 @@ runtime = build_host_runtime(settings, mode=mode, base_hooks=hooks)
 
 ```python
 runtime = build_host_runtime(settings, mode=HostMode.WEB)
-# WorkbenchController 仍为每轮 turn 创建 EventBus 与 approval_handler
+# WorkbenchController 为每轮 turn 创建 EventBus 与 approval_handler，
+# 并在 Agent 构造后恢复当前 SessionSnapshot。
 ```
 
 ## 迁移状态
@@ -82,7 +84,8 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | CLI / 非交互 / Web 改用共享装配 | ✅ |
 | Web 注册沙箱工具 | ✅ |
 | Web 使用 `instruction_target` | ✅ |
-| Web 会话 load/save | 待办 |
+| Web 会话 load/save | ✅ |
+| CLI / Web 共用 Security Shield 观察 | ✅ |
 | 跨入口 parity 回归测试 | ✅ `tests/test_host_runtime.py` |
 
 ## 相关文档

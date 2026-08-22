@@ -1,6 +1,6 @@
 # Neil Agent Web Workbench 开发文档
 
-> 状态：P7 completed · Resilient frontend architecture v1.1
+> 状态：P8 completed · Web session continuity and runtime parity
 >
 > 更新时间：2026-08-18
 >
@@ -489,6 +489,7 @@ interface WorkbenchSnapshotV1 {
   model: ModelSummary;
   run: RunSummary;
   sessions: SessionPage;
+  activeSession: ActiveSessionSummary;
   timeline: TimelineStepDto[];
   review: ReviewSummary;
   context: ContextSummary;
@@ -508,11 +509,12 @@ interface WorkbenchSnapshotV1 {
 ```text
 acquire_control
 release_control
+new_session
+select_session
 start_turn
 cancel_turn
 approve_tool
 reject_tool
-select_session
 set_model_for_next_turn
 ping
 ```
@@ -546,10 +548,11 @@ activity
 runtime_step
 approval_requested
 approval_resolved
+session_changed
 service_closing
 ```
 
-`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期。`select_session` 与 `set_model_for_next_turn` 尚未实现。
+`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期；`session_changed` 只投影活动会话摘要、会话列表、任务、usage、review 与有界运行状态，不发送消息正文或 Provider 私有状态。`new_session` 与 `select_session` 已实现，`set_model_for_next_turn` 仍未实现。
 
 ### 11.6 重连流程
 
@@ -754,7 +757,7 @@ Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 
 - Playwright 直接管理 Vite preview，`npm run e2e` 可独立构建并运行五档溢出、抽屉、键盘、axe 和网络边界检查；
 - 四张断点截图现在由 `toHaveScreenshot` 与仓库基线实际比较，`npm run capture:baselines` 是显式审核后更新基线的唯一入口。
 
-P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约，继续继承 P5 威胁模型。PTY 如要实现，必须作为独立项目立项，不包含在 P0–P7 里程碑内。
+P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约，继续继承 P5 威胁模型。PTY 如要实现，必须作为独立项目立项，不包含在 P0–P8 里程碑内。
 
 ### P7：前端架构拆分与故障恢复
 
@@ -772,6 +775,22 @@ P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSock
 P7 不修改 Python DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约。Focus/Build 权限、运行时模型切换、会话恢复和 PTY 仍需独立产品决策，不能通过前端恢复机制间接实现。
 
 P7 基本验收后的发布整改不新增产品阶段或能力：wheel 现在显式携带 WebSocket 运行时，启动器固定使用 `websockets-sansio` 并在运行时缺失时 fail closed；Ctrl+C 在 Uvicorn 完成 ASGI 关闭后按正常停止处理，优雅关闭上限为 10 秒。Uvicorn 协议日志使用 warning 级别，避免把查询参数中的单次 WebSocket ticket 写入终端。隔离 wheel 已完成真实 upgrade、控制租约、刷新重载、活动连接关闭、退出码和无残留进程复验；记录见 [`web-workbench-basic-acceptance.md`](web-workbench-basic-acceptance.md)。
+
+### P8：Web 会话连续性与运行时一致性
+
+状态：已于 `feature/web-session-continuity` 完成。P8 把左侧 Sessions 从只读展示升级为真实的 `new_session` / `select_session` 控制面，并补齐 Web 与 CLI 的剩余运行时一致性。控制器启动时创建不落盘的活动会话；只有持有控制租约、revision 精确匹配且没有活动 turn/待审批时才能新建或切换。选择已保存会话后，服务端恢复完整消息、计划、最近质量检查和服务端 usage；浏览器始终只收到摘要 DTO。
+
+每个 Web turn 仍创建独立的 Agent 与工具运行时，但会在发起模型请求前恢复控制器选中的 `SessionSnapshot`。仅成功完成的 turn 才通过 `SessionStore` 原子保存；模型/工具失败、取消或关闭不写会话。保存失败时旧快照保持不变，活动会话进入 `save_failed`，控制器禁止继续启动 turn，直到用户显式新建或重新选择会话。跨 Provider 或模型的私有状态在切换时预检并于网络请求前拒绝，不做静默丢弃或降级。`session_changed` 不携带完整 output 或嵌套 Git 文件列表，重放窗口只保留最新一条；断线客户端若跨过被取代的序号，会收到 `snapshot_invalidated` 并通过 HTTP 快照重建。
+
+P8 同时将 Security Shield 观察抽到 `host_runtime.observe_host_security()`，CLI 和 Web 使用同一工具审批、应用层、OS 沙箱与审计状态语义。Web 安全摘要显示实际注册工具数量和观察结果；未通过 Windows Sandbox 认证时继续显示 disabled/incomplete/unavailable，不把配置意图冒充为已生效隔离。
+
+交付：
+
+- 活动会话摘要、持久化状态与 `session_changed` 增量事件；
+- 新建、选择、恢复、成功保存及显式故障恢复；
+- 失败/取消不落盘、保存失败闭锁、跨 Provider 私有状态拒绝测试；
+- 前端真实会话操作、禁用原因、持久化状态和 Security Shield 摘要；
+- Web/CLI 共享 Security Shield 投影与更新后的威胁评审。
 
 ## 16. 测试策略
 
@@ -880,13 +899,13 @@ feat(api): add tool approval flow
 1. P0 已基于 Provider Runtime Phase 5；合并前是否先将 Provider 分支单独推送/合入 `main`？
 2. 产品名称使用 `Web Workbench`、`Workspace` 还是 `Mission Control`？
 3. Focus/Build 是纯展示模式，还是分别代表只读分析与可修改工具权限？在权限语义确定前不实现为真实开关。
-4. 首版是否允许在浏览器恢复/切换会话，还是只观察当前 CLI 会话？
+4. 已决：P8 允许浏览器在控制租约、精确 revision 与 idle 门禁下恢复/切换工作区本地会话；浏览器不接收完整消息或 Provider 私有状态。
 5. 模型切换是否由 Web 进程独立拥有，还是沿用启动时环境配置？
 6. 质量检查输出允许显示多少正文、保留多久？
 7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
 8. 已决：P5 采用 wheel 内嵌生产产物；Vite 开发服务器只用于源码开发，不是发布启动项。
 
-P1–P7 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁和前端故障恢复；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
+P1–P8 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁、前端故障恢复和 Web 会话连续性；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
 
 其中第 1、3、5 项会影响后端边界，必须在接真实 Agent 前确定；其他项可在 fixture 原型评审后决定。
 

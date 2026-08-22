@@ -16,6 +16,13 @@ export interface LiveSession {
   has_compaction: boolean
 }
 
+export interface LiveActiveSession {
+  session_id: string
+  title: string
+  round_count: number
+  persistence_status: 'unsaved' | 'saved' | 'save_failed'
+}
+
 export interface LiveGitFile {
   path: string
   previous_path: string | null
@@ -104,6 +111,8 @@ export interface WorkbenchSnapshotV1 {
     can_approve_tool: boolean
     can_show_diff: boolean
     can_estimate_cost: boolean
+    can_create_session: boolean
+    can_select_session: boolean
     tool_permission_mode: 'approval_gated'
     has_pty: false
   }
@@ -112,6 +121,7 @@ export interface WorkbenchSnapshotV1 {
   approval: LiveApproval | null
   git: { available: boolean; branch: string | null; revision: string | null; change_count: number; files: LiveGitFile[]; truncated: boolean }
   sessions: { available: boolean; items: LiveSession[]; invalid_count: number; total_count: number }
+  active_session: LiveActiveSession | null
   files: LiveFileTree
   task: {
     source: 'saved_session' | 'unavailable'
@@ -146,6 +156,15 @@ export interface WorkbenchSnapshotV1 {
     bootstrap_token_required: true
     write_routes: 0
     agent_connected: true
+    sandbox_backend: 'disabled' | 'windows-sandbox'
+    audit_enabled: boolean
+    shield_schema_version: number
+    application_status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
+    os_sandbox_status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
+    audit_status: 'recording' | 'busy' | 'disabled' | 'degraded' | 'unavailable'
+    tool_count: number
+    direct_tool_count: number
+    approval_tool_count: number
   }
 }
 
@@ -154,14 +173,14 @@ export type LiveConnectionState = 'fixture' | 'connecting' | 'live' | 'offline'
 export interface WorkbenchEventV1 {
   protocol_version: 1
   message_type: 'event'
-  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'approval_requested' | 'approval_resolved' | 'control_changed' | 'snapshot_invalidated' | 'service_closing'
+  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'approval_requested' | 'approval_resolved' | 'control_changed' | 'session_changed' | 'snapshot_invalidated' | 'service_closing'
   sequence: number
   revision: number
   timestamp: string
   payload: Record<string, unknown>
 }
 
-type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn' | 'approve_tool' | 'reject_tool'
+type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn' | 'approve_tool' | 'reject_tool' | 'new_session' | 'select_session'
 
 interface PendingCommand {
   command: CommandName
@@ -259,12 +278,19 @@ export const resetLiveSnapshotRequestForTests = () => {
 const isSnapshot = (value: unknown): value is WorkbenchSnapshotV1 => {
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
+  const capabilities = record.capabilities as Record<string, unknown> | undefined
+  const security = record.security as Record<string, unknown> | undefined
   return record.schema_version === 1
     && record.source === 'live'
     && typeof record.generated_at === 'string'
     && typeof record.revision === 'number'
     && typeof record.last_sequence === 'number'
     && typeof record.run === 'object'
+    && typeof record.active_session === 'object'
+    && typeof capabilities?.can_create_session === 'boolean'
+    && typeof capabilities.can_select_session === 'boolean'
+    && typeof security?.shield_schema_version === 'number'
+    && typeof security.application_status === 'string'
 }
 
 interface RealtimeHandlers {
@@ -319,6 +345,14 @@ export class WorkbenchRealtimeClient {
 
   rejectTool(requestId: string) {
     return this.send('reject_tool', { request_id: requestId })
+  }
+
+  newSession() {
+    return this.send('new_session', {})
+  }
+
+  selectSession(sessionId: string) {
+    return this.send('select_session', { session_id: sessionId })
   }
 
   private async connect() {
@@ -457,10 +491,43 @@ export const reduceWorkbenchEvent = (
   if (event.event_type === 'run_state') {
     const run = event.payload as unknown as LiveRun
     const active = run.status === 'running' || run.status === 'cancelling'
+    const persistenceBlocked = snapshot.active_session?.persistence_status === 'save_failed'
     return {
       ...base,
       run,
-      capabilities: { ...snapshot.capabilities, can_start_turn: !active, can_cancel_turn: active },
+      capabilities: {
+        ...snapshot.capabilities,
+        can_start_turn: !active && !persistenceBlocked,
+        can_cancel_turn: active,
+        can_create_session: !active,
+        can_select_session: !active,
+      },
+    }
+  }
+  if (event.event_type === 'session_changed') {
+    const payload = event.payload as {
+      active_session: WorkbenchSnapshotV1['active_session']
+      sessions: WorkbenchSnapshotV1['sessions']
+      task: WorkbenchSnapshotV1['task']
+      context: WorkbenchSnapshotV1['context']
+      review: WorkbenchSnapshotV1['review']
+      capabilities: WorkbenchSnapshotV1['capabilities']
+      reset_runtime: boolean
+    }
+    return {
+      ...base,
+      active_session: payload.active_session,
+      sessions: payload.sessions,
+      task: payload.task,
+      context: payload.context,
+      review: payload.review,
+      capabilities: payload.capabilities,
+      ...(payload.reset_runtime ? {
+        run: { status: 'idle', run_id: null, objective: null, started_at: null, finished_at: null, error_type: null } as LiveRun,
+        timeline: [],
+        output: [],
+        approval: null,
+      } : {}),
     }
   }
   if (event.event_type === 'runtime_step') {

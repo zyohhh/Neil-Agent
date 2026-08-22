@@ -435,6 +435,20 @@
   padding-top: 18px;
 }
 
+.sessions-heading-row {
+  min-height: 34px;
+}
+
+.sessions-heading-row .eyebrow {
+  margin-bottom: 0;
+}
+
+.new-session-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .eyebrow {
   margin: 0 0 12px;
   color: var(--color-text-muted);
@@ -533,10 +547,32 @@
   cursor: not-allowed;
 }
 
+.session-item:disabled.is-active {
+  cursor: default;
+}
+
 .session-title {
+  display: grid;
+  gap: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-persistence {
+  color: var(--color-text-faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.session-persistence.is-save_failed {
+  color: var(--color-danger);
+}
+
+.session-persistence.is-unsaved {
+  color: var(--color-warning);
 }
 
 .session-item time {
@@ -1145,6 +1181,36 @@
   color: var(--color-accent);
   font-size: 11px;
   text-transform: uppercase;
+}
+
+.security-summary dl {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 10px;
+}
+
+.security-summary dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.security-summary dt,
+.security-summary dd {
+  margin: 0;
+}
+
+.security-summary dd {
+  color: var(--color-accent);
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.security-summary small {
+  color: var(--color-text-faint);
+  font-size: 10px;
 }
 
 .metrics-section {

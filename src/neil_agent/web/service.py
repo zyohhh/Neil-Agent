@@ -14,8 +14,14 @@ from typing import Literal
 
 from ..config import Settings
 from ..errors import SessionError, ToolError
+from ..host_runtime import HostMode, build_host_runtime, observe_host_security
 from ..providers.factory import describe_provider
-from ..session import SessionSnapshot, SessionStore
+from ..session import (
+    SESSION_DIRECTORY,
+    SESSION_STATE_DIRECTORY,
+    SessionSnapshot,
+    SessionStore,
+)
 from ..tools.shell import (
     BLOCKED_GIT_DIRECTORIES,
     BLOCKED_GIT_FILE_NAMES,
@@ -80,6 +86,7 @@ class WorkbenchSnapshotService:
         *,
         clock: Callable[[], datetime] | None = None,
         rate_table: ProviderRateTable | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         root = settings.workspace_root.expanduser().resolve(strict=True)
         if not root.is_dir():
@@ -88,12 +95,26 @@ class WorkbenchSnapshotService:
         self.root = root
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._rate_table = rate_table or load_rate_table(settings.web_rate_table)
-        self._sessions = SessionStore(root)
+        if (
+            session_store is not None
+            and session_store.root != root / SESSION_STATE_DIRECTORY / SESSION_DIRECTORY
+        ):
+            raise ValueError("Web Workbench session store must belong to the workspace")
+        self._sessions = session_store or SessionStore(root)
         self._shell = ShellTools(
             root,
             timeout=min(settings.command_timeout, 5.0),
             max_output_chars=max(settings.max_command_output_chars, 1_000),
         )
+        security_runtime = build_host_runtime(settings, mode=HostMode.WEB)
+        self._security_registry = security_runtime.registry
+        self._security_audit_sink = security_runtime.audit_sink
+
+    @property
+    def session_store(self) -> SessionStore:
+        """Return the validated workspace-local store shared by the controller."""
+
+        return self._sessions
 
     def health(self) -> dict[str, object]:
         """Return generic liveness facts without workspace metadata."""
@@ -235,48 +256,44 @@ class WorkbenchSnapshotService:
             truncated=snapshot.truncated,
         )
 
-    def review(self) -> ReviewDto:
-        """Combine read-only Git metadata with the latest persisted quality result."""
+    def review(
+        self,
+        session: SessionSnapshot | None = None,
+        *,
+        fallback_to_latest: bool = True,
+    ) -> ReviewDto:
+        """Combine Git metadata with one explicitly selected session when supplied."""
 
-        git = self.git()
-        latest = self._latest_session()
-        quality = None
-        if latest is not None and latest.latest_quality_check is not None:
-            record = latest.latest_quality_check
-            quality = QualityCheckDto(
-                check=record.check,
-                status=record.status,
-                exit_code=record.exit_code,
-            )
-        if not git.available:
-            state: ReviewState = "unavailable"
-        elif quality is not None and quality.status == "failed":
-            state = "failed"
-        elif quality is not None and quality.status == "passed":
-            state = "passed" if git.change_count else "empty"
-        elif git.change_count:
-            state = "stale"
-        else:
-            state = "empty"
-        cost = self._cost(latest)
-        return ReviewDto(
-            state=state,
-            git=git,
-            quality_check=quality,
-            quality_checks=() if quality is None else (quality,),
-            cost=cost,
-            cost_available=cost.source == "versioned_rate_table",
-        )
+        selected = session
+        if selected is None and fallback_to_latest:
+            selected = self._latest_session()
+        return self._review_from(self.git(), selected)
 
-    def snapshot(self) -> WorkbenchSnapshotDto:
+    def snapshot(
+        self,
+        session: SessionSnapshot | None = None,
+        *,
+        fallback_to_latest: bool = True,
+    ) -> WorkbenchSnapshotDto:
         """Build one internally consistent, versioned first-screen snapshot."""
 
         sessions = self.sessions()
-        latest = self._latest_session(sessions)
+        selected = session
+        if selected is None and fallback_to_latest:
+            selected = self._latest_session(sessions)
         git = self.git()
-        review = self._review_from(git, latest)
+        review = self._review_from(git, selected)
         provider = describe_provider(self.settings)
         capabilities = provider.capabilities
+        security = observe_host_security(
+            self.settings,
+            self._security_registry,
+            audit_probe=(
+                self._security_audit_sink.inspect
+                if self._security_audit_sink is not None
+                else None
+            ),
+        )
         return WorkbenchSnapshotDto(
             generated_at=utc_timestamp(self._clock()),
             workspace=WorkspaceDto(
@@ -302,12 +319,19 @@ class WorkbenchSnapshotService:
             git=git,
             sessions=sessions,
             files=self.files(depth=2),
-            task=self._task(latest),
-            context=self._context(latest),
+            task=self._task(selected),
+            context=self._context(selected),
             review=review,
             security=SecurityDto(
                 sandbox_backend=self.settings.sandbox_backend,
                 audit_enabled=self.settings.audit_log_enabled,
+                shield_schema_version=security.schema_version,
+                application_status=security.application.status,
+                os_sandbox_status=security.os_sandbox.status,
+                audit_status=security.audit_status,
+                tool_count=security.tool_count,
+                direct_tool_count=security.direct_tool_count,
+                approval_tool_count=security.approval_tool_count,
             ),
         )
 

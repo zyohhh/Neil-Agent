@@ -115,6 +115,16 @@ class SessionListDto(WorkbenchDto):
     total_count: int = Field(default=0, ge=0)
 
 
+class ActiveSessionDto(WorkbenchDto):
+    session_id: str = Field(
+        pattern=r"^\d{8}T\d{12}Z-[0-9a-f]{8}$",
+        max_length=128,
+    )
+    title: str = Field(min_length=1, max_length=80)
+    round_count: int = Field(ge=0)
+    persistence_status: Literal["unsaved", "saved", "save_failed"]
+
+
 class FileNodeDto(WorkbenchDto):
     name: str = Field(min_length=1, max_length=255)
     path: str = Field(max_length=4_096)
@@ -203,6 +213,17 @@ class SecurityDto(WorkbenchDto):
     agent_connected: Literal[True] = True
     sandbox_backend: Literal["disabled", "windows-sandbox"]
     audit_enabled: bool
+    shield_schema_version: int = Field(ge=1)
+    application_status: Literal[
+        "enforced", "ready", "disabled", "incomplete", "unavailable"
+    ]
+    os_sandbox_status: Literal[
+        "enforced", "ready", "disabled", "incomplete", "unavailable"
+    ]
+    audit_status: Literal["recording", "busy", "disabled", "degraded", "unavailable"]
+    tool_count: int = Field(ge=0)
+    direct_tool_count: int = Field(ge=0)
+    approval_tool_count: int = Field(ge=0)
 
 
 class RunDto(WorkbenchDto):
@@ -249,6 +270,8 @@ class RuntimeCapabilitiesDto(WorkbenchDto):
     can_approve_tool: bool
     can_show_diff: bool = True
     can_estimate_cost: bool = False
+    can_create_session: bool = True
+    can_select_session: bool = True
     tool_permission_mode: Literal["approval_gated"] = "approval_gated"
     has_pty: Literal[False] = False
 
@@ -272,6 +295,7 @@ class WorkbenchSnapshotDto(WorkbenchDto):
     approval: ApprovalRequestDto | None = None
     git: GitDto
     sessions: SessionListDto
+    active_session: ActiveSessionDto | None = None
     files: FileTreeDto
     task: TaskDto
     context: ContextDto
