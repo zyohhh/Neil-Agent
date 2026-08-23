@@ -40,7 +40,8 @@ from .task import (
 
 LEGACY_SESSION_FORMAT_VERSION: Literal[1] = 1
 PREVIOUS_SESSION_FORMAT_VERSION: Literal[2] = 2
-SESSION_FORMAT_VERSION: Literal[3] = 3
+USAGE_SESSION_FORMAT_VERSION: Literal[3] = 3
+SESSION_FORMAT_VERSION: Literal[4] = 4
 SESSION_STATE_DIRECTORY = ".neil-agent"
 SESSION_DIRECTORY = "sessions"
 SESSION_EXPORT_DIRECTORY = "exports"
@@ -181,13 +182,14 @@ class SessionSnapshotV2(SessionState):
             plan=self.plan,
             latest_quality_check=self.latest_quality_check,
             last_usage=None,
+            parent_session_id=None,
         )
 
 
-class SessionSnapshot(SessionState):
-    """Current version of one complete, resumable local session."""
+class SessionSnapshotV3(SessionState):
+    """Previous usage-aware snapshot retained for strict migration."""
 
-    version: Literal[3] = SESSION_FORMAT_VERSION
+    version: Literal[3] = USAGE_SESSION_FORMAT_VERSION
     title: str = Field(min_length=1, max_length=MAX_SESSION_TITLE_CHARS)
     last_usage: TokenUsage | None = None
 
@@ -195,6 +197,42 @@ class SessionSnapshot(SessionState):
     @classmethod
     def title_must_be_safe(cls, value: str) -> str:
         return normalize_session_title(value)
+
+    def migrate(self) -> SessionSnapshot:
+        return SessionSnapshot(
+            session_id=self.session_id,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            title=self.title,
+            messages=self.messages,
+            plan=self.plan,
+            latest_quality_check=self.latest_quality_check,
+            last_usage=self.last_usage,
+            parent_session_id=None,
+        )
+
+
+class SessionSnapshot(SessionState):
+    """Current version of one complete, resumable local session."""
+
+    version: Literal[4] = SESSION_FORMAT_VERSION
+    title: str = Field(min_length=1, max_length=MAX_SESSION_TITLE_CHARS)
+    last_usage: TokenUsage | None = None
+    parent_session_id: str | None = Field(
+        default=None,
+        pattern=SESSION_ID_PATTERN_TEXT,
+    )
+
+    @field_validator("title")
+    @classmethod
+    def title_must_be_safe(cls, value: str) -> str:
+        return normalize_session_title(value)
+
+    @model_validator(mode="after")
+    def parent_must_be_distinct(self) -> Self:
+        if self.parent_session_id == self.session_id:
+            raise ValueError("parent session cannot reference itself")
+        return self
 
 
 class SessionExportEnvelope(BaseModel):
@@ -204,16 +242,20 @@ class SessionExportEnvelope(BaseModel):
 
     export_version: Literal[1] = SESSION_EXPORT_FORMAT_VERSION
     exported_at: AwareDatetime
-    session: SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1
+    session: SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
 
 
 SESSION_SNAPSHOT_ADAPTER: TypeAdapter[
-    SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1
-] = TypeAdapter(SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1)
+    SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
+] = TypeAdapter(
+    SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
+)
 
 
 def _migrate_snapshot(
-    snapshot: SessionSnapshot | SessionSnapshotV2 | SessionSnapshotV1,
+    snapshot: (
+        SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
+    ),
 ) -> SessionSnapshot:
     if isinstance(snapshot, SessionSnapshot):
         return snapshot
@@ -227,6 +269,7 @@ class SessionHandle:
     session_id: str
     created_at: datetime
     title: str = ""
+    parent_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +278,7 @@ class SessionSummary:
 
     session_id: str
     title: str
+    created_at: datetime
     updated_at: datetime
     round_count: int
     size_bytes: int
@@ -242,6 +286,7 @@ class SessionSummary:
     has_plan: bool = False
     failed_check: bool = False
     has_compaction: bool = False
+    parent_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +360,7 @@ class SessionStore:
             session_id=snapshot.session_id,
             created_at=snapshot.created_at,
             title=snapshot.title,
+            parent_session_id=snapshot.parent_session_id,
         )
 
     def save(
@@ -351,6 +397,7 @@ class SessionStore:
                     else None
                 ),
                 last_usage=last_usage,
+                parent_session_id=handle.parent_session_id,
             )
         except ValueError as error:
             raise SessionError(f"无法保存无效会话：{error}") from error
@@ -375,6 +422,7 @@ class SessionStore:
             plan=snapshot.plan,
             latest_quality_check=snapshot.latest_quality_check,
             last_usage=snapshot.last_usage,
+            parent_session_id=snapshot.parent_session_id,
         )
         self._write_snapshot(renamed)
         return renamed
@@ -396,6 +444,7 @@ class SessionStore:
                 session_id=handle.session_id,
                 created_at=handle.created_at,
                 title=branch_title,
+                parent_session_id=source.session_id,
             ),
             source.messages,
             source.restored_steps(),
@@ -795,6 +844,7 @@ class SessionStore:
         return SessionSummary(
             session_id=snapshot.session_id,
             title=snapshot.title,
+            created_at=snapshot.created_at,
             updated_at=snapshot.updated_at,
             round_count=len(user_messages),
             size_bytes=size_bytes,
@@ -809,6 +859,7 @@ class SessionStore:
                 and message.content.startswith("[Neil Agent /compact checkpoint]")
                 for message in snapshot.messages
             ),
+            parent_session_id=snapshot.parent_session_id,
         )
 
 

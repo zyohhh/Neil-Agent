@@ -111,6 +111,23 @@ def test_event_store_round_trips_strict_versioned_records(tmp_path: Path) -> Non
     assert raw.endswith("\n")
 
 
+def test_event_store_validates_all_records_but_retains_only_requested_tail(
+    tmp_path: Path,
+) -> None:
+    store = JsonlEventStore(tmp_path)
+    events = tuple(_event(number) for number in range(1, 7))
+    for event in events:
+        store.record(event)
+
+    assert store.load(max_records=2) == events[-2:]
+    with pytest.raises(EventStoreError, match="至少为 1"):
+        store.load(max_records=0)
+    original = store.path.read_bytes()
+    store.path.write_bytes(b'{"version":2}\n' + original)
+    with pytest.raises(EventStoreError, match="格式无效"):
+        store.load(max_records=1)
+
+
 def test_event_store_rotates_to_one_bounded_backup(tmp_path: Path) -> None:
     max_bytes = 10_000
     store = JsonlEventStore(tmp_path, max_bytes=max_bytes)
@@ -124,6 +141,7 @@ def test_event_store_rotates_to_one_bounded_backup(tmp_path: Path) -> None:
     assert store.backup_path.stat().st_size <= max_bytes
     assert 1 < len(retained) < len(events)
     assert retained[-1] == events[-1]
+    assert store.load(max_records=5) == retained[-5:]
     assert [event.timestamp for event in retained] == sorted(
         event.timestamp for event in retained
     )

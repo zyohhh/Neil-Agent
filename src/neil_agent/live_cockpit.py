@@ -53,6 +53,14 @@ from .security import (
     project_security_boundary_watch,
     project_security_shield,
 )
+from .time_machine import (
+    TimeMachineHistory,
+    TimeMachineHistoryProjection,
+    TimeMachineProjector,
+    TimeMachineSelection,
+    TimeMachineSnapshot,
+    render_time_machine_snapshot,
+)
 
 MAX_LIVE_EVENTS = 10_000
 MAX_BRIDGE_EVENTS = 1_024
@@ -65,7 +73,7 @@ SHORT_TERMINAL_HEIGHT = 36
 
 NodeFilter = Literal["all", "active", "failed", "tools"]
 PrimaryMonitorView = Literal["execution", "context"]
-MonitorView = Literal["execution", "context", "security"]
+MonitorView = Literal["execution", "context", "security", "time-machine"]
 
 _FILTER_LABELS: dict[NodeFilter, str] = {
     "all": "ALL",
@@ -529,6 +537,13 @@ class LiveCockpitApp(App[None]):
             priority=True,
             tooltip="查看应用权限色带与独立 OS 沙箱边界",
         ),
+        Binding(
+            "f6",
+            "toggle_time_machine",
+            "时间机器",
+            priority=True,
+            tooltip="只读浏览事件、会话分支、压缩与任务检查点",
+        ),
         Binding("1", "filter_all", "全部"),
         Binding("2", "filter_active", "进行中"),
         Binding("3", "filter_failed", "失败"),
@@ -613,6 +628,21 @@ class LiveCockpitApp(App[None]):
         background: #130f17;
     }
 
+    #time-machine-panel {
+        width: 2fr;
+        min-width: 40;
+        margin-right: 1;
+        border: round #356c94;
+        background: #09121b;
+    }
+
+    #time-machine-detail-panel {
+        width: 1fr;
+        min-width: 28;
+        border: round #5e4f91;
+        background: #100f1b;
+    }
+
     .panel-title {
         height: 2;
         padding: 0 1;
@@ -644,6 +674,16 @@ class LiveCockpitApp(App[None]):
     #security-detail-panel .panel-title {
         color: #ff9fba;
         background: #241421;
+    }
+
+    #time-machine-panel .panel-title {
+        color: #9bcdf5;
+        background: #102033;
+    }
+
+    #time-machine-detail-panel .panel-title {
+        color: #c8b8ff;
+        background: #1b1730;
     }
 
     #execution-tree {
@@ -699,6 +739,31 @@ class LiveCockpitApp(App[None]):
         scrollbar-background: #11130f;
     }
 
+    #time-machine-tree {
+        height: 1fr;
+        padding: 0 1 1 1;
+        scrollbar-color: #356c94;
+        scrollbar-background: #09121b;
+    }
+
+    #time-machine-inline-detail {
+        display: none;
+        height: auto;
+        max-height: 9;
+        padding: 0 1 1 1;
+        color: #c6d4df;
+        overflow-y: auto;
+    }
+
+    #time-machine-detail {
+        height: 1fr;
+        padding: 1 2;
+        color: #c6d4df;
+        overflow-y: auto;
+        scrollbar-color: #5e4f91;
+        scrollbar-background: #100f1b;
+    }
+
     #conversation {
         height: 1fr;
         min-height: 14;
@@ -739,7 +804,8 @@ class LiveCockpitApp(App[None]):
 
     LiveCockpitApp.narrow #dag-panel,
     LiveCockpitApp.narrow #context-panel,
-    LiveCockpitApp.narrow #security-panel {
+    LiveCockpitApp.narrow #security-panel,
+    LiveCockpitApp.narrow #time-machine-panel {
         width: 1fr;
         min-width: 0;
         margin-right: 0;
@@ -747,8 +813,13 @@ class LiveCockpitApp(App[None]):
 
     LiveCockpitApp.narrow #detail-panel,
     LiveCockpitApp.narrow #context-detail-panel,
-    LiveCockpitApp.narrow #security-detail-panel {
+    LiveCockpitApp.narrow #security-detail-panel,
+    LiveCockpitApp.narrow #time-machine-detail-panel {
         display: none;
+    }
+
+    LiveCockpitApp.narrow #time-machine-inline-detail {
+        display: block;
     }
 
     LiveCockpitApp.narrow #approval-flows {
@@ -804,6 +875,12 @@ class LiveCockpitApp(App[None]):
         margin-right: 0;
     }
 
+    LiveCockpitApp.short #time-machine-panel {
+        width: 1fr;
+        min-width: 0;
+        margin-right: 0;
+    }
+
     LiveCockpitApp.short #context-detail-panel {
         display: none;
     }
@@ -812,11 +889,19 @@ class LiveCockpitApp(App[None]):
         display: none;
     }
 
+    LiveCockpitApp.short #time-machine-detail-panel {
+        display: none;
+    }
+
     LiveCockpitApp.short #context-title {
         display: none;
     }
 
     LiveCockpitApp.short #security-title {
+        display: none;
+    }
+
+    LiveCockpitApp.short #time-machine-title {
         display: none;
     }
 
@@ -842,6 +927,12 @@ class LiveCockpitApp(App[None]):
         display: none;
     }
 
+    LiveCockpitApp.short #time-machine-inline-detail {
+        display: block;
+        max-height: 5;
+        padding: 0 1;
+    }
+
     LiveCockpitApp.output-expanded #workspace {
         display: none;
     }
@@ -863,12 +954,24 @@ class LiveCockpitApp(App[None]):
         security: SecurityShield | None = None,
         security_observer: Callable[[], SecurityShield] | None = None,
         initial_events: Iterable[RuntimeEvent] = (),
+        historical_events: Iterable[RuntimeEvent] = (),
+        time_machine_history_provider: Callable[[], TimeMachineHistory] | None = None,
+        time_machine_persistence_enabled: bool = False,
+        persistent_event_count: int = 0,
         max_events: int = MAX_LIVE_EVENTS,
     ) -> None:
         if max_events < 1:
             raise ValueError("live cockpit event capacity must be at least 1")
         if security_observer is not None and not callable(security_observer):
             raise ValueError("live cockpit security observer must be callable")
+        if time_machine_history_provider is not None and not callable(
+            time_machine_history_provider
+        ):
+            raise ValueError("time machine history provider must be callable")
+        if type(time_machine_persistence_enabled) is not bool:
+            raise ValueError("time machine persistence flag must be boolean")
+        if type(persistent_event_count) is not int or persistent_event_count < 0:
+            raise ValueError("persistent event count cannot be negative")
         super().__init__()
         self._agent = agent
         self._event_bus = event_bus
@@ -885,6 +988,18 @@ class LiveCockpitApp(App[None]):
         self._boundary_watch = project_security_boundary_watch(
             self._security_observations
         )
+        self._historical_events = tuple(historical_events)
+        if any(
+            not isinstance(event, RuntimeEvent) for event in self._historical_events
+        ):
+            raise ValueError("historical events must contain only RuntimeEvent values")
+        self._time_machine_history_provider = time_machine_history_provider
+        self._time_machine_history = TimeMachineHistoryProjection()
+        self._time_machine_history_failures = 0
+        self._time_machine_persistence_enabled = time_machine_persistence_enabled
+        self._persistent_event_count = persistent_event_count
+        self._time_machine_projector = TimeMachineProjector()
+        self._time_machine_selection: TimeMachineSelection | None = None
         materialized_events = tuple(initial_events)
         self._events = list(materialized_events[-max_events:])
         self._max_events = max_events
@@ -895,6 +1010,12 @@ class LiveCockpitApp(App[None]):
         self._graph = ExecutionGraphProjector().project(self._events)
         self._metrics = MetricsProjector().project(self._graph)
         self._approval_flow = ApprovalFlowProjector().project(self._graph)
+        self._time_machine_snapshot = self._time_machine_projector.project(
+            (*self._historical_events, *self._events),
+            self._time_machine_history,
+            persistence_enabled=self._time_machine_persistence_enabled,
+            persistent_event_count=self._persistent_event_count,
+        )
         self._context_snapshot = agent.context_tomography()
         self._context_simulation: ContextWhatIf | None = None
         self._monitor_view: MonitorView = "execution"
@@ -959,6 +1080,10 @@ class LiveCockpitApp(App[None]):
         return self._boundary_watch
 
     @property
+    def time_machine_snapshot(self) -> TimeMachineSnapshot:
+        return self._time_machine_snapshot
+
+    @property
     def _cockpit_screen(self) -> Screen[Any]:
         return self.screen_stack[0]
 
@@ -1004,6 +1129,24 @@ class LiveCockpitApp(App[None]):
                 with Vertical(id="security-detail-panel"):
                     yield Static("ENFORCEMENT LAYERS", classes="panel-title")
                     yield Static(id="security-detail")
+            with Horizontal(id="time-machine-view", classes="workspace-view"):
+                with Vertical(id="time-machine-panel"):
+                    yield Static(
+                        "TIME MACHINE  ·  READ ONLY  ·  METADATA ONLY",
+                        id="time-machine-title",
+                        classes="panel-title",
+                    )
+                    history_tree: Tree[TimeMachineSelection] = Tree(
+                        "HISTORY",
+                        id="time-machine-tree",
+                    )
+                    history_tree.show_guides = True
+                    history_tree.guide_depth = 2
+                    yield history_tree
+                    yield Static(id="time-machine-inline-detail")
+                with Vertical(id="time-machine-detail-panel"):
+                    yield Static("HISTORICAL PROJECTION", classes="panel-title")
+                    yield Static(id="time-machine-detail")
         with Vertical(id="conversation"):
             yield Static(
                 self._stream_title_text(),
@@ -1026,6 +1169,7 @@ class LiveCockpitApp(App[None]):
         self._refresh_projection()
         self._refresh_context_view()
         self._refresh_security_view()
+        self._refresh_time_machine_view()
         self._metrics_timer = self.set_interval(0.25, self._refresh_metrics)
         self._cockpit_screen.query_one("#prompt", Input).focus()
 
@@ -1057,6 +1201,7 @@ class LiveCockpitApp(App[None]):
         if previous_density != current_density:
             self._refresh_context_view()
             self._refresh_security_view()
+            self._refresh_time_machine_view()
 
     @on(Input.Submitted, "#prompt")
     def submit_prompt(self, event: Input.Submitted) -> None:
@@ -1098,6 +1243,8 @@ class LiveCockpitApp(App[None]):
             self._view_dropped_events += overflow
         self._events.extend(incoming)
         self._refresh_projection()
+        if self._monitor_view == "time-machine":
+            self._refresh_time_machine_snapshot(refresh_history=False)
 
     def on_assistant_chunk(self, message: AssistantChunk) -> None:
         self._cockpit_screen.query_one("#transcript", Log).write(
@@ -1122,6 +1269,8 @@ class LiveCockpitApp(App[None]):
         self._context_simulation = None
         self._context_snapshot = self._agent.context_tomography()
         self._refresh_context_view()
+        if self._monitor_view == "time-machine":
+            self._refresh_time_machine_snapshot(refresh_history=True)
         self._turn_done.set()
         self._refresh_metrics()
 
@@ -1145,6 +1294,32 @@ class LiveCockpitApp(App[None]):
             return
         self._selected_correlation_id = correlation_id
         self._refresh_detail()
+
+    @on(Tree.NodeHighlighted, "#time-machine-tree")
+    def highlight_time_machine_point(
+        self,
+        message: Tree.NodeHighlighted[TimeMachineSelection],
+    ) -> None:
+        selection = message.node.data
+        if selection is None:
+            return
+        self._time_machine_selection = selection
+        if selection.kind == "event":
+            entry = next(
+                (
+                    item
+                    for item in self._time_machine_snapshot.timeline.entries
+                    if item.event_id == selection.key
+                ),
+                None,
+            )
+            if entry is not None:
+                self._time_machine_snapshot = self._project_time_machine(
+                    cursor_sequence=entry.sequence
+                )
+                tree = self._cockpit_screen.query_one("#time-machine-tree", Tree)
+                tree.root.set_label(self._time_machine_root_label())
+        self._refresh_time_machine_detail()
 
     def request_tool_approval(self, call: ToolCall, preview: str) -> bool:
         """Block only the Agent worker while the UI obtains a decision."""
@@ -1217,6 +1392,16 @@ class LiveCockpitApp(App[None]):
             self._primary_monitor_view
             if self._monitor_view == "security"
             else "security"
+        )
+        self._set_monitor_view(target)
+
+    def action_toggle_time_machine(self) -> None:
+        if isinstance(self.screen, ModalScreen):
+            return
+        target: MonitorView = (
+            self._primary_monitor_view
+            if self._monitor_view == "time-machine"
+            else "time-machine"
         )
         self._set_monitor_view(target)
 
@@ -1331,6 +1516,8 @@ class LiveCockpitApp(App[None]):
         elif monitor_view == "security":
             self._observe_security_boundaries()
             self._refresh_security_view()
+        elif monitor_view == "time-machine":
+            self._refresh_time_machine_snapshot(refresh_history=True)
         self._refresh_stream_title()
         self.refresh_bindings()
         self._cockpit_screen.query_one("#prompt", Input).focus()
@@ -1367,6 +1554,7 @@ class LiveCockpitApp(App[None]):
             "execution": "执行树",
             "context": "上下文",
             "security": "安全盾",
+            "time-machine": "时间机器",
         }[self._monitor_view]
         action = f"F2 返回{monitor_label}" if self.output_expanded else "F2 展开结果"
         return f"AGENT STREAM  ·  {action}  ·  最近 {MAX_LIVE_OUTPUT_LINES} 行"
@@ -1494,6 +1682,214 @@ class LiveCockpitApp(App[None]):
         self._cockpit_screen.query_one("#security-detail", Static).update(
             format_security_boundaries(self._security, self._boundary_watch)
         )
+
+    def _project_time_machine(
+        self,
+        *,
+        cursor_sequence: int | None = None,
+    ) -> TimeMachineSnapshot:
+        return self._time_machine_projector.project(
+            (*self._historical_events, *self._events),
+            self._time_machine_history,
+            cursor_sequence=cursor_sequence,
+            persistence_enabled=self._time_machine_persistence_enabled,
+            persistent_event_count=self._persistent_event_count,
+        )
+
+    def _refresh_time_machine_snapshot(self, *, refresh_history: bool) -> None:
+        provider = self._time_machine_history_provider
+        if refresh_history and provider is not None:
+            try:
+                history = provider()
+                if not isinstance(history, TimeMachineHistory):
+                    raise ValueError("time machine provider returned invalid history")
+            except Exception:  # noqa: BLE001 - read-only observation boundary.
+                self._time_machine_history_failures += 1
+                self.notify(
+                    "时间机器历史读取失败；已保留上一份脱敏历史快照",
+                    severity="error",
+                )
+            else:
+                self._time_machine_history = (
+                    self._time_machine_projector.sanitize_history(history)
+                )
+        self._time_machine_snapshot = self._project_time_machine()
+        self._refresh_time_machine_view()
+
+    def _refresh_time_machine_view(self) -> None:
+        snapshot = self._time_machine_snapshot
+        panel = self._cockpit_screen.query_one("#time-machine-panel", Vertical)
+        storage = (
+            f"STORE ON · LOADED {snapshot.persistent_event_count}"
+            if snapshot.persistence_enabled
+            else "MEMORY ONLY"
+        )
+        panel.styles.border = (
+            "round",
+            "#d72d5b" if self._time_machine_history_failures else "#356c94",
+        )
+        panel.border_title = (
+            f" TIME MACHINE · {storage} · E{len(snapshot.timeline.entries)} "
+            if self.has_class("short")
+            else None
+        )
+        panel.border_subtitle = (
+            f" S{len(snapshot.sessions)} · C{len(snapshot.checkpoints)} · READ ONLY "
+            if self.has_class("short")
+            else None
+        )
+        title = Text("TIME MACHINE  ·  READ ONLY  ·  ", style="bold #9bcdf5")
+        title.append(
+            storage, style="#9ee37d" if snapshot.persistence_enabled else "dim"
+        )
+        title.append(
+            f"  ·  E{len(snapshot.timeline.entries)} "
+            f"S{len(snapshot.sessions)} C{len(snapshot.checkpoints)}",
+            style="dim",
+        )
+        if self._time_machine_history_failures:
+            title.append(
+                f"  ·  SOURCE FAIL {self._time_machine_history_failures}",
+                style="bold red",
+            )
+        self._cockpit_screen.query_one("#time-machine-title", Static).update(title)
+        self._refresh_time_machine_tree()
+
+    def _refresh_time_machine_tree(self) -> None:
+        snapshot = self._time_machine_snapshot
+        tree = self._cockpit_screen.query_one(
+            "#time-machine-tree",
+            Tree,
+        )
+        tree.reset(self._time_machine_root_label())
+        tree.root.expand()
+        nodes: dict[TimeMachineSelection, TreeNode[TimeMachineSelection]] = {}
+
+        event_root = tree.root.add(
+            Text(
+                f"RUNTIME EVENTS  {len(snapshot.timeline.entries)}",
+                style="bold #91f5e9",
+            ),
+            expand=True,
+        )
+        for entry in snapshot.timeline.entries:
+            selection = TimeMachineSelection("event", entry.event_id)
+            label = Text(f"{entry.sequence:04d} ", style="dim")
+            label.append(_time_label(entry.timestamp), style="#8fa9bd")
+            label.append(f"  {entry.stage.upper():<13}")
+            label.append(
+                f" {_STATUS_MARKER[entry.status]} {entry.status.upper()}",
+                style=_STATUS_STYLE[entry.status],
+            )
+            nodes[selection] = event_root.add_leaf(label, data=selection)
+
+        session_root = tree.root.add(
+            Text(
+                f"CURRENT SESSION CATALOG  {len(snapshot.sessions)}",
+                style="bold #c8b8ff",
+            ),
+            expand=True,
+        )
+        for session_point in snapshot.sessions:
+            selection = TimeMachineSelection("session", session_point.session_id)
+            lineage = {
+                "root": "ROOT",
+                "branch": "BRANCH",
+                "orphaned_branch": "ORPHAN",
+            }[session_point.lineage]
+            label = Text(f"{lineage:<6} {session_point.session_id[-8:]}")
+            label.append(f"  {session_point.round_count}R", style="dim")
+            if session_point.has_compaction:
+                label.append("  COMPACT", style="bold #ffb454")
+            if session_point.failed_check:
+                label.append("  FAILED", style="bold red")
+            nodes[selection] = session_root.add_leaf(label, data=selection)
+
+        checkpoint_root = tree.root.add(
+            Text(
+                f"CURRENT TASK CHECKPOINTS  {len(snapshot.checkpoints)}",
+                style="bold #ffb454",
+            ),
+            expand=True,
+        )
+        for checkpoint_point in snapshot.checkpoints:
+            selection = TimeMachineSelection(
+                "checkpoint", checkpoint_point.checkpoint_id
+            )
+            label = Text(f"{checkpoint_point.checkpoint_id[:12]:<12}")
+            label.append(
+                f"  {checkpoint_point.file_count} FILES  "
+                f"{checkpoint_point.resulting_chars} CHARS",
+                style="dim",
+            )
+            nodes[selection] = checkpoint_root.add_leaf(label, data=selection)
+
+        if not nodes:
+            tree.root.add_leaf(Text("尚无可回放的元数据", style="dim"))
+            self._time_machine_selection = None
+        elif self._time_machine_selection not in nodes:
+            if snapshot.timeline.entries:
+                selected_event = snapshot.timeline.entries[-1]
+                self._time_machine_selection = TimeMachineSelection(
+                    "event",
+                    selected_event.event_id,
+                )
+            elif snapshot.sessions:
+                self._time_machine_selection = TimeMachineSelection(
+                    "session",
+                    snapshot.sessions[-1].session_id,
+                )
+            else:
+                self._time_machine_selection = TimeMachineSelection(
+                    "checkpoint",
+                    snapshot.checkpoints[-1].checkpoint_id,
+                )
+
+        selected = (
+            None
+            if self._time_machine_selection is None
+            else nodes.get(self._time_machine_selection)
+        )
+        if selected is not None:
+            active_selection = self._time_machine_selection
+            if active_selection is not None and active_selection.kind == "event":
+                selected_entry = next(
+                    (
+                        timeline_entry
+                        for timeline_entry in snapshot.timeline.entries
+                        if timeline_entry.event_id == active_selection.key
+                    ),
+                    None,
+                )
+                if (
+                    selected_entry is not None
+                    and selected_entry.sequence != snapshot.cursor_sequence
+                ):
+                    self._time_machine_snapshot = self._project_time_machine(
+                        cursor_sequence=selected_entry.sequence
+                    )
+                    tree.root.set_label(self._time_machine_root_label())
+            tree.select_node(selected)
+        self._refresh_time_machine_detail()
+
+    def _time_machine_root_label(self) -> Text:
+        snapshot = self._time_machine_snapshot
+        return Text(
+            f"HISTORY · {snapshot.cursor_sequence}/{len(snapshot.timeline.entries)}",
+            style="bold #9bcdf5",
+        )
+
+    def _refresh_time_machine_detail(self) -> None:
+        rendered = render_time_machine_snapshot(
+            self._time_machine_snapshot,
+            self._time_machine_selection,
+        )
+        content = Text(rendered)
+        self._cockpit_screen.query_one("#time-machine-detail", Static).update(content)
+        self._cockpit_screen.query_one(
+            "#time-machine-inline-detail",
+            Static,
+        ).update(content)
 
     def _refresh_projection(self) -> None:
         self._graph = ExecutionGraphProjector().project(self._events)
@@ -1641,6 +2037,10 @@ def run_live_cockpit(
     workspace: str,
     security: SecurityShield | None = None,
     security_observer: Callable[[], SecurityShield] | None = None,
+    historical_events: Iterable[RuntimeEvent] = (),
+    time_machine_history_provider: Callable[[], TimeMachineHistory] | None = None,
+    time_machine_persistence_enabled: bool = False,
+    persistent_event_count: int = 0,
     approval_handler_owner: object | None = None,
 ) -> int:
     """Run the app and return the number of successful turns it completed."""
@@ -1652,6 +2052,10 @@ def run_live_cockpit(
         workspace=workspace,
         security=security,
         security_observer=security_observer,
+        historical_events=historical_events,
+        time_machine_history_provider=time_machine_history_provider,
+        time_machine_persistence_enabled=time_machine_persistence_enabled,
+        persistent_event_count=persistent_event_count,
     )
     previous_handler: object | None = None
     replace_handler = getattr(
@@ -2533,6 +2937,10 @@ def _format_time(value: datetime | None) -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
+
+
+def _time_label(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%H:%M:%S")
 
 
 def _short_id(value: str) -> str:

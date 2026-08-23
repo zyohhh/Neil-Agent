@@ -10,6 +10,7 @@ from typing import Literal
 import pytest
 from textual.widgets import ContentSwitcher, Input, Log, Tree
 
+from neil_agent.checkpoint import FileEditCheckpoint, FileTaskCheckpoint
 from neil_agent.context import (
     ContextLayerEstimate,
     ContextTomography,
@@ -46,12 +47,14 @@ from neil_agent.live_cockpit import (
 )
 from neil_agent.projections import ExecutionGraphProjector
 from neil_agent.schemas import TokenUsage, ToolCall
+from neil_agent.session import SessionSummary
 from neil_agent.security import (
     ApprovalFlowProjector,
     SecurityShield,
     project_security_boundary_watch,
     project_security_shield,
 )
+from neil_agent.time_machine import TimeMachineHistory
 
 NOW = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
 
@@ -342,6 +345,49 @@ class FakeApprovalOwner:
         previous = self.handler
         self.handler = handler
         return previous
+
+
+def _time_machine_history() -> TimeMachineHistory:
+    root_id = "20260823T120000000000Z-aaaaaaaa"
+    branch_id = "20260823T120001000000Z-bbbbbbbb"
+    return TimeMachineHistory(
+        sessions=(
+            SessionSummary(
+                session_id=root_id,
+                title="PRIVATE-SESSION-TITLE",
+                created_at=NOW,
+                updated_at=NOW,
+                round_count=2,
+                size_bytes=200,
+                preview="PRIVATE-SESSION-PREVIEW",
+                has_compaction=True,
+            ),
+            SessionSummary(
+                session_id=branch_id,
+                title="PRIVATE-BRANCH-TITLE",
+                created_at=NOW + timedelta(seconds=1),
+                updated_at=NOW + timedelta(seconds=2),
+                round_count=2,
+                size_bytes=200,
+                preview="PRIVATE-BRANCH-PREVIEW",
+                parent_session_id=root_id,
+            ),
+        ),
+        checkpoints=(
+            FileTaskCheckpoint(
+                checkpoint_id="checkpoint-safe-id",
+                created_at=NOW + timedelta(seconds=3),
+                edits=(
+                    FileEditCheckpoint(
+                        path="PRIVATE-CHECKPOINT-PATH",
+                        original_content="PRIVATE-CHECKPOINT-BODY",
+                        resulting_hash="PRIVATE-CHECKPOINT-HASH",
+                        resulting_chars=24,
+                    ),
+                ),
+            ),
+        ),
+    )
 
 
 def test_event_bridge_coalesces_notifications_and_bounds_memory() -> None:
@@ -663,6 +709,84 @@ async def test_live_app_toggles_security_shield_without_disturbing_primary_view(
             app.query_one("#security-panel").border_subtitle
         )
         assert app.query_one("#transcript", Log).region.height >= 5
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_browses_time_machine_without_model_or_source_content() -> None:
+    bus = EventBus()
+    agent = FakeLiveAgent(bus)
+    history_calls: list[str] = []
+
+    def history_provider() -> TimeMachineHistory:
+        history_calls.append("read")
+        return _time_machine_history()
+
+    app = LiveCockpitApp(
+        agent,
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        initial_events=_execution_events(),
+        time_machine_history_provider=history_provider,
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("f6")
+        await pilot.pause()
+
+        switcher = app.query_one("#workspace", ContentSwitcher)
+        tree = app.query_one("#time-machine-tree", Tree)
+        assert app.monitor_view == "time-machine"
+        assert switcher.current == "time-machine-view"
+        assert history_calls == ["read"]
+        assert agent.prompts == []
+        assert len(tree.root.children) == 3
+        assert len(tree.root.children[0].children) == len(_execution_events())
+        assert len(tree.root.children[1].children) == 2
+        assert len(tree.root.children[2].children) == 1
+        assert "READ ONLY" in app.query_one("#time-machine-title").render().plain
+
+        tree.select_node(tree.root.children[0].children[0])
+        await pilot.pause()
+        assert app.time_machine_snapshot.cursor_sequence == 1
+        assert "1/4" in tree.root.label.plain
+
+        tree.select_node(tree.root.children[1].children[1])
+        await pilot.pause()
+        detail = app.query_one("#time-machine-detail").render().plain
+        assert "BRANCH" in detail
+        assert "MESSAGE BODIES HIDDEN" in detail
+        retained_history = repr(app._time_machine_history)
+        for canary in (
+            "PRIVATE-SESSION-TITLE",
+            "PRIVATE-SESSION-PREVIEW",
+            "PRIVATE-BRANCH-TITLE",
+            "PRIVATE-BRANCH-PREVIEW",
+            "PRIVATE-CHECKPOINT-PATH",
+            "PRIVATE-CHECKPOINT-BODY",
+            "PRIVATE-CHECKPOINT-HASH",
+        ):
+            assert canary not in detail
+            assert canary not in repr(tree.root)
+            assert canary not in retained_history
+
+        await pilot.resize_terminal(60, 24)
+        await pilot.pause()
+        assert app.query_one("#time-machine-panel").display
+        assert not app.query_one("#time-machine-detail-panel").display
+        assert app.query_one("#time-machine-inline-detail").display
+        assert (
+            "MESSAGE BODIES HIDDEN"
+            in app.query_one("#time-machine-inline-detail").render().plain
+        )
+        assert app.query_one("#transcript", Log).region.height >= 5
+
+        await pilot.press("f6")
+        await pilot.pause()
+        assert app.monitor_view == "execution"
+        assert agent.prompts == []
 
     assert bus.close()
 

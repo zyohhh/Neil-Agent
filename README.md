@@ -24,7 +24,7 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/sessions [选项] [关键词]`：本地分页、排序、搜索，并按计划/检查失败/压缩状态筛选。
 - `/rename-session <标题>`：重命名当前本地会话。
 - `/resume <id>`：恢复指定会话。
-- `/branch [标题]`：复制当前会话并切换到新 ID，原会话保持不变。
+- `/branch [标题]`：复制当前会话并切换到新 ID，原会话保持不变；版本 4 快照记录直接父会话 ID，供本地分支谱系浏览。
 - `/export [id]`：预览后导出当前或指定会话。
 - `/import <文件名>`：预览后导入 `.neil-agent/exports/` 中的严格版本化文件。
 - `/compact [关注点]`：总结较早轮次、保留最近完整上下文，并保存压缩前会话副本。
@@ -32,12 +32,16 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/doctor`：只读检查配置、工作区、会话、审计、OS 沙箱能力和 Git，不调用模型或自动修复。
 - `/cockpit`：显示任务、上下文、安全边界和工作区信号的只读基础快照，不调用模型。
 - `/cockpit --live`：进入全屏实时驾驶舱；使用 `F3`（或 `Ctrl+T`）在执行 DAG 与上下文断层图之间切换。断层图分开显示下一次请求的五层本地估算与最近成功回合的服务端历史实测，标出裁剪轮次/体积、压缩检查点及最大工具结果占用（不显示正文），并按字符/token 软预算显示分级压力。Context 视图按 `F4` 可在不调用模型的情况下模拟下一次输入增加 N 个 ASCII 字符。`F5` 打开 Security Shield，以统一色带展示直接执行、逐次审批、永久禁止和不可用能力，明确分开应用工具白名单与 OS 沙箱状态，并列出最近审批的决策、对应工具节点和批准预览的最终绑定状态；DAG 中的审批子节点也显示同一关联。每次重新进入安全视图还会只读观察路径、网络、命令与审计四类边界，显示有界的状态变化和聚合告警；观察失败时保留上一份安全快照，且不显示路径、命令或审计内容。再次按下返回此前的 DAG/Context 视图。`F2`（或 `Ctrl+O`）展开/恢复结果，`1`–`4` 在 DAG 模式筛选节点，`Ctrl+X` 取消请求、`Ctrl+Q` 退出。各区域会按终端宽高自适应；非交互终端或 Textual 启动失败时自动降级为基础快照。
+- 实时驾驶舱按 `F6` 打开 Time Machine：可在最多 512 条脱敏运行事件上移动只读游标，并浏览最多 50 个会话的根/分支/压缩状态与 20 个进程内任务检查点的计数。它只重建历史投影，不重新调用模型或工具，也不提供恢复按钮；会话标题、消息正文以及检查点路径、哈希和文件正文不会进入长生命周期 UI 状态。
 - `/rewind-task`：预览并恢复本进程最近一次 Agent 回合的全部有效文件编辑；`/rewind-file` 保留为兼容别名。
 - `/permissions`：显示真正由代码执行的工具审批和工作区边界。
 
 Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。
 高级上下文断层图、安全盾、时间机器和仓库热力图的增量路线见
 [`docs/visualization-development.md`](docs/visualization-development.md)。
+
+Time Machine 的运行事件默认只存在于当前进程内。如需显式保留元数据事件，可设置 `RUNTIME_EVENT_STORE_ENABLED=true`；`RUNTIME_EVENT_STORE_MAX_BYTES` 控制当前 JSONL 文件的轮转上限（默认 5,000,000 字节，允许 10,000–50,000,000）。持久化仍只记录版本化 `RuntimeEvent` 白名单元数据，损坏或不安全的存储会 fail closed 并退回内存回放。
+
 多 LLM Provider 的协议边界、配置迁移和分阶段实现见
 [`docs/provider-adapter-development.md`](docs/provider-adapter-development.md)；当前五个 Provider 均可显式选择，兼容端点未声明的能力会在网络请求前 fail closed。
 浏览器端 Web Workbench 的产品边界、fixture 原型和实时接入路线见

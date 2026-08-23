@@ -211,6 +211,19 @@ class Settings(BaseSettings):
         le=10_000_000,
         description="Maximum audit JSONL size before one-file rotation.",
     )
+    runtime_event_store_enabled: bool = Field(
+        default=False,
+        description=(
+            "Persist metadata-only live runtime events for explicit Time Machine "
+            "replay. Disabled by default."
+        ),
+    )
+    runtime_event_store_max_bytes: int = Field(
+        default=5_000_000,
+        ge=10_000,
+        le=50_000_000,
+        description="Maximum runtime-event JSONL size before one-file rotation.",
+    )
 
     @field_validator("system_prompt")
     @classmethod
