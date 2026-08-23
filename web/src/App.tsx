@@ -866,7 +866,9 @@ function Header({
   reviewTriggerRef,
   liveSnapshot,
   connectionState,
+  hasControl,
   interactionLocked,
+  onSwitchModel,
   fixtureStatusLabel,
   fixtureTone,
 }: {
@@ -876,7 +878,9 @@ function Header({
   reviewTriggerRef: React.RefObject<HTMLButtonElement | null>
   liveSnapshot: WorkbenchSnapshotV1 | null
   connectionState: LiveConnectionState
+  hasControl: boolean
   interactionLocked: boolean
+  onSwitchModel: (model: string) => void
   fixtureStatusLabel: string
   fixtureTone: Scenario['runTone']
 }) {
@@ -897,6 +901,22 @@ function Header({
       selectMode(mode === 'focus' ? 'build' : 'focus', true)
     }
   }
+  const modelSwitchEnabled = Boolean(
+    liveSnapshot
+    && connectionState === 'live'
+    && hasControl
+    && !interactionLocked
+    && liveSnapshot.capabilities.can_switch_model,
+  )
+  const modelLockReason = !liveSnapshot
+    ? 'Runtime model selection is available only for a live local Workbench.'
+    : connectionState !== 'live'
+      ? 'Reconnect to the local Workbench before changing the runtime model.'
+    : !hasControl
+      ? 'This tab must hold control before changing the runtime model.'
+      : interactionLocked
+        ? 'Model switching is unavailable while a run or approval is active.'
+        : 'Create an empty unsaved session and configure an operator model allowlist before switching models.'
 
   return (
     <header className="global-header">
@@ -928,10 +948,21 @@ function Header({
       <span className="sr-only" id="mode-preview-reason">Mode is a local interface preview and does not change tool permissions.</span>
 
       <div className="header-right">
-        <button type="button" className="model-selector" disabled aria-describedby="model-lock-reason">
-          <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
-        </button>
-        <span className="sr-only" id="model-lock-reason">Model selection is fixed when the local Web Workbench starts.</span>
+        <label className={`model-selector ${modelSwitchEnabled ? '' : 'is-disabled'}`}>
+          <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span>
+          <select
+            aria-label="Runtime model"
+            aria-describedby={!modelSwitchEnabled ? 'model-lock-reason' : undefined}
+            value={liveSnapshot?.provider.model ?? 'gpt-5'}
+            disabled={!modelSwitchEnabled}
+            onChange={(event) => onSwitchModel(event.target.value)}
+          >
+            {(liveSnapshot?.provider.available_models ?? [liveSnapshot?.provider.model ?? 'gpt-5']).map((model) => (
+              <option key={model} value={model}>{model}</option>
+            ))}
+          </select>
+        </label>
+        <span className="sr-only" id="model-lock-reason">{modelLockReason}</span>
 
         <div className={`run-status tone-${connectionState === 'live' ? 'success' : connectionState === 'offline' ? 'danger' : fixtureTone}`} role="status" aria-live="polite">
           <span className="status-dot" />
@@ -1089,6 +1120,7 @@ function App() {
     rejectTool,
     newSession,
     selectSession,
+    switchModel,
     refreshFiles,
     refreshReview,
   } = useWorkbenchConnection(Boolean(scenarioFromLocation))
@@ -1169,7 +1201,9 @@ function App() {
         reviewTriggerRef={reviewTriggerRef}
         liveSnapshot={liveSnapshot}
         connectionState={connectionState}
+        hasControl={hasControl}
         interactionLocked={interactionLocked}
+        onSwitchModel={switchModel}
         fixtureStatusLabel={scenario.label}
         fixtureTone={scenario.runTone}
       />

@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from .errors import SessionError
+from .providers.base import ProviderId
 from .schemas import Message, TokenUsage, validate_message_history
 from .task import (
     MAX_QUALITY_OUTPUT_CHARS,
@@ -41,7 +42,8 @@ from .task import (
 LEGACY_SESSION_FORMAT_VERSION: Literal[1] = 1
 PREVIOUS_SESSION_FORMAT_VERSION: Literal[2] = 2
 USAGE_SESSION_FORMAT_VERSION: Literal[3] = 3
-SESSION_FORMAT_VERSION: Literal[4] = 4
+LINEAGE_SESSION_FORMAT_VERSION: Literal[4] = 4
+SESSION_FORMAT_VERSION: Literal[5] = 5
 SESSION_STATE_DIRECTORY = ".neil-agent"
 SESSION_DIRECTORY = "sessions"
 SESSION_EXPORT_DIRECTORY = "exports"
@@ -212,10 +214,10 @@ class SessionSnapshotV3(SessionState):
         )
 
 
-class SessionSnapshot(SessionState):
-    """Current version of one complete, resumable local session."""
+class SessionSnapshotV4(SessionState):
+    """Previous lineage-aware snapshot retained for strict migration."""
 
-    version: Literal[4] = SESSION_FORMAT_VERSION
+    version: Literal[4] = LINEAGE_SESSION_FORMAT_VERSION
     title: str = Field(min_length=1, max_length=MAX_SESSION_TITLE_CHARS)
     last_usage: TokenUsage | None = None
     parent_session_id: str | None = Field(
@@ -234,27 +236,110 @@ class SessionSnapshot(SessionState):
             raise ValueError("parent session cannot reference itself")
         return self
 
+    def migrate(self) -> SessionSnapshot:
+        return SessionSnapshot(
+            session_id=self.session_id,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            title=self.title,
+            messages=self.messages,
+            plan=self.plan,
+            latest_quality_check=self.latest_quality_check,
+            last_usage=self.last_usage,
+            parent_session_id=self.parent_session_id,
+            runtime_provider=None,
+            runtime_model=None,
+        )
+
+
+class SessionSnapshot(SessionState):
+    """Current version of one complete, resumable local session."""
+
+    version: Literal[5] = SESSION_FORMAT_VERSION
+    title: str = Field(min_length=1, max_length=MAX_SESSION_TITLE_CHARS)
+    last_usage: TokenUsage | None = None
+    parent_session_id: str | None = Field(
+        default=None,
+        pattern=SESSION_ID_PATTERN_TEXT,
+    )
+    runtime_provider: ProviderId | None = None
+    runtime_model: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_be_safe(cls, value: str) -> str:
+        return normalize_session_title(value)
+
+    @field_validator("runtime_model")
+    @classmethod
+    def runtime_model_must_be_safe(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value != value.strip() or any(
+            category(character).startswith("C") for character in value
+        ):
+            raise ValueError("runtime model identifier is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def runtime_binding_must_be_consistent(self) -> Self:
+        if self.parent_session_id == self.session_id:
+            raise ValueError("parent session cannot reference itself")
+        if (self.runtime_provider is None) != (self.runtime_model is None):
+            raise ValueError("runtime provider and model must be stored together")
+        if self.runtime_provider is not None and self.runtime_model is not None:
+            if any(
+                message.provider_state is not None
+                and not message.provider_state.belongs_to(
+                    self.runtime_provider,
+                    self.runtime_model,
+                )
+                for message in self.messages
+            ):
+                raise ValueError(
+                    "provider private state conflicts with session runtime"
+                )
+        return self
+
 
 class SessionExportEnvelope(BaseModel):
-    """Strict portable envelope containing no runtime configuration."""
+    """Strict portable envelope containing no credentials or endpoint settings."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     export_version: Literal[1] = SESSION_EXPORT_FORMAT_VERSION
     exported_at: AwareDatetime
-    session: SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
+    session: (
+        SessionSnapshot
+        | SessionSnapshotV4
+        | SessionSnapshotV3
+        | SessionSnapshotV2
+        | SessionSnapshotV1
+    )
 
 
 SESSION_SNAPSHOT_ADAPTER: TypeAdapter[
-    SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
+    SessionSnapshot
+    | SessionSnapshotV4
+    | SessionSnapshotV3
+    | SessionSnapshotV2
+    | SessionSnapshotV1
 ] = TypeAdapter(
-    SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
+    SessionSnapshot
+    | SessionSnapshotV4
+    | SessionSnapshotV3
+    | SessionSnapshotV2
+    | SessionSnapshotV1
 )
 
 
 def _migrate_snapshot(
     snapshot: (
-        SessionSnapshot | SessionSnapshotV3 | SessionSnapshotV2 | SessionSnapshotV1
+        SessionSnapshot
+        | SessionSnapshotV4
+        | SessionSnapshotV3
+        | SessionSnapshotV2
+        | SessionSnapshotV1
     ),
 ) -> SessionSnapshot:
     if isinstance(snapshot, SessionSnapshot):
@@ -270,6 +355,8 @@ class SessionHandle:
     created_at: datetime
     title: str = ""
     parent_session_id: str | None = None
+    runtime_provider: ProviderId | None = None
+    runtime_model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +374,8 @@ class SessionSummary:
     failed_check: bool = False
     has_compaction: bool = False
     parent_session_id: str | None = None
+    runtime_provider: ProviderId | None = None
+    runtime_model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +450,8 @@ class SessionStore:
             created_at=snapshot.created_at,
             title=snapshot.title,
             parent_session_id=snapshot.parent_session_id,
+            runtime_provider=snapshot.runtime_provider,
+            runtime_model=snapshot.runtime_model,
         )
 
     def save(
@@ -371,6 +462,8 @@ class SessionStore:
         latest_quality_check: QualityCheckRecord | None,
         *,
         last_usage: TokenUsage | None = None,
+        runtime_provider: ProviderId | None = None,
+        runtime_model: str | None = None,
         create_only: bool = False,
     ) -> SessionSnapshot:
         """Atomically replace one versioned snapshot."""
@@ -378,6 +471,18 @@ class SessionStore:
         self._validate_session_id(handle.session_id)
         created_at = self._normalize_time(handle.created_at)
         updated_at = max(self._now(), created_at)
+        provided_runtime = runtime_provider is not None or runtime_model is not None
+        selected_runtime_provider = (
+            runtime_provider if provided_runtime else handle.runtime_provider
+        )
+        selected_runtime_model = (
+            runtime_model if provided_runtime else handle.runtime_model
+        )
+        if handle.runtime_provider is not None and (
+            selected_runtime_provider is not handle.runtime_provider
+            or selected_runtime_model != handle.runtime_model
+        ):
+            raise SessionError("已有会话不能切换运行时 Provider 或模型。")
         try:
             title = (
                 normalize_session_title(handle.title)
@@ -398,6 +503,8 @@ class SessionStore:
                 ),
                 last_usage=last_usage,
                 parent_session_id=handle.parent_session_id,
+                runtime_provider=selected_runtime_provider,
+                runtime_model=selected_runtime_model,
             )
         except ValueError as error:
             raise SessionError(f"无法保存无效会话：{error}") from error
@@ -423,6 +530,8 @@ class SessionStore:
             latest_quality_check=snapshot.latest_quality_check,
             last_usage=snapshot.last_usage,
             parent_session_id=snapshot.parent_session_id,
+            runtime_provider=snapshot.runtime_provider,
+            runtime_model=snapshot.runtime_model,
         )
         self._write_snapshot(renamed)
         return renamed
@@ -445,6 +554,8 @@ class SessionStore:
                 created_at=handle.created_at,
                 title=branch_title,
                 parent_session_id=source.session_id,
+                runtime_provider=source.runtime_provider,
+                runtime_model=source.runtime_model,
             ),
             source.messages,
             source.restored_steps(),
@@ -860,6 +971,8 @@ class SessionStore:
                 for message in snapshot.messages
             ),
             parent_session_id=snapshot.parent_session_id,
+            runtime_provider=snapshot.runtime_provider,
+            runtime_model=snapshot.runtime_model,
         )
 
 

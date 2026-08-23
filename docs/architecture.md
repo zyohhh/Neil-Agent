@@ -160,7 +160,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - 快照只在驾驶舱挂载、用户提交和回合结束时计算，不由 250 ms 指标刷新反复扫描历史。提交态的 `CURRENT CHAIN` 目前只表示规范化后的当前用户消息，界面明确标记 `SUBMIT SNAPSHOT`；工具循环追加消息和 `before_model` hook 的动态上下文尚未纳入本切片。
 - Phase 2A 的三批交付已全部完成；Phase 2B Security Shield 与 Phase 3A Time Machine 只读回放亦已收口；Phase 3B 安全恢复继续延后。
 
-### Web Workbench（P8 已完成）
+### Web Workbench（P9 已完成）
 
 - `neil-agent-web` 只绑定 `127.0.0.1`；启动器校验 wheel 内静态资源 SHA-256 清单后才打开浏览器，端口冲突或资源损坏时 fail-closed。
 - HTTP 提供健康检查、一次性 bootstrap、完整快照、只读会话/文件树/Git review；WebSocket 使用短时单次 ticket，命令带 `expected_revision` 与 `command_id` 去重。
@@ -168,6 +168,8 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - 浏览器可开始/取消单个 Agent turn、接收流式回答与活动、审批高风险工具；Review 使用固定只读 Git 命令，不向浏览器开放任意 shell 或 thinking 正文。
 - Web 每轮构造隔离的 `Agent`，随后恢复当前选中的严格 `SessionSnapshot`；成功 turn 原子保存，失败/取消不落盘，保存失败会闭锁后续 turn 直到显式新建或重选会话。
 - `new_session` / `select_session` 受控制租约、精确 revision 与 idle 状态约束；跨 Provider/模型私有状态在发网前拒绝，消息正文不进入浏览器快照或 `session_changed` 事件。
+- `switch_model` 只接受 `WEB_RUNTIME_MODEL_ALLOWLIST` 中同一启动 Provider 的精确模型 ID，并且仅在控制端、revision 匹配、无运行/审批且活动会话为空并未保存时生效。事务先重建并校验完整 `Settings` 与下一 turn worker，再一次性替换运行时；准备失败保持旧模型，切换本身不发送网络请求。
+- 会话版本 5 保存可选 Provider/模型绑定。Web 成功 turn 必须写入绑定；已绑定会话只能由完全相同的运行时恢复和续写。进程内发生过模型切换后，含历史但没有绑定的旧会话 fail closed，不能借 `select_session` 绕过空会话门禁。
 - Web 与 CLI 共用 `observe_host_security()`；条件 `run_command`、应用工具边界、OS 沙箱和审计状态使用同一注册与观察语义。详见 [`host-runtime.md`](host-runtime.md)。
 
 ## 上下文预算
@@ -187,7 +189,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - 较早轮次按 API JSON 序列化，使文本、思考、工具调用参数和工具结果关系仍可被摘要模型理解。单轮输入上限 20000 字符，超出部分以保留前后内容的明确标记缩减。
 - 压缩请求同样受 `MAX_CONTEXT_CHARS` 约束。多轮无法一次容纳时按顺序分批滚动更新摘要；连最小批次也无法容纳时直接失败，单次命令最多调用模型 8 次。
 - 压缩系统规则要求旧历史仅作为数据，摘要只保留持续工作需要的事实，且输出不得超过 8000 字符。压缩调用不提供工具；候选历史未实际减少近似字符数时也拒绝应用。
-- 候选历史由一个固定的用户/助手检查点轮次和最近原始轮次组成，继续满足消息历史与工具调用配对验证，并使用当前会话格式版本 4 保存。
+- 候选历史由一个固定的用户/助手检查点轮次和最近原始轮次组成，继续满足消息历史与工具调用配对验证，并使用当前会话格式版本 5 保存。
 - 候选生成阶段不修改内存；应用前先把当前完整会话分支为“压缩前”副本，再原子保存候选并应用到 Agent。模型失败、取消或备份失败均保留原历史；候选保存失败时原会话仍不变，已创建的备份也保留。
 - 固定检查点在轮数清理时与最近轮次一起保留，在字符预算足够时也优先进入模型请求；`/clear` 或后续压缩会清除或替换它。
 
@@ -223,11 +225,12 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 ## 本地会话边界
 
-- 会话快照固定存储在 `WORKSPACE_ROOT/.neil-agent/sessions/`，当前写入版本 4；版本 1–3 仍可严格读取，并在下一次保存或重命名时迁移为版本 4，未知未来版本继续拒绝。
+- 会话快照固定存储在 `WORKSPACE_ROOT/.neil-agent/sessions/`，当前写入版本 5；版本 1–4 仍可严格读取，并在下一次保存或重命名时迁移为版本 5，未知未来版本继续拒绝。
 - 版本 2 新增本地标题；首次成功回答后从第一条用户请求确定性生成默认标题，不调用模型。标题可通过 `/rename-session <标题>` 修改，最多 80 个字符并拒绝控制或格式字符。
 - 版本 3 新增最近一次成功 Agent 回合的可选服务端 `usage`；旧会话迁移时该字段为 `null`。
 - 版本 4 新增可选直接父会话 ID；根会话和从版本 1–3 迁移的会话为 `null`，`/branch` 创建的新会话绑定源会话 ID，并拒绝自引用。该字段只表达本地谱系，不继承审批或权限。
-- 快照字段仅包含会话 ID、直接父会话 ID、标题、创建/更新时间、成功消息历史、任务计划、最近质量检查和最近 usage；不包含 API Key、环境变量、系统提示词或远程同步配置。
+- 版本 5 新增成对出现的可选运行时 Provider/模型绑定；Web 成功 turn 写入绑定，重命名、分支与导入导出原样保留，已有绑定不能在后续保存时改写。从版本 1–4 迁移的会话保持未绑定。
+- 快照字段仅包含会话 ID、直接父会话 ID、运行时绑定、标题、创建/更新时间、成功消息历史、任务计划、最近质量检查和最近 usage；不包含 API Key、endpoint、环境变量、系统提示词或远程同步配置。
 - 消息历史必须由完整的用户/助手轮次组成；工具调用 ID 与结果 ID 必须按原顺序完全匹配，失败或中断的半轮消息不能恢复。
 - 任务计划恢复时重新验证标题、数量和状态顺序，保证最多一个进行中步骤，且其前后只能是已完成和待处理步骤。
 - 单文件上限为 25 MB；会话 ID 使用固定格式，并同时校验 JSON 内部 ID 与文件名。
@@ -238,7 +241,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - `/branch [标题]` 复制当前完整快照到新 ID、记录源会话为直接父节点并切换，原会话不变；审批决定不会持久化，因此不存在跨分支继承的批准状态。
 - 压缩检查点使用普通且严格验证的完整消息轮次保存，不新增秘密字段；恢复后 Agent 会重新识别其固定语义。
 - `/sessions [选项] [关键词]` 展示有效会话数量、匹配数量、所有 JSON 文件总占用及各会话大小；支持页码、每页数量、标题/更新时间排序，以及 `planned`、`failed`、`compacted` 状态筛选，全程不调用模型。
-- `/export [id]` 将严格的版本 1 导出信封写入 `.neil-agent/exports/`；当前导出版本 4 会话，同时兼容导入版本 1–3，不包含环境配置、系统提示词和项目指令，且不会覆盖同名文件。
+- `/export [id]` 将严格的版本 1 导出信封写入 `.neil-agent/exports/`；当前导出版本 5 会话，同时兼容导入版本 1–4，不包含环境配置、系统提示词和项目指令，且不会覆盖同名文件。
 - `/import <文件名>` 只读取该导出目录中的真实普通 `.json` 文件，验证 25 MB 上限、信封版本、会话版本、完整消息和重复 ID；批准后重新校验源文件哈希与目标不存在，再独占创建会话快照。
 - `/delete-session <id>` 只接受精确 ID，先展示会话摘要，再要求 `y` 或 `yes` 明确确认；当前活动会话不能删除。
 - 删除时重新验证会话文件；程序不会自动删除、轮转、上传或合并任何历史会话，损坏文件也不会被静默清理。
@@ -383,6 +386,7 @@ NeilAgentError
 | `SANDBOX_BACKEND` | 可选 OS 沙箱能力门禁（`disabled` / `windows-sandbox`） | `disabled` |
 | `LLM_PROVIDER` | 模型 Provider（`deepseek` / `claude` / `openai` / `ollama` / `vllm`） | `deepseek` |
 | `LLM_MODEL` | 显式模型 ID（Claude/OpenAI/Ollama/vLLM 必填） | 随 Provider |
+| `WEB_RUNTIME_MODEL_ALLOWLIST` | Web idle-only 的同 Provider 附加模型 ID JSON 数组（最多 15 个） | `[]` |
 | `WEB_RATE_TABLE` | Web 可选 token 单价表 JSON，用于成本估算 | 未配置 |
 | `AUDIT_LOG_ENABLED` | 是否启用元数据专用 JSONL 生命周期审计 | `false` |
 | `AUDIT_LOG_MAX_BYTES` | 审计日志单文件轮转上限 | `1000000` |

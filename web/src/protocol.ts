@@ -14,6 +14,8 @@ export interface LiveSession {
   has_plan: boolean
   failed_check: boolean
   has_compaction: boolean
+  runtime_provider: string | null
+  runtime_model: string | null
 }
 
 export interface LiveActiveSession {
@@ -21,6 +23,8 @@ export interface LiveActiveSession {
   title: string
   round_count: number
   persistence_status: 'unsaved' | 'saved' | 'save_failed'
+  runtime_provider: string
+  runtime_model: string
 }
 
 export interface LiveGitFile {
@@ -98,6 +102,7 @@ export interface WorkbenchSnapshotV1 {
     provider: string
     display_name: string
     model: string
+    available_models: string[]
     wire_protocol: string
     thinking_enabled: boolean
   }
@@ -113,6 +118,7 @@ export interface WorkbenchSnapshotV1 {
     can_estimate_cost: boolean
     can_create_session: boolean
     can_select_session: boolean
+    can_switch_model: boolean
     tool_permission_mode: 'approval_gated'
     has_pty: false
   }
@@ -173,14 +179,14 @@ export type LiveConnectionState = 'fixture' | 'connecting' | 'live' | 'offline'
 export interface WorkbenchEventV1 {
   protocol_version: 1
   message_type: 'event'
-  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'approval_requested' | 'approval_resolved' | 'control_changed' | 'session_changed' | 'snapshot_invalidated' | 'service_closing'
+  event_type: 'run_state' | 'assistant_text_delta' | 'activity' | 'runtime_step' | 'approval_requested' | 'approval_resolved' | 'control_changed' | 'session_changed' | 'model_changed' | 'snapshot_invalidated' | 'service_closing'
   sequence: number
   revision: number
   timestamp: string
   payload: Record<string, unknown>
 }
 
-type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn' | 'approve_tool' | 'reject_tool' | 'new_session' | 'select_session'
+type CommandName = 'acquire_control' | 'start_turn' | 'cancel_turn' | 'approve_tool' | 'reject_tool' | 'new_session' | 'select_session' | 'switch_model'
 
 interface PendingCommand {
   command: CommandName
@@ -289,6 +295,8 @@ const isSnapshot = (value: unknown): value is WorkbenchSnapshotV1 => {
     && typeof record.active_session === 'object'
     && typeof capabilities?.can_create_session === 'boolean'
     && typeof capabilities.can_select_session === 'boolean'
+    && typeof capabilities.can_switch_model === 'boolean'
+    && Array.isArray((record.provider as Record<string, unknown> | undefined)?.available_models)
     && typeof security?.shield_schema_version === 'number'
     && typeof security.application_status === 'string'
 }
@@ -353,6 +361,10 @@ export class WorkbenchRealtimeClient {
 
   selectSession(sessionId: string) {
     return this.send('select_session', { session_id: sessionId })
+  }
+
+  switchModel(model: string) {
+    return this.send('switch_model', { model })
   }
 
   private async connect() {
@@ -501,7 +513,25 @@ export const reduceWorkbenchEvent = (
         can_cancel_turn: active,
         can_create_session: !active,
         can_select_session: !active,
+        can_switch_model: active ? false : snapshot.capabilities.can_switch_model,
       },
+    }
+  }
+  if (event.event_type === 'model_changed') {
+    const payload = event.payload as {
+      provider: WorkbenchSnapshotV1['provider']
+      active_session: WorkbenchSnapshotV1['active_session']
+      context: WorkbenchSnapshotV1['context']
+      review: WorkbenchSnapshotV1['review']
+      capabilities: WorkbenchSnapshotV1['capabilities']
+    }
+    return {
+      ...base,
+      provider: payload.provider,
+      active_session: payload.active_session,
+      context: payload.context,
+      review: payload.review,
+      capabilities: payload.capabilities,
     }
   }
   if (event.event_type === 'session_changed') {

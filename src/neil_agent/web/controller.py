@@ -19,6 +19,7 @@ from ..errors import SessionError
 from ..events import EventBus, RuntimeEvent
 from ..host_runtime import HostMode, build_host_runtime
 from ..providers.factory import create_provider
+from ..runtime_models import prepare_runtime_model_switch, runtime_model_catalog
 from ..schemas import ActivityEvent, Message, TokenUsage, ToolCall
 from ..session import SessionHandle, SessionSnapshot, UNTITLED_SESSION
 from ..task import QualityCheckRecord, TaskStep
@@ -79,6 +80,9 @@ class TurnWorker(Protocol):
         on_runtime: RuntimeSink,
         request_approval: ApprovalSink,
     ) -> CompletedTurnState | None: ...
+
+
+TurnWorkerFactory = Callable[[Settings], TurnWorker]
 
 
 class AgentTurnWorker:
@@ -160,6 +164,7 @@ CommandName = Literal[
     "reject_tool",
     "new_session",
     "select_session",
+    "switch_model",
     "ping",
 ]
 
@@ -205,6 +210,7 @@ class WorkbenchController:
         service: WorkbenchSnapshotService,
         worker: TurnWorker,
         *,
+        worker_factory: TurnWorkerFactory | None = None,
         clock: Callable[[], datetime] | None = None,
         event_history_size: int = MAX_EVENT_HISTORY,
         subscriber_queue_size: int = SUBSCRIBER_QUEUE_SIZE,
@@ -213,6 +219,9 @@ class WorkbenchController:
             raise ValueError("controller buffer sizes are too small")
         self._service = service
         self._worker = worker
+        self._worker_factory = worker_factory
+        self._runtime_settings = service.settings
+        self._runtime_has_switched = False
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = RLock()
         self._events: deque[dict[str, Any]] = deque(maxlen=event_history_size)
@@ -243,18 +252,27 @@ class WorkbenchController:
     def production(
         cls, settings: Settings, service: WorkbenchSnapshotService
     ) -> WorkbenchController:
-        return cls(service, AgentTurnWorker(settings))
+        return cls(
+            service,
+            AgentTurnWorker(settings),
+            worker_factory=AgentTurnWorker,
+        )
 
     def snapshot(self) -> WorkbenchSnapshotDto:
         while True:
             with self._lock:
                 active_snapshot = self._active_snapshot
+                runtime_settings = self._runtime_settings
             base = self._service.snapshot(
                 active_snapshot,
                 fallback_to_latest=False,
+                runtime_settings=runtime_settings,
             )
             with self._lock:
-                if active_snapshot is not self._active_snapshot:
+                if (
+                    active_snapshot is not self._active_snapshot
+                    or runtime_settings is not self._runtime_settings
+                ):
                     continue
                 running = self._run.status in {"running", "cancelling"}
                 approval = None if self._approval is None else self._approval.request
@@ -283,6 +301,7 @@ class WorkbenchController:
                             can_estimate_cost=base.review.cost_available,
                             can_create_session=session_change_available,
                             can_select_session=session_change_available,
+                            can_switch_model=self._can_switch_model_locked(),
                         ),
                         "timeline": tuple(self._steps.values())[-MAX_RUNTIME_STEPS:],
                         "output": tuple(self._output),
@@ -308,9 +327,11 @@ class WorkbenchController:
 
         with self._lock:
             active_snapshot = self._active_snapshot
+            runtime_settings = self._runtime_settings
         return self._service.review(
             active_snapshot,
             fallback_to_latest=False,
+            runtime_settings=runtime_settings,
         )
 
     def subscribe(self, client_id: str, after: int) -> ControllerSubscription:
@@ -394,6 +415,8 @@ class WorkbenchController:
                 result = self._new_session(client_id, command)
             elif command.command == "select_session":
                 result = self._select_session(client_id, command)
+            elif command.command == "switch_model":
+                result = self._switch_model(client_id, command)
             else:  # pragma: no cover - Pydantic rejects unknown commands.
                 raise CommandError("unknown_command", "Unknown command")
         except CommandError as error:
@@ -452,19 +475,96 @@ class WorkbenchController:
         self._publish_session_changed(reset_runtime=True)
         return self._result(command, "accepted", "New session created")
 
+    def _switch_model(
+        self,
+        client_id: str,
+        command: ClientCommand,
+    ) -> dict[str, Any]:
+        target = command.payload.get("model")
+        if not isinstance(target, str) or set(command.payload) != {"model"}:
+            raise CommandError(
+                "invalid_model_command",
+                "One allowlisted model ID is required",
+            )
+        with self._lock:
+            self._require_control(client_id)
+            self._require_revision(command.expected_revision)
+            self._require_model_switch_available_locked()
+            current_settings = self._runtime_settings
+            active_session_id = self._active_handle.session_id
+            worker_factory = self._worker_factory
+        if worker_factory is None:  # pragma: no cover - guarded under the lock.
+            raise CommandError(
+                "model_switch_unavailable",
+                "Runtime model switching is not available",
+            )
+        try:
+            prepared = prepare_runtime_model_switch(current_settings, target)
+        except (TypeError, ValueError) as error:
+            raise CommandError(
+                "model_not_allowlisted",
+                "The requested model is not in the runtime allowlist",
+            ) from error
+        if not prepared.changes_model:
+            return self._result(command, "accepted", "Model already selected")
+        try:
+            candidate_worker = worker_factory(prepared.settings)
+        except Exception as error:  # noqa: BLE001 - isolated factory boundary.
+            raise CommandError(
+                "model_switch_failed",
+                "The requested model could not be prepared",
+            ) from error
+        try:
+            candidate_projection = self._service.snapshot(
+                None,
+                fallback_to_latest=False,
+                runtime_settings=prepared.settings,
+            )
+        except Exception as error:  # noqa: BLE001 - projection isolation boundary.
+            raise CommandError(
+                "model_switch_failed",
+                "The requested model could not be prepared",
+            ) from error
+        with self._lock:
+            self._require_control(client_id)
+            self._require_revision(command.expected_revision)
+            self._require_model_switch_available_locked()
+            if (
+                self._runtime_settings is not current_settings
+                or self._active_handle.session_id != active_session_id
+            ):
+                raise CommandError(
+                    "model_switch_conflict",
+                    "Runtime state changed while preparing the model",
+                )
+            self._runtime_settings = prepared.settings
+            self._worker = candidate_worker
+            self._runtime_has_switched = True
+            self._publish(
+                "model_changed",
+                self._model_changed_payload_locked(candidate_projection),
+            )
+        return self._result(command, "accepted", "Runtime model switched")
+
     def _select_session(self, client_id: str, command: ClientCommand) -> dict[str, Any]:
         session_id = command.payload.get("session_id")
         if not isinstance(session_id, str) or set(command.payload) != {"session_id"}:
             raise CommandError("invalid_session_command", "One session ID is required")
         with self._lock:
             self._require_session_change_locked(client_id, command)
+            runtime_settings = self._runtime_settings
+            runtime_has_switched = self._runtime_has_switched
         try:
             snapshot = self._session_store.load(session_id)
         except SessionError as error:
             raise CommandError(
                 "session_unavailable", "The selected session is unavailable"
             ) from error
-        self._require_compatible_provider_state(snapshot)
+        self._require_compatible_provider_state(
+            snapshot,
+            runtime_settings,
+            runtime_has_switched=runtime_has_switched,
+        )
         with self._lock:
             self._require_session_change_locked(client_id, command)
             self._active_handle = self._session_store.handle_for(snapshot)
@@ -509,10 +609,20 @@ class WorkbenchController:
             )
             active_handle = self._active_handle
             active_snapshot = self._active_snapshot
+            worker = self._worker
+            runtime_settings = self._runtime_settings
         self._publish("run_state", self._run.model_dump(mode="json"))
         Thread(
             target=self._execute_turn,
-            args=(run_id, prompt, active_handle, active_snapshot, cancel),
+            args=(
+                run_id,
+                prompt,
+                active_handle,
+                active_snapshot,
+                cancel,
+                worker,
+                runtime_settings,
+            ),
             name=f"neil-web-{run_id}",
             daemon=True,
         ).start()
@@ -540,9 +650,11 @@ class WorkbenchController:
         handle: SessionHandle,
         session: SessionSnapshot | None,
         cancel: Event,
+        worker: TurnWorker,
+        runtime_settings: Settings,
     ) -> None:
         try:
-            completed = self._worker.run(
+            completed = worker.run(
                 prompt,
                 session,
                 cancel,
@@ -569,6 +681,7 @@ class WorkbenchController:
                 handle,
                 session,
                 completed,
+                runtime_settings,
             ):
                 return
             self._finish_run(run_id, "completed")
@@ -579,6 +692,7 @@ class WorkbenchController:
         handle: SessionHandle,
         previous: SessionSnapshot | None,
         completed: CompletedTurnState,
+        runtime_settings: Settings,
     ) -> bool:
         with self._lock:
             if (
@@ -597,6 +711,8 @@ class WorkbenchController:
                     completed.steps,
                     completed.latest_quality_check,
                     last_usage=completed.last_usage,
+                    runtime_provider=runtime_settings.llm_provider,
+                    runtime_model=runtime_settings.selected_model,
                     create_only=previous is None,
                 )
             except (OSError, SessionError):
@@ -870,8 +986,30 @@ class WorkbenchController:
                 "run_conflict", "Sessions cannot change while a turn is active"
             )
 
-    def _require_compatible_provider_state(self, snapshot: SessionSnapshot) -> None:
-        settings = self._service.settings
+    def _require_compatible_provider_state(
+        self,
+        snapshot: SessionSnapshot,
+        settings: Settings,
+        *,
+        runtime_has_switched: bool,
+    ) -> None:
+        if snapshot.runtime_provider is not None and (
+            snapshot.runtime_provider is not settings.llm_provider
+            or snapshot.runtime_model != settings.selected_model
+        ):
+            raise CommandError(
+                "session_provider_mismatch",
+                "The selected session belongs to another provider or model",
+            )
+        if (
+            snapshot.runtime_provider is None
+            and snapshot.messages
+            and runtime_has_switched
+        ):
+            raise CommandError(
+                "session_runtime_unbound",
+                "A legacy unbound session cannot follow a runtime model switch",
+            )
         if any(
             message.provider_state is not None
             and not message.provider_state.belongs_to(
@@ -883,6 +1021,46 @@ class WorkbenchController:
             raise CommandError(
                 "session_provider_mismatch",
                 "The selected session belongs to another provider or model",
+            )
+
+    def _can_switch_model_locked(self) -> bool:
+        return (
+            self._worker_factory is not None
+            and len(runtime_model_catalog(self._runtime_settings).models) > 1
+            and not self._closed
+            and self._run.status not in {"running", "cancelling"}
+            and (self._approval is None or self._approval.request.state != "pending")
+            and self._active_snapshot is None
+            and self._session_persistence == "unsaved"
+            and self._active_handle.runtime_provider is None
+            and self._active_handle.runtime_model is None
+        )
+
+    def _require_model_switch_available_locked(self) -> None:
+        if self._closed:
+            raise CommandError("service_closing", "Workbench is shutting down")
+        if self._run.status in {"running", "cancelling"}:
+            raise CommandError(
+                "run_conflict",
+                "Models cannot change while a turn is active",
+            )
+        if self._approval is not None and self._approval.request.state == "pending":
+            raise CommandError(
+                "approval_pending",
+                "Models cannot change while an approval is pending",
+            )
+        if self._active_snapshot is not None or self._session_persistence != "unsaved":
+            raise CommandError(
+                "session_not_empty",
+                "Create an empty session before changing models",
+            )
+        if (
+            self._worker_factory is None
+            or len(runtime_model_catalog(self._runtime_settings).models) < 2
+        ):
+            raise CommandError(
+                "model_switch_unavailable",
+                "Runtime model switching is not available",
             )
 
     def _reset_session_runtime_locked(self) -> None:
@@ -909,7 +1087,31 @@ class WorkbenchController:
                 for message in messages
             ),
             persistence_status=self._session_persistence,
+            runtime_provider=self._runtime_settings.llm_provider.value,
+            runtime_model=self._runtime_settings.selected_model,
         )
+
+    def _model_changed_payload_locked(
+        self,
+        projection: WorkbenchSnapshotDto,
+    ) -> dict[str, Any]:
+        capabilities = RuntimeCapabilitiesDto(
+            can_start_turn=True,
+            can_cancel_turn=False,
+            can_approve_tool=False,
+            can_show_diff=projection.git.available,
+            can_estimate_cost=projection.review.cost_available,
+            can_create_session=True,
+            can_select_session=True,
+            can_switch_model=self._can_switch_model_locked(),
+        )
+        return {
+            "provider": projection.provider.model_dump(mode="json"),
+            "active_session": self._active_session_dto_locked().model_dump(mode="json"),
+            "context": projection.context.model_dump(mode="json"),
+            "review": projection.review.model_dump(mode="json", exclude={"git"}),
+            "capabilities": capabilities.model_dump(mode="json"),
+        }
 
     def _publish_session_changed(self, *, reset_runtime: bool) -> None:
         try:

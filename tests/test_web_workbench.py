@@ -40,13 +40,18 @@ NOW = datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc)
 BOOTSTRAP = "test-bootstrap-secret-that-is-long-enough"
 
 
-def _settings(root: Path) -> Settings:
+def _settings(
+    root: Path,
+    *,
+    runtime_models: tuple[str, ...] = (),
+) -> Settings:
     return Settings(
         _env_file=None,
         deepseek_api_key="not-exposed",
         workspace_root=root,
         llm_model="deepseek-test-model",
         max_context_tokens=200_000,
+        web_runtime_model_allowlist=runtime_models,
     )
 
 
@@ -269,8 +274,9 @@ def _client(
     *,
     worker: Any | None = None,
     controller_options: dict[str, Any] | None = None,
+    runtime_models: tuple[str, ...] = (),
 ) -> TestClient:
-    settings = _settings(root)
+    settings = _settings(root, runtime_models=runtime_models)
     service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
     controller = WorkbenchController(
         service,
@@ -1079,6 +1085,8 @@ def test_session_select_restores_and_successful_turn_saves_atomically(
     assert len(persisted.messages) == 4
     assert persisted.messages[-2].content == "Continue the work"
     assert persisted.restored_steps() == (TaskStep("Persist Web session", "completed"),)
+    assert persisted.runtime_provider is ProviderId.DEEPSEEK
+    assert persisted.runtime_model == "deepseek-test-model"
     completed = controller.snapshot()
     assert completed.active_session is not None
     assert completed.active_session.persistence_status == "saved"
@@ -1320,6 +1328,315 @@ def test_session_selection_rejects_provider_private_state_mismatch(
     assert controller.snapshot().active_session == original
 
 
+def test_idle_runtime_model_switch_is_allowlisted_bound_and_reversible(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, runtime_models=("deepseek-fast",))
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    prepared_models: list[str] = []
+
+    def worker_factory(candidate: Settings) -> SessionWorker:
+        prepared_models.append(candidate.selected_model)
+        return SessionWorker()
+
+    controller = WorkbenchController(
+        service,
+        SessionWorker(),
+        worker_factory=worker_factory,
+        clock=lambda: NOW,
+    )
+    initial = controller.snapshot()
+    assert initial.provider.model == "deepseek-test-model"
+    assert initial.provider.available_models == (
+        "deepseek-test-model",
+        "deepseek-fast",
+    )
+    assert initial.capabilities.can_switch_model is True
+    assert initial.active_session is not None
+    assert initial.active_session.runtime_model == "deepseek-test-model"
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("model-control", "acquire_control", 0)),
+    )
+    unlisted = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-unlisted",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-unknown"},
+            )
+        ),
+    )
+    assert unlisted["code"] == "model_not_allowlisted"
+
+    switched = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-fast",
+                "switch_model",
+                int(unlisted["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert switched["status"] == "accepted"
+    selected = controller.snapshot()
+    assert selected.provider.model == "deepseek-fast"
+    assert selected.provider.available_models == (
+        "deepseek-fast",
+        "deepseek-test-model",
+    )
+    assert selected.active_session is not None
+    assert selected.active_session.runtime_model == "deepseek-fast"
+    assert prepared_models == ["deepseek-fast"]
+    replayed = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-fast",
+                "switch_model",
+                int(unlisted["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert replayed == switched
+    assert prepared_models == ["deepseek-fast"]
+
+    started = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-bound-turn",
+                "start_turn",
+                selected.revision,
+                {"prompt": "Persist with the selected model"},
+            )
+        ),
+    )
+    assert started["status"] == "accepted"
+    _wait_for_run(controller, "completed")
+    completed = controller.snapshot()
+    assert completed.active_session is not None
+    bound_session_id = completed.active_session.session_id
+    persisted = service.session_store.load(bound_session_id)
+    assert persisted.runtime_provider is ProviderId.DEEPSEEK
+    assert persisted.runtime_model == "deepseek-fast"
+    assert completed.capabilities.can_switch_model is False
+    blocked = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-nonempty",
+                "switch_model",
+                completed.revision,
+                {"model": "deepseek-test-model"},
+            )
+        ),
+    )
+    assert blocked["code"] == "session_not_empty"
+
+    created = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("model-new-session", "new_session", int(blocked["revision"]))
+        ),
+    )
+    restored = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-back",
+                "switch_model",
+                int(created["revision"]),
+                {"model": "deepseek-test-model"},
+            )
+        ),
+    )
+    mismatch = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-bound-mismatch",
+                "select_session",
+                int(restored["revision"]),
+                {"session_id": bound_session_id},
+            )
+        ),
+    )
+    assert mismatch["code"] == "session_provider_mismatch"
+
+    switched_again = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-again",
+                "switch_model",
+                int(mismatch["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    resumed = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-bound-resume",
+                "select_session",
+                int(switched_again["revision"]),
+                {"session_id": bound_session_id},
+            )
+        ),
+    )
+    assert resumed["status"] == "accepted"
+
+
+def test_runtime_model_switch_is_atomic_and_cannot_restore_unbound_history(
+    tmp_path: Path,
+) -> None:
+    identifiers = iter(("abababab", "cdcdcdcd", "efefefef"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    legacy = store.save(
+        store.new_session(),
+        (
+            Message(role="user", content="Legacy public history"),
+            Message(role="assistant", content="No provider state"),
+        ),
+        (),
+        None,
+        create_only=True,
+    )
+    settings = _settings(tmp_path, runtime_models=("deepseek-fast",))
+    service = WorkbenchSnapshotService(
+        settings,
+        clock=lambda: NOW,
+        session_store=store,
+    )
+
+    def failing_factory(candidate: Settings) -> SessionWorker:
+        raise RuntimeError(candidate.selected_model)
+
+    controller = WorkbenchController(
+        service,
+        SessionWorker(),
+        worker_factory=failing_factory,
+        clock=lambda: NOW,
+    )
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("atomic-control", "acquire_control", 0)),
+    )
+    failed = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "atomic-switch",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert failed["code"] == "model_switch_failed"
+    assert controller.snapshot().provider.model == "deepseek-test-model"
+
+    controller = WorkbenchController(
+        service,
+        SessionWorker(),
+        worker_factory=lambda _settings: SessionWorker(),
+        clock=lambda: NOW,
+    )
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("legacy-control", "acquire_control", 0)),
+    )
+    switched = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "legacy-switch",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    rejected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "legacy-select",
+                "select_session",
+                int(switched["revision"]),
+                {"session_id": legacy.session_id},
+            )
+        ),
+    )
+    assert rejected["code"] == "session_runtime_unbound"
+
+
+def test_runtime_model_switch_is_rejected_while_a_turn_is_running(
+    tmp_path: Path,
+) -> None:
+    worker = BlockingWorker()
+    settings = _settings(tmp_path, runtime_models=("deepseek-fast",))
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    controller = WorkbenchController(
+        service,
+        worker,
+        worker_factory=lambda _settings: SessionWorker(),
+        clock=lambda: NOW,
+    )
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("running-control", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "running-turn",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Wait for cancellation"},
+            )
+        ),
+    )
+    assert worker.started.wait(1)
+    running = controller.snapshot()
+    assert running.capabilities.can_switch_model is False
+    rejected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "running-switch",
+                "switch_model",
+                running.revision,
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert rejected["code"] == "run_conflict"
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "running-cancel",
+                "cancel_turn",
+                int(rejected["revision"]),
+            )
+        ),
+    )
+    assert worker.cancelled.wait(1)
+
+
 def test_single_turn_revision_control_and_cancel(tmp_path: Path) -> None:
     worker = BlockingWorker()
     client = _client(tmp_path, worker=worker)
@@ -1412,6 +1729,50 @@ def test_websocket_selects_and_creates_sessions_without_returning_bodies(
         active = client.get("/api/v1/snapshot").json()["active_session"]
         assert active["session_id"] != handle.session_id
         assert active["persistence_status"] == "unsaved"
+
+
+def test_websocket_switches_one_allowlisted_idle_model(tmp_path: Path) -> None:
+    prepared_models: list[str] = []
+
+    def worker_factory(candidate: Settings) -> SessionWorker:
+        prepared_models.append(candidate.selected_model)
+        return SessionWorker()
+
+    client = _client(
+        tmp_path,
+        runtime_models=("deepseek-fast",),
+        controller_options={"worker_factory": worker_factory},
+    )
+    _authenticate(client)
+
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_json(
+            _command("ws-model-control", "acquire_control", connected["revision"])
+        )
+        control = _receive_result(socket, "ws-model-control")
+        socket.send_json(
+            _command(
+                "ws-model-switch",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        )
+        switched = _receive_result(socket, "ws-model-switch")
+
+    snapshot = client.get("/api/v1/snapshot").json()
+    assert switched["status"] == "accepted"
+    assert snapshot["provider"]["model"] == "deepseek-fast"
+    assert snapshot["provider"]["available_models"] == [
+        "deepseek-fast",
+        "deepseek-test-model",
+    ]
+    assert snapshot["active_session"]["runtime_model"] == "deepseek-fast"
+    assert prepared_models == ["deepseek-fast"]
 
 
 def test_sequence_gap_and_slow_consumer_invalidate_snapshot(tmp_path: Path) -> None:

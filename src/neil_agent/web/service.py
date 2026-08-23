@@ -16,6 +16,7 @@ from ..config import Settings
 from ..errors import SessionError, ToolError
 from ..host_runtime import HostMode, build_host_runtime, observe_host_security
 from ..providers.factory import describe_provider
+from ..runtime_models import runtime_model_catalog
 from ..session import (
     SESSION_DIRECTORY,
     SESSION_STATE_DIRECTORY,
@@ -145,6 +146,12 @@ class WorkbenchSnapshotService:
                     has_plan=item.has_plan,
                     failed_check=item.failed_check,
                     has_compaction=item.has_compaction,
+                    runtime_provider=(
+                        None
+                        if item.runtime_provider is None
+                        else item.runtime_provider.value
+                    ),
+                    runtime_model=item.runtime_model,
                 )
                 for item in index.sessions
             ),
@@ -261,32 +268,37 @@ class WorkbenchSnapshotService:
         session: SessionSnapshot | None = None,
         *,
         fallback_to_latest: bool = True,
+        runtime_settings: Settings | None = None,
     ) -> ReviewDto:
         """Combine Git metadata with one explicitly selected session when supplied."""
 
         selected = session
         if selected is None and fallback_to_latest:
             selected = self._latest_session()
-        return self._review_from(self.git(), selected)
+        settings = runtime_settings or self.settings
+        return self._review_from(self.git(), selected, settings)
 
     def snapshot(
         self,
         session: SessionSnapshot | None = None,
         *,
         fallback_to_latest: bool = True,
+        runtime_settings: Settings | None = None,
     ) -> WorkbenchSnapshotDto:
         """Build one internally consistent, versioned first-screen snapshot."""
 
+        settings = runtime_settings or self.settings
         sessions = self.sessions()
         selected = session
         if selected is None and fallback_to_latest:
             selected = self._latest_session(sessions)
         git = self.git()
-        review = self._review_from(git, selected)
-        provider = describe_provider(self.settings)
+        review = self._review_from(git, selected, settings)
+        provider = describe_provider(settings)
+        model_catalog = runtime_model_catalog(settings)
         capabilities = provider.capabilities
         security = observe_host_security(
-            self.settings,
+            settings,
             self._security_registry,
             audit_probe=(
                 self._security_audit_sink.inspect
@@ -305,9 +317,10 @@ class WorkbenchSnapshotService:
             provider=ProviderDto(
                 provider=provider.provider.value,
                 display_name=provider.display_name,
-                model=self.settings.selected_model,
+                model=settings.selected_model,
+                available_models=model_catalog.models,
                 wire_protocol=provider.wire_protocol.value,
-                thinking_enabled=self.settings.thinking_enabled,
+                thinking_enabled=settings.thinking_enabled,
                 capabilities=ProviderCapabilitiesDto(
                     streaming=capabilities.streaming,
                     tool_calling=capabilities.tool_calling,
@@ -320,11 +333,11 @@ class WorkbenchSnapshotService:
             sessions=sessions,
             files=self.files(depth=2),
             task=self._task(selected),
-            context=self._context(selected),
+            context=self._context(selected, settings),
             review=review,
             security=SecurityDto(
-                sandbox_backend=self.settings.sandbox_backend,
-                audit_enabled=self.settings.audit_log_enabled,
+                sandbox_backend=settings.sandbox_backend,
+                audit_enabled=settings.audit_log_enabled,
                 shield_schema_version=security.schema_version,
                 application_status=security.application.status,
                 os_sandbox_status=security.os_sandbox.status,
@@ -358,21 +371,30 @@ class WorkbenchSnapshotService:
             ),
         )
 
-    def _context(self, latest: SessionSnapshot | None) -> ContextDto:
+    def _context(
+        self,
+        latest: SessionSnapshot | None,
+        settings: Settings,
+    ) -> ContextDto:
         usage = None if latest is None else latest.last_usage
         if usage is None:
             return ContextDto(
-                source="unavailable", limit_tokens=self.settings.max_context_tokens
+                source="unavailable", limit_tokens=settings.max_context_tokens
             )
         return ContextDto(
             source="server_reported",
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
-            limit_tokens=self.settings.max_context_tokens,
+            limit_tokens=settings.max_context_tokens,
         )
 
-    def _review_from(self, git: GitDto, latest: SessionSnapshot | None) -> ReviewDto:
+    def _review_from(
+        self,
+        git: GitDto,
+        latest: SessionSnapshot | None,
+        settings: Settings,
+    ) -> ReviewDto:
         quality = None
         if latest is not None and latest.latest_quality_check is not None:
             record = latest.latest_quality_check
@@ -389,7 +411,7 @@ class WorkbenchSnapshotService:
             state = "stale"
         else:
             state = "empty"
-        cost = self._cost(latest)
+        cost = self._cost(latest, settings)
         return ReviewDto(
             state=state,
             git=git,
@@ -399,7 +421,11 @@ class WorkbenchSnapshotService:
             cost_available=cost.source == "versioned_rate_table",
         )
 
-    def _cost(self, latest: SessionSnapshot | None) -> CostEstimateDto:
+    def _cost(
+        self,
+        latest: SessionSnapshot | None,
+        settings: Settings,
+    ) -> CostEstimateDto:
         table = self._rate_table
         if table is None:
             return CostEstimateDto(source="unavailable", reason="no_rate_table")
@@ -408,7 +434,7 @@ class WorkbenchSnapshotService:
                 source="unavailable",
                 rate_table_version=table.version,
                 rate_effective_date=table.effective_date.isoformat(),
-                model=self.settings.selected_model,
+                model=settings.selected_model,
                 reason="rate_not_effective",
             )
         usage = None if latest is None else latest.last_usage
@@ -417,18 +443,16 @@ class WorkbenchSnapshotService:
                 source="unavailable",
                 rate_table_version=table.version,
                 rate_effective_date=table.effective_date.isoformat(),
-                model=self.settings.selected_model,
+                model=settings.selected_model,
                 reason="no_saved_usage",
             )
-        rate = table.find(
-            self.settings.llm_provider.value, self.settings.selected_model
-        )
+        rate = table.find(settings.llm_provider.value, settings.selected_model)
         if rate is None:
             return CostEstimateDto(
                 source="unavailable",
                 rate_table_version=table.version,
                 rate_effective_date=table.effective_date.isoformat(),
-                model=self.settings.selected_model,
+                model=settings.selected_model,
                 reason="model_not_listed",
             )
         estimate = rate.estimate(usage)
@@ -437,7 +461,7 @@ class WorkbenchSnapshotService:
                 source="unavailable",
                 rate_table_version=table.version,
                 rate_effective_date=table.effective_date.isoformat(),
-                model=self.settings.selected_model,
+                model=settings.selected_model,
                 reason="cache_rate_missing",
             )
         rounded = estimate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
@@ -446,7 +470,7 @@ class WorkbenchSnapshotService:
             estimated_usd=f"{rounded:.6f}",
             rate_table_version=table.version,
             rate_effective_date=table.effective_date.isoformat(),
-            model=self.settings.selected_model,
+            model=settings.selected_model,
             reason="estimated",
         )
 

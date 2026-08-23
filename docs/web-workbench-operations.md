@@ -1,6 +1,6 @@
 # Web Workbench 安装与本地运维
 
-P5 将生产前端内嵌到 `neil-agent` Python wheel；P6/P7 更新受审视觉资源、回归门禁和前端故障恢复，P8 增加受控的本地会话连续性。已安装的 `neil-agent-web` 不需要 Node.js，也不依赖启动时的当前目录中存在 `web/dist`。wheel 会显式安装实时协议所需的 WebSocket 运行时；若运行时缺失，启动器会在监听端口和生成 bootstrap 前失败关闭。
+P5 将生产前端内嵌到 `neil-agent` Python wheel；P6/P7 更新受审视觉资源、回归门禁和前端故障恢复，P8 增加受控的本地会话连续性，P9 增加 idle-only 同 Provider 模型切换。已安装的 `neil-agent-web` 不需要 Node.js，也不依赖启动时的当前目录中存在 `web/dist`。wheel 会显式安装实时协议所需的 WebSocket 运行时；若运行时缺失，启动器会在监听端口和生成 bootstrap 前失败关闭。
 
 ## 1. 从源码构建 wheel
 
@@ -37,6 +37,14 @@ neil-agent-web --no-browser
 
 模型、API Key 与工作区仍使用 Neil Agent 的现有环境变量/`.env` 配置。启动日志不会打印 bootstrap secret 或 WebSocket ticket；bootstrap 只短时放在自动打开页面的 URL fragment 中，交换后立即从地址栏移除。
 
+如需在 Web 中选择同一 Provider 的其他模型，使用严格 JSON 数组配置附加 ID：
+
+```text
+WEB_RUNTIME_MODEL_ALLOWLIST=["deepseek-fast","deepseek-reasoning"]
+```
+
+最多配置 15 个附加模型，启动时的 `LLM_MODEL`（DeepSeek 兼容配置也可能来自 `DEEPSEEK_MODEL`）会自动加入。未配置或只有启动模型时，选择器禁用。切换只在控制端、idle、无待审批且当前会话为空并未保存时开放；不探测远端模型、不更换 Provider/endpoint/API Key，也不会在点击时发起模型请求。要更换 Provider，停止服务并修改启动配置后重启。
+
 ## 3. 停止、端口冲突与恢复
 
 - 在启动服务的终端按 `Ctrl+C` 停止。正常停止返回成功状态；服务最多等待 10 秒完成优雅关闭，并会取消活动 turn，使待审批、session 和 ticket 全部失效。
@@ -68,4 +76,4 @@ uv tool uninstall neil-agent
 - `npm run dev` 是源码开发服务器，不能作为发布安装方式。需要连接真实本地 API 时，以 `uv run neil-agent-web --allow-vite-dev-origin --no-browser` 显式允许固定的 5173 loopback Origin；发布启动不要开启该选项。
 - `npm run build` 生成发布资源；wheel 构建前必须执行。
 - 发布运行只使用 wheel 内的资源，不从 CDN、远程字体、分析服务或仓库外路径加载前端代码。
-- PTY、任意 shell 和聚合 `Approve & Apply` 不属于 P0–P8。
+- PTY、任意 shell 和聚合 `Approve & Apply` 不属于 P0–P9。

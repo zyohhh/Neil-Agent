@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import { act } from 'react'
 import App from './App'
-import { reduceWorkbenchEvent, resetLiveSnapshotRequestForTests, type WorkbenchSnapshotV1 } from './protocol'
+import { reduceWorkbenchEvent, resetLiveSnapshotRequestForTests, WorkbenchRealtimeClient, type WorkbenchSnapshotV1 } from './protocol'
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -10,17 +10,17 @@ const snapshot = {
   source: 'live',
   generated_at: '2026-08-13T08:00:00Z',
   workspace: { name: 'Neil-Agent-Live', identity: '0123456789abcdef' },
-  provider: { provider: 'deepseek', display_name: 'DeepSeek', model: 'deepseek-live', wire_protocol: 'anthropic-messages', thinking_enabled: false },
+  provider: { provider: 'deepseek', display_name: 'DeepSeek', model: 'deepseek-live', available_models: ['deepseek-live', 'deepseek-fast'], wire_protocol: 'anthropic-messages', thinking_enabled: false },
   run: { status: 'idle', run_id: null, objective: null, started_at: null, finished_at: null, error_type: null },
   revision: 0,
   last_sequence: 0,
-  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_approve_tool: false, can_show_diff: true, can_estimate_cost: false, can_create_session: true, can_select_session: true, tool_permission_mode: 'approval_gated', has_pty: false },
+  capabilities: { can_start_turn: true, can_cancel_turn: false, can_request_control: true, can_approve_tool: false, can_show_diff: true, can_estimate_cost: false, can_create_session: true, can_select_session: true, can_switch_model: true, tool_permission_mode: 'approval_gated', has_pty: false },
   timeline: [],
   output: [],
   approval: null,
   git: { available: true, branch: 'feature/web-workbench', revision: '0123456789abcdef', change_count: 1, files: [{ path: 'src/live.py', previous_path: null, status: 'M', kind: 'modified', additions: 2, deletions: 1, diff_available: true, diff_reason: 'available' }], truncated: false },
   sessions: { available: true, items: [], invalid_count: 0, total_count: 0 },
-  active_session: { session_id: '20260813T080000000000Z-deadbeef', title: '新会话', round_count: 0, persistence_status: 'unsaved' },
+  active_session: { session_id: '20260813T080000000000Z-deadbeef', title: '新会话', round_count: 0, persistence_status: 'unsaved', runtime_provider: 'deepseek', runtime_model: 'deepseek-live' },
   files: { root: '', items: [{ name: 'src', path: 'src', kind: 'directory', children: [] }], truncated: false, revision: 'fedcba9876543210', unchanged: false },
   task: { source: 'unavailable', session_id: null, steps: [] },
   context: { source: 'unavailable', input_tokens: null, output_tokens: null, total_tokens: null, limit_tokens: 200000 },
@@ -49,7 +49,7 @@ describe('WebWorkbenchApp', () => {
     expect(document.body.textContent).toContain('Output')
     expect(document.body.textContent).toContain('Unavailable')
     expect(document.body.textContent).not.toContain('Approve & Apply')
-    expect(document.querySelector<HTMLSelectElement>('select')?.options).toHaveLength(12)
+    expect(document.querySelector<HTMLSelectElement>('.scenario-select select')?.options).toHaveLength(12)
     expect(document.querySelectorAll('[role="treeitem"][tabindex="0"]')).toHaveLength(1)
 
     await act(async () => root.unmount())
@@ -148,6 +148,8 @@ describe('WebWorkbenchApp', () => {
           has_plan: false,
           failed_check: false,
           has_compaction: false,
+          runtime_provider: 'deepseek',
+          runtime_model: 'deepseek-live',
         }],
       },
     } satisfies WorkbenchSnapshotV1
@@ -213,8 +215,92 @@ describe('WebWorkbenchApp', () => {
     expect(reduced.capabilities.can_approve_tool).toBe(true)
   })
 
+  it('reduces an atomic runtime model change projection', () => {
+    const reduced = reduceWorkbenchEvent(snapshot, {
+      protocol_version: 1,
+      message_type: 'event',
+      event_type: 'model_changed',
+      sequence: 1,
+      revision: 1,
+      timestamp: '2026-08-13T08:00:01Z',
+      payload: {
+        provider: { ...snapshot.provider, model: 'deepseek-fast', available_models: ['deepseek-fast', 'deepseek-live'] },
+        active_session: { ...snapshot.active_session!, runtime_model: 'deepseek-fast' },
+        context: snapshot.context,
+        review: snapshot.review,
+        capabilities: snapshot.capabilities,
+      },
+    })
+
+    expect(reduced.provider.model).toBe('deepseek-fast')
+    expect(reduced.active_session?.runtime_model).toBe('deepseek-fast')
+    expect(reduced.provider.available_models).toEqual(['deepseek-fast', 'deepseek-live'])
+  })
+
+  it('sends an allowlisted runtime model command through the realtime protocol', async () => {
+    document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
+    const sockets: FakeWebSocket[] = []
+    class FakeWebSocket {
+      static readonly OPEN = 1
+      readonly readyState = FakeWebSocket.OPEN
+      readonly sent: string[] = []
+      readonly url: string
+      onmessage: ((event: MessageEvent<string>) => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+
+      constructor(url: string) {
+        this.url = url
+        sockets.push(this)
+      }
+
+      send(value: string) {
+        this.sent.push(value)
+      }
+
+      close() {}
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ ticket: 'one-time-ticket' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    const client = new WorkbenchRealtimeClient({
+      onConnection: vi.fn(),
+      onSnapshot: vi.fn(),
+      onEvent: vi.fn(),
+      onControl: vi.fn(),
+      onCommandError: vi.fn(),
+    })
+
+    client.start(snapshot)
+    await vi.waitFor(() => expect(sockets).toHaveLength(1))
+    sockets[0].onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({
+        protocol_version: 1,
+        message_type: 'connected',
+        client_id: 'local-client',
+        sequence: 0,
+        revision: 0,
+        control: false,
+      }),
+    }))
+    client.switchModel('deepseek-fast')
+
+    const command = JSON.parse(sockets[0].sent.at(-1) ?? '{}') as Record<string, unknown>
+    expect(command.command).toBe('switch_model')
+    expect(command.payload).toEqual({ model: 'deepseek-fast' })
+    expect(command.expected_revision).toBe(0)
+
+    client.stop()
+    fetchMock.mockRestore()
+    vi.unstubAllGlobals()
+  })
+
   it('reduces a session change without exposing conversation bodies', () => {
-    const activeSession = { session_id: '20260813T081500000000Z-cafebabe', title: 'Resume work', round_count: 2, persistence_status: 'saved' as const }
+    const activeSession = { session_id: '20260813T081500000000Z-cafebabe', title: 'Resume work', round_count: 2, persistence_status: 'saved' as const, runtime_provider: 'deepseek', runtime_model: 'deepseek-live' }
     const previous = {
       ...snapshot,
       run: { ...snapshot.run, status: 'running' as const, run_id: `run-${'a'.repeat(32)}` },

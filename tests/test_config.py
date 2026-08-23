@@ -42,6 +42,36 @@ def test_time_machine_event_persistence_is_explicit_and_bounded(
         )
 
 
+def test_web_runtime_model_allowlist_is_explicit_bounded_and_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = Settings(_env_file=None, deepseek_api_key="test-key")
+    assert defaults.web_runtime_model_allowlist == ()
+
+    monkeypatch.setenv(
+        "WEB_RUNTIME_MODEL_ALLOWLIST",
+        '["deepseek-fast", "deepseek-reasoning"]',
+    )
+    configured = Settings(_env_file=None, deepseek_api_key="test-key")
+    assert configured.web_runtime_model_allowlist == (
+        "deepseek-fast",
+        "deepseek-reasoning",
+    )
+
+    with pytest.raises(ValidationError, match="duplicates"):
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            web_runtime_model_allowlist=("duplicate", "duplicate"),
+        )
+    with pytest.raises(ValidationError, match="surrounding whitespace"):
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            web_runtime_model_allowlist=(" unsafe",),
+        )
+
+
 def test_legacy_deepseek_configuration_remains_the_default() -> None:
     settings = Settings(_env_file=None, deepseek_api_key="test-key")
 

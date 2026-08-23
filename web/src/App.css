@@ -240,7 +240,7 @@
 }
 
 .workspace-selector strong,
-.model-selector strong {
+.model-selector select {
   min-width: 0;
   overflow: hidden;
   color: var(--color-text);
@@ -254,8 +254,7 @@
   font-weight: 400;
 }
 
-.selector-chevron,
-.model-selector > .icon {
+.selector-chevron {
   margin-left: 10px;
   transform: rotate(90deg);
 }
@@ -284,7 +283,7 @@
 }
 
 .mode-switcher button[aria-disabled='true'],
-.model-selector:disabled {
+.model-selector.is-disabled {
   cursor: not-allowed;
   opacity: 0.62;
 }
@@ -433,6 +432,26 @@
   min-height: 190px;
   overflow: hidden;
   padding-top: 18px;
+}
+
+.model-selector select {
+  max-width: 180px;
+  padding: 0 2px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.model-selector select:disabled {
+  color: var(--color-text);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.model-selector:focus-within {
+  border-color: rgba(174, 226, 128, 0.58);
+  box-shadow: 0 0 0 2px rgba(156, 223, 104, 0.14);
 }
 
 .sessions-heading-row {

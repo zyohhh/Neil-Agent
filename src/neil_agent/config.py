@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
+from unicodedata import category
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,6 +18,8 @@ DEFAULT_CLAUDE_BASE_URL = AnyHttpUrl("https://api.anthropic.com")
 DEFAULT_OPENAI_BASE_URL = AnyHttpUrl("https://api.openai.com/v1")
 DEFAULT_OLLAMA_BASE_URL = AnyHttpUrl("http://localhost:11434/v1")
 DEFAULT_VLLM_BASE_URL = AnyHttpUrl("http://localhost:8000/v1")
+MAX_RUNTIME_MODEL_ID_CHARS = 256
+MAX_WEB_RUNTIME_MODELS = 16
 
 
 class Settings(BaseSettings):
@@ -224,6 +227,14 @@ class Settings(BaseSettings):
         le=50_000_000,
         description="Maximum runtime-event JSONL size before one-file rotation.",
     )
+    web_runtime_model_allowlist: tuple[str, ...] = Field(
+        default=(),
+        max_length=MAX_WEB_RUNTIME_MODELS - 1,
+        description=(
+            "Additional same-provider model IDs that the local Web Workbench may "
+            "select while idle. The startup model is always included."
+        ),
+    )
 
     @field_validator("system_prompt")
     @classmethod
@@ -239,9 +250,20 @@ class Settings(BaseSettings):
     def model_name_must_not_be_blank(cls, value: str | None) -> str | None:
         """Reject model identifiers containing only whitespace."""
 
-        if value is not None and not value.strip():
-            raise ValueError("model identifier must not be blank")
-        return value
+        return None if value is None else validate_runtime_model_identifier(value)
+
+    @field_validator("web_runtime_model_allowlist")
+    @classmethod
+    def runtime_model_allowlist_must_be_safe(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Keep Web model targets explicit, bounded, and unambiguous."""
+
+        validated = tuple(validate_runtime_model_identifier(item) for item in value)
+        if len(set(validated)) != len(validated):
+            raise ValueError("Web runtime model allowlist cannot contain duplicates")
+        return validated
 
     @model_validator(mode="after")
     def validate_provider_and_retry_settings(self) -> Self:
@@ -349,3 +371,19 @@ def get_settings() -> Settings:
     """Load and cache application settings on first use."""
 
     return Settings()
+
+
+def validate_runtime_model_identifier(value: str) -> str:
+    """Validate one provider-owned model ID without normalizing its identity."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("model identifier must not be blank")
+    if value != value.strip():
+        raise ValueError("model identifier cannot contain surrounding whitespace")
+    if len(value) > MAX_RUNTIME_MODEL_ID_CHARS:
+        raise ValueError(
+            f"model identifier cannot exceed {MAX_RUNTIME_MODEL_ID_CHARS} characters"
+        )
+    if any(category(character).startswith("C") for character in value):
+        raise ValueError("model identifier cannot contain control characters")
+    return value

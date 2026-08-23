@@ -1,6 +1,6 @@
 # Neil Agent Web Workbench 开发文档
 
-> 状态：P8 completed · Web session continuity and runtime parity
+> 状态：P9 completed · idle-only same-provider runtime model switching
 >
 > 更新时间：2026-08-18
 >
@@ -246,7 +246,7 @@ offline -> connecting -> idle -> running -> waiting_for_approval
 - 只有存在有效待审批请求时才启用 Approve/Reject。
 - 用户向上滚动时间线后暂停自动跟随；回到底部或点击“Follow live”才恢复。
 - Output 支持折叠、拖拽高度和复制选中内容；不能执行任意命令。
-- 模型或模式切换只允许在 idle 状态进行，并明确作用于下一次 turn。
+- 模型切换只允许控制端在 idle、空且未保存的会话中进行，并明确只作用于下一次 turn；Focus/Build 仍是无权限含义的本地预览。
 - 所有服务端副作用命令必须携带唯一 `command_id`，重复提交不能重复执行。
 
 ## 7. 视觉设计规范
@@ -587,7 +587,7 @@ EventBus 是有界的，观察者可能丢事件。因此 Web 层必须把“发
 
 | UI 区域 | 真实来源 | 首版处理 | 后续缺口 |
 | --- | --- | --- | --- |
-| 模型选择 | `Settings` / Provider 描述 | idle 时选择下一 turn 模型 | 等 Provider runtime 配置收口 |
+| 模型选择 | `Settings` / Provider 描述 | 显式同 Provider 白名单；idle + 空会话时选择下一 turn 模型 | 跨 Provider 切换、自动路由与降级不在 P9 |
 | Running 状态 | Controller + Agent turn | 明确状态机 | 无 |
 | Sessions | `SessionStore` | 分页只读、idle 时恢复 | 搜索/虚拟列表优化 |
 | 时间线 | RuntimeEvent 投影 + ActivityEvent | 元数据与安全摘要 | 事件/活动稳定关联 ID |
@@ -724,7 +724,7 @@ Approve/Reject 仅接受当前控制租约持有者、当前 request ID 和精�
 
 当前 P4 已实现：Review 通过固定只读 Git 边界返回逐文件 numstat、rename/conflict/binary/untracked 状态，以及与 Git revision 绑定且最多 40K 字符的单文件 diff；未跟踪文件正文不通过 diff API 返回，路径不在当前安全变更集合、revision 过期或工作区越界时 fail closed。文件树使用 16 位内容 revision 做增量刷新，revision 未变化时只返回 `unchanged=true`，不重复传输整棵树。
 
-Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 Session v3 只持久化 `latest_quality_check`，所以刷新或恢复旧会话时协议真实返回 0–1 条；在会话存储升级前不伪造历史。Cost 仅在显式 `WEB_RATE_TABLE` 指向严格的 schema v1 本地 JSON、且 provider/model、费率生效日期、缓存价格和 input token 记账语义全部匹配时显示六位小数的美元 estimate；其余情况继续显示 `Unavailable`。仓库不内置会随时间失效的 Provider 价格。
+Web Controller 在当前 turn 内保留最近 20 条质量检查终态。Session v5 仍只持久化 `latest_quality_check`，所以刷新或恢复会话时协议真实返回 0–1 条，不伪造历史。Cost 仅在显式 `WEB_RATE_TABLE` 指向严格的 schema v1 本地 JSON、且 provider/model、费率生效日期、缓存价格和 input token 记账语义全部匹配时显示六位小数的美元 estimate；其余情况继续显示 `Unavailable`。仓库不内置会随时间失效的 Provider 价格。
 
 ### P5：打包与安全加固
 
@@ -791,6 +791,24 @@ P8 同时将 Security Shield 观察抽到 `host_runtime.observe_host_security()`
 - 失败/取消不落盘、保存失败闭锁、跨 Provider 私有状态拒绝测试；
 - 前端真实会话操作、禁用原因、持久化状态和 Security Shield 摘要；
 - Web/CLI 共享 Security Shield 投影与更新后的威胁评审。
+
+### P9：idle-only 同 Provider 运行时模型切换
+
+状态：已于 `feature/web-runtime-model-switching` 完成。P9 只为 Web 进程增加操作方显式配置的同 Provider 候选模型，不实现跨 Provider 迁移、自动路由、fallback 或模型发现。`WEB_RUNTIME_MODEL_ALLOWLIST` 是最多 15 个附加精确模型 ID 的 JSON 数组；启动模型自动成为目录首项。没有附加项时，前端模型选择器保持禁用。
+
+`switch_model` WebSocket 命令必须同时满足：调用标签页持有控制租约、`expected_revision` 精确匹配、服务未关闭、没有运行中/取消中的 turn、没有待审批请求，并且活动会话尚未保存且没有历史。控制器先用候选模型重建完整 `Settings`，确认 Provider 不变并构造下一 turn worker；只有全部准备成功才在锁内一次性替换设置与 worker。构造失败不改变现有运行时，准备阶段不构造 SDK client、不调用模型 API，模型直到下一次 `start_turn` 才产生网络请求。成功后发布有界 `model_changed` 投影，更新 provider、context、cost、活动会话和 capabilities。
+
+会话格式升级到版本 5，以成对的 `runtime_provider` / `runtime_model` 保存可选绑定。每个成功 Web turn 都写入当前绑定，已绑定会话后续不能改写绑定；重命名、分支和导入导出继续保留。选择会话时先比较快照绑定，再逐消息检查 Provider 私有状态。当前进程发生过运行时切换后，含历史但没有绑定的 v1–v4 会话拒绝恢复，避免用户先在空会话切模型、再选择旧历史绕过门禁。跨进程打开此类旧会话仍保持既有兼容行为，直到由成功 turn 升级并绑定。
+
+前端使用原生可访问 `select`，仅在实时连接、持有控制、后端声明 `can_switch_model` 且无运行/审批时启用；禁用原因通过辅助文本说明。模型 ID 和会话绑定属于非秘密元数据，浏览器仍不会收到 API Key、endpoint、thinking、完整消息或 Provider 私有 payload。
+
+交付：
+
+- 显式有界模型目录、纯准备事务与同 Provider 强制约束；
+- `switch_model` / `model_changed` 协议、revision/idempotency 和前端 reducer；
+- Session v5 运行时绑定、v1–v4 严格迁移及分支/重命名保留；
+- 非空、运行中、未列入白名单、工厂失败、绑定不匹配与旧会话绕过回归；
+- 更新后的威胁模型、运维配置和 wheel 静态资源。
 
 ## 16. 测试策略
 
@@ -859,6 +877,8 @@ CI 不得以 Vite build 代替 TypeScript 类型检查。
 - 审批重复提交、过期、预览变化和非控制客户端操作全部被拒绝；
 - UI 不显示 thinking、API Key、环境变量、完整工具参数或未授权正文；
 - Git diff 和文件树不能越过 workspace；
+- 未配置模型白名单时选择器禁用；配置后，运行中、待审批、非空/已保存会话、无控制权、过期 revision、未知模型和跨 Provider 尝试全部被拒绝；
+- 成功模型切换只影响下一 turn，失败不改变旧运行时；保存后的会话绑定必须与恢复时 Provider/模型完全一致；
 - Web Workbench 关闭后 CLI/TUI 行为和已有测试保持不变；
 - 默认运行不访问远程字体、脚本、分析或遥测服务。
 
@@ -900,12 +920,12 @@ feat(api): add tool approval flow
 2. 产品名称使用 `Web Workbench`、`Workspace` 还是 `Mission Control`？
 3. Focus/Build 是纯展示模式，还是分别代表只读分析与可修改工具权限？在权限语义确定前不实现为真实开关。
 4. 已决：P8 允许浏览器在控制租约、精确 revision 与 idle 门禁下恢复/切换工作区本地会话；浏览器不接收完整消息或 Provider 私有状态。
-5. 模型切换是否由 Web 进程独立拥有，还是沿用启动时环境配置？
+5. 已决：P9 由 Web Controller 持有启动配置的不可变替代副本，只允许显式同 Provider 白名单；Provider、endpoint 与凭据仍由启动配置拥有。
 6. 质量检查输出允许显示多少正文、保留多久？
 7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
 8. 已决：P5 采用 wheel 内嵌生产产物；Vite 开发服务器只用于源码开发，不是发布启动项。
 
-P1–P8 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁、前端故障恢复和 Web 会话连续性；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
+P1–P9 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁、前端故障恢复、Web 会话连续性和受控模型切换；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、跨 Provider 切换、自动 fallback 和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
 
 其中第 1、3、5 项会影响后端边界，必须在接真实 Agent 前确定；其他项可在 fixture 原型评审后决定。
 

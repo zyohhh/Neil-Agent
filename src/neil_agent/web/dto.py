@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 class WorkbenchDto(BaseModel):
@@ -72,6 +72,7 @@ class ProviderDto(WorkbenchDto):
     provider: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=128)
     model: str = Field(min_length=1, max_length=256)
+    available_models: tuple[str, ...] = Field(min_length=1, max_length=16)
     wire_protocol: str = Field(min_length=1, max_length=64)
     thinking_enabled: bool
     capabilities: ProviderCapabilitiesDto
@@ -106,6 +107,14 @@ class SessionDto(WorkbenchDto):
     has_plan: bool
     failed_check: bool
     has_compaction: bool
+    runtime_provider: str | None = Field(default=None, min_length=1, max_length=64)
+    runtime_model: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def runtime_binding_must_be_complete(self) -> Self:
+        if (self.runtime_provider is None) != (self.runtime_model is None):
+            raise ValueError("session runtime binding must be complete")
+        return self
 
 
 class SessionListDto(WorkbenchDto):
@@ -123,6 +132,8 @@ class ActiveSessionDto(WorkbenchDto):
     title: str = Field(min_length=1, max_length=80)
     round_count: int = Field(ge=0)
     persistence_status: Literal["unsaved", "saved", "save_failed"]
+    runtime_provider: str = Field(min_length=1, max_length=64)
+    runtime_model: str = Field(min_length=1, max_length=256)
 
 
 class FileNodeDto(WorkbenchDto):
@@ -272,6 +283,7 @@ class RuntimeCapabilitiesDto(WorkbenchDto):
     can_estimate_cost: bool = False
     can_create_session: bool = True
     can_select_session: bool = True
+    can_switch_model: bool = False
     tool_permission_mode: Literal["approval_gated"] = "approval_gated"
     has_pty: Literal[False] = False
 
