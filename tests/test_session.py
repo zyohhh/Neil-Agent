@@ -7,8 +7,9 @@ import pytest
 
 from neil_agent import session as session_module
 from neil_agent.errors import SessionError
+from neil_agent.providers.base import ProviderId, ProviderTurnState
 from neil_agent.schemas import Message, TokenUsage
-from neil_agent.session import MAX_SESSION_TITLE_CHARS, SessionStore
+from neil_agent.session import MAX_SESSION_TITLE_CHARS, SessionHandle, SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 
 NOW = datetime(2026, 7, 20, 8, 30, tzinfo=timezone.utc)
@@ -60,13 +61,13 @@ def test_session_round_trip_is_versioned_and_excludes_environment_secrets(
     index = store.list_sessions()
     payload = (store.root / f"{handle.session_id}.json").read_text(encoding="utf-8")
 
-    assert saved.version == 3
+    assert saved.version == 5
     assert saved.title == "inspect the project"
     assert loaded == saved
     assert loaded.restored_steps() == steps
     assert loaded.restored_quality_check() == quality
     assert loaded.last_usage == usage
-    assert '"version": 3' in payload
+    assert '"version": 5' in payload
     assert '"input_tokens": 120' in payload
     assert '"title": "inspect the project"' in payload
     assert "must-not-be-persisted" not in payload
@@ -99,6 +100,57 @@ def test_atomic_replace_failure_preserves_previous_session(
     assert list(store.root.glob("*.tmp")) == []
 
 
+def test_runtime_binding_round_trips_branches_and_cannot_be_rebound(
+    tmp_path: Path,
+) -> None:
+    identifiers = iter(("11111111", "22222222"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    handle = store.new_session()
+    messages = (
+        Message(role="user", content="Inspect runtime binding"),
+        Message(
+            role="assistant",
+            content="Bound response",
+            provider_state=ProviderTurnState(
+                provider=ProviderId.DEEPSEEK,
+                model="deepseek-test-model",
+                schema_version=1,
+                payload={"opaque": "state"},
+            ),
+        ),
+    )
+    saved = store.save(
+        handle,
+        messages,
+        (),
+        None,
+        runtime_provider=ProviderId.DEEPSEEK,
+        runtime_model="deepseek-test-model",
+    )
+
+    assert store.load(saved.session_id).runtime_provider is ProviderId.DEEPSEEK
+    assert store.get_summary(saved.session_id).runtime_model == "deepseek-test-model"
+    assert store.rename(saved.session_id, "Bound session").runtime_model == (
+        "deepseek-test-model"
+    )
+    branch = store.branch(saved.session_id)
+    assert branch.runtime_provider is ProviderId.DEEPSEEK
+    assert branch.runtime_model == "deepseek-test-model"
+    with pytest.raises(SessionError, match="不能切换运行时"):
+        store.save(
+            store.handle_for(saved),
+            messages,
+            (),
+            None,
+            runtime_provider=ProviderId.DEEPSEEK,
+            runtime_model="different-model",
+        )
+
+
 def test_listing_skips_corrupt_files_and_load_rejects_invalid_ids(
     tmp_path: Path,
 ) -> None:
@@ -110,7 +162,7 @@ def test_listing_skips_corrupt_files_and_load_rejects_invalid_ids(
     current_payload = (store.root / f"{handle.session_id}.json").read_text(
         encoding="utf-8"
     )
-    future_payload = current_payload.replace('"version": 3', '"version": 4').replace(
+    future_payload = current_payload.replace('"version": 5', '"version": 6').replace(
         handle.session_id,
         future_id,
     )
@@ -162,6 +214,9 @@ def test_loads_legacy_v1_snapshot_and_migrates_on_next_save(tmp_path: Path) -> N
     legacy_payload["version"] = 1
     legacy_payload.pop("title")
     legacy_payload.pop("last_usage")
+    legacy_payload.pop("parent_session_id")
+    legacy_payload.pop("runtime_provider")
+    legacy_payload.pop("runtime_model")
     import json
 
     path.write_text(json.dumps(legacy_payload), encoding="utf-8")
@@ -169,11 +224,12 @@ def test_loads_legacy_v1_snapshot_and_migrates_on_next_save(tmp_path: Path) -> N
     migrated = store.load(handle.session_id)
     rewritten = store.save(store.handle_for(migrated), migrated.messages, (), None)
 
-    assert migrated.version == 3
+    assert migrated.version == 5
     assert migrated.title == "inspect the project"
     assert migrated.last_usage is None
-    assert rewritten.version == 3
-    assert '"version": 3' in path.read_text(encoding="utf-8")
+    assert migrated.parent_session_id is None
+    assert rewritten.version == 5
+    assert '"version": 5' in path.read_text(encoding="utf-8")
 
 
 def test_loads_v2_snapshot_without_usage_and_migrates_on_save(
@@ -192,6 +248,9 @@ def test_loads_v2_snapshot_without_usage_and_migrates_on_save(
     payload = current.model_dump(mode="json")
     payload["version"] = 2
     payload.pop("last_usage")
+    payload.pop("parent_session_id")
+    payload.pop("runtime_provider")
+    payload.pop("runtime_model")
     import json
 
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -205,9 +264,75 @@ def test_loads_v2_snapshot_without_usage_and_migrates_on_save(
         last_usage=migrated.last_usage,
     )
 
-    assert migrated.version == 3
+    assert migrated.version == 5
     assert migrated.last_usage is None
-    assert rewritten.version == 3
+    assert rewritten.version == 5
+
+
+def test_loads_v3_snapshot_without_lineage_and_migrates_on_save(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    handle = store.new_session()
+    current = store.save(
+        handle,
+        _messages(),
+        (),
+        None,
+        last_usage=TokenUsage(input_tokens=8, output_tokens=3),
+    )
+    path = store.root / f"{handle.session_id}.json"
+    payload = current.model_dump(mode="json")
+    payload["version"] = 3
+    payload.pop("parent_session_id")
+    payload.pop("runtime_provider")
+    payload.pop("runtime_model")
+    import json
+
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = store.load(handle.session_id)
+    rewritten = store.save(
+        store.handle_for(migrated),
+        migrated.messages,
+        (),
+        None,
+        last_usage=migrated.last_usage,
+    )
+
+    assert migrated.version == 5
+    assert migrated.parent_session_id is None
+    assert migrated.last_usage == TokenUsage(input_tokens=8, output_tokens=3)
+    assert rewritten.version == 5
+
+
+def test_loads_v4_snapshot_without_runtime_binding_and_migrates_on_save(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    handle = store.new_session()
+    current = store.save(handle, _messages(), (), None)
+    path = store.root / f"{handle.session_id}.json"
+    payload = current.model_dump(mode="json")
+    payload["version"] = 4
+    payload.pop("runtime_provider")
+    payload.pop("runtime_model")
+    import json
+
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    migrated = store.load(handle.session_id)
+    rewritten = store.save(
+        store.handle_for(migrated),
+        migrated.messages,
+        (),
+        None,
+    )
+
+    assert migrated.version == 5
+    assert migrated.runtime_provider is None
+    assert migrated.runtime_model is None
+    assert rewritten.version == 5
 
 
 def test_session_titles_can_be_renamed_and_searched_locally(tmp_path: Path) -> None:
@@ -265,9 +390,24 @@ def test_export_import_is_strict_explicit_and_rejects_duplicates(
     source_root.mkdir()
     target_root.mkdir()
     source = _store(source_root)
-    handle = source.new_session()
+    new_handle = source.new_session()
+    parent_session_id = "20260720T070000000000Z-cafebabe"
+    handle = SessionHandle(
+        session_id=new_handle.session_id,
+        created_at=new_handle.created_at,
+        title=new_handle.title,
+        parent_session_id=parent_session_id,
+    )
     usage = TokenUsage(input_tokens=17, output_tokens=4)
-    source.save(handle, _messages(), (), None, last_usage=usage)
+    source.save(
+        handle,
+        _messages(),
+        (),
+        None,
+        last_usage=usage,
+        runtime_provider=ProviderId.DEEPSEEK,
+        runtime_model="deepseek-test-model",
+    )
 
     prepared_export = source.prepare_export(handle.session_id)
     exported = source.apply_export(prepared_export)
@@ -282,6 +422,9 @@ def test_export_import_is_strict_explicit_and_rejects_duplicates(
     assert imported.session_id == handle.session_id
     assert target.load(handle.session_id).messages == _messages()
     assert imported.last_usage == usage
+    assert imported.parent_session_id == parent_session_id
+    assert imported.runtime_provider is ProviderId.DEEPSEEK
+    assert imported.runtime_model == "deepseek-test-model"
     with pytest.raises(SessionError, match="ID 已存在"):
         target.prepare_import(imported_file.name)
 
@@ -328,7 +471,9 @@ def test_branch_copies_state_to_new_id_and_preserves_source(tmp_path: Path) -> N
 
     assert branch.session_id != source.session_id
     assert branch.title == "Try another approach"
+    assert branch.parent_session_id == source.session_id
     assert branch.messages == source.messages
     assert branch.last_usage == usage
     assert store.load(source.session_id) == source
+    assert store.get_summary(branch.session_id).parent_session_id == source.session_id
     assert store.list_sessions().valid_count == 2

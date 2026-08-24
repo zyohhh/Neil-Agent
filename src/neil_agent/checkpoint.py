@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from hashlib import sha256
 
 from .errors import ToolError
@@ -30,6 +31,7 @@ class FileTaskCheckpoint:
     """All effective Agent file edits made during one user-request turn."""
 
     checkpoint_id: str
+    created_at: datetime
     edits: tuple[FileEditCheckpoint, ...]
 
     @property
@@ -98,6 +100,7 @@ class FileCheckpointHistory:
         max_content_chars: int = MAX_CHECKPOINT_CONTENT_CHARS,
         max_files_per_checkpoint: int = MAX_FILES_PER_CHECKPOINT,
         id_factory: Callable[[], str] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if max_entries < 1:
             raise ValueError("checkpoint max_entries must be at least 1")
@@ -109,6 +112,7 @@ class FileCheckpointHistory:
         self._max_content_chars = max_content_chars
         self._max_files_per_checkpoint = max_files_per_checkpoint
         self._id_factory = id_factory or (lambda: secrets.token_hex(8))
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._items: list[FileTaskCheckpoint] = []
         self._active: _ActiveTaskCheckpoint | None = None
 
@@ -123,6 +127,12 @@ class FileCheckpointHistory:
     @property
     def active(self) -> bool:
         return self._active is not None
+
+    @property
+    def snapshots(self) -> tuple[FileTaskCheckpoint, ...]:
+        """Return an immutable view for metadata-only history projection."""
+
+        return tuple(self._items)
 
     def begin_task(self) -> str:
         """Open one Agent-turn boundary before any file tool executes."""
@@ -144,6 +154,7 @@ class FileCheckpointHistory:
             return None
         checkpoint = FileTaskCheckpoint(
             checkpoint_id=active.checkpoint_id,
+            created_at=self._now(),
             edits=tuple(active.edits.values()),
         )
         self._items.append(checkpoint)
@@ -225,6 +236,7 @@ class FileCheckpointHistory:
             )
         snapshot = FileTaskCheckpoint(
             checkpoint_id=checkpoint_id,
+            created_at=self._now(),
             edits=tuple(active.edits.values()),
         )
         if not owns_boundary:
@@ -276,6 +288,12 @@ class FileCheckpointHistory:
             and self._stored_content_chars() > self._max_content_chars
         ):
             self._items.pop(0)
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ToolError("文件检查点时间必须包含时区。")
+        return value.astimezone(timezone.utc)
 
     def _stored_content_chars(self) -> int:
         return sum(

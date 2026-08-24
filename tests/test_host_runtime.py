@@ -11,6 +11,7 @@ from neil_agent.host_runtime import (
     HostMode,
     build_host_runtime,
     instruction_target,
+    observe_host_security,
     windows_sandbox_backend,
 )
 
@@ -26,7 +27,9 @@ def _settings(root: Path, **overrides: object) -> Settings:
     return Settings(**values)  # type: ignore[arg-type]
 
 
-def test_instruction_target_uses_cwd_inside_workspace(tmp_path: Path, monkeypatch) -> None:
+def test_instruction_target_uses_cwd_inside_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
     workspace = tmp_path / "workspace"
     nested = workspace / "pkg"
     nested.mkdir(parents=True)
@@ -62,7 +65,9 @@ def test_build_host_runtime_cli_registers_write_and_task_tools(
     assert runtime.shell is not None
 
 
-def test_build_host_runtime_noninteractive_readonly_is_read_only(tmp_path: Path) -> None:
+def test_build_host_runtime_noninteractive_readonly_is_read_only(
+    tmp_path: Path,
+) -> None:
     settings = _settings(tmp_path)
     runtime = build_host_runtime(settings, mode=HostMode.NONINTERACTIVE_READONLY)
     assert "write_file" not in runtime.profile.tool_names
@@ -117,6 +122,21 @@ def test_windows_sandbox_backend_uses_settings(tmp_path: Path) -> None:
     )
     backend = windows_sandbox_backend(settings)
     assert backend._runtime_certification_root == (tmp_path / "cert").resolve()
+
+
+def test_cli_and_web_share_security_projection_semantics(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    cli = build_host_runtime(settings, mode=HostMode.CLI)
+    web = build_host_runtime(settings, mode=HostMode.WEB)
+
+    cli_security = observe_host_security(settings, cli.registry)
+    web_security = observe_host_security(settings, web.registry)
+
+    assert web_security.application == cli_security.application
+    assert web_security.os_sandbox == cli_security.os_sandbox
+    assert web_security.audit_status == cli_security.audit_status
+    assert web_security.tool_count == cli_security.tool_count
+    assert web_security.approval_tool_count == cli_security.approval_tool_count
 
 
 @pytest.mark.parametrize(

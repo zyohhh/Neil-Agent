@@ -1,6 +1,7 @@
 """Tests for the injectable command-line interface."""
 
 from collections.abc import Iterator, Sequence
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import cast
@@ -14,6 +15,8 @@ from neil_agent import cli
 from neil_agent.agent import Agent
 from neil_agent.config import Settings
 from neil_agent.errors import SessionError
+from neil_agent.event_store import JsonlEventStore
+from neil_agent.events import RuntimeEvent
 from neil_agent.instructions import load_project_instructions
 from neil_agent.providers.base import ProviderId
 from neil_agent.schemas import (
@@ -152,7 +155,7 @@ def test_run_routes_explicit_live_cockpit_mode(
     monkeypatch.setattr(
         cli,
         "_try_show_live_cockpit",
-        lambda _console, _settings, _agent, _llm, _tracker, workspace, _registry, _audit: (
+        lambda _console, _settings, _agent, _llm, _tracker, workspace, _registry, _audit, **_kwargs: (  # noqa: E501
             live_calls.append(workspace) or 0
         ),
     )
@@ -190,6 +193,105 @@ def test_live_cockpit_degrades_to_snapshot_without_a_terminal(
     assert result is None
     assert "不是交互终端" in output.getvalue()
     agent.set_event_bus.assert_not_called()
+
+
+def test_live_cockpit_explicitly_persists_time_machine_events(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from neil_agent import live_cockpit
+
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+        runtime_event_store_enabled=True,
+    )
+    console = MagicMock(spec=Console)
+    console.is_terminal = True
+    agent = MagicMock(spec=Agent)
+    llm = MagicMock()
+    tracker = MagicMock(spec=TaskTracker)
+    session_store = SessionStore(tmp_path)
+    captured: dict[str, object] = {}
+    event = RuntimeEvent(
+        event_id="evt-" + "1" * 32,
+        correlation_id="turn-" + "2" * 32,
+        timestamp=datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc),
+        stage="agent_turn",
+        status="started",
+    )
+
+    def fake_live_run(_agent, event_bus, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        history = kwargs["time_machine_history_provider"]()
+        assert history.sessions == ()
+        event_bus.publish(event)
+        return 0
+
+    monkeypatch.setattr(live_cockpit, "run_live_cockpit", fake_live_run)
+
+    result = cli._try_show_live_cockpit(
+        console,
+        settings,
+        agent,
+        llm,
+        tracker,
+        tmp_path,
+        session_store=session_store,
+    )
+
+    assert result == 0
+    assert captured["time_machine_persistence_enabled"] is True
+    assert captured["persistent_event_count"] == 0
+    assert JsonlEventStore(tmp_path).load() == (event,)
+    agent.set_event_bus.assert_any_call(None)
+
+
+def test_live_cockpit_degrades_when_event_store_registration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from neil_agent import live_cockpit
+
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        workspace_root=tmp_path,
+        runtime_event_store_enabled=True,
+    )
+    console = MagicMock(spec=Console)
+    console.is_terminal = True
+    agent = MagicMock(spec=Agent)
+    captured: dict[str, object] = {}
+
+    def fail_registration(_store: JsonlEventStore, _bus: object) -> None:
+        raise RuntimeError("PRIVATE-EVENT-STORE-ERROR")
+
+    def fake_live_run(_agent, event_bus, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        captured["observer_count"] = event_bus.stats.observer_count
+        return 0
+
+    monkeypatch.setattr(JsonlEventStore, "register", fail_registration)
+    monkeypatch.setattr(live_cockpit, "run_live_cockpit", fake_live_run)
+
+    result = cli._try_show_live_cockpit(
+        console,
+        settings,
+        agent,
+        MagicMock(),
+        MagicMock(spec=TaskTracker),
+        tmp_path,
+    )
+
+    assert result == 0
+    assert captured["time_machine_persistence_enabled"] is False
+    assert captured["persistent_event_count"] == 0
+    assert captured["observer_count"] == 0
+    rendered_warnings = repr(console.print.call_args_list)
+    assert "仅保留内存回放" in rendered_warnings
+    assert "PRIVATE-EVENT-STORE-ERROR" not in rendered_warnings
 
 
 def test_welcome_panel_remains_readable_in_a_narrow_terminal(tmp_path: Path) -> None:

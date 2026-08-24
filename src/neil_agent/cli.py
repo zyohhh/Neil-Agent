@@ -20,13 +20,19 @@ from rich.text import Text
 
 from .agent import Agent, RetryConfigurableChatModel
 from .audit import AuditLogStatus, JsonlAuditSink
+from .checkpoint import FileCheckpointHistory
 from .cockpit import CockpitSnapshot, build_cockpit_panel
 from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import AuditError, NeilAgentError, SessionError, ToolError
-from .events import EventBus
-from .host_runtime import HostMode, build_host_runtime, windows_sandbox_backend
-from .hooks import LifecycleHooks
+from .event_store import JsonlEventStore
+from .events import EventBus, EventSubscription, RuntimeEvent
+from .host_runtime import (
+    HostMode,
+    build_host_runtime,
+    observe_host_security,
+    windows_sandbox_backend,
+)
 from .instructions import (
     ProjectInstructionManager,
     ProjectInstructions,
@@ -54,6 +60,11 @@ from .session import (
     normalize_session_title,
 )
 from .task import TaskTracker
+from .time_machine import (
+    MAX_TIME_MACHINE_EVENTS,
+    MAX_TIME_MACHINE_SESSIONS,
+    TimeMachineHistory,
+)
 from .sandbox import SandboxCapabilities
 from .tools import FileSystemTools, ShellTools, ToolRegistry
 
@@ -401,6 +412,8 @@ def run(console: Console) -> None:
                     filesystem_tools.root,
                     registry,
                     audit_sink,
+                    session_store=session_store,
+                    file_checkpoints=filesystem_tools.checkpoints,
                 )
                 if completed_turns is None:
                     _show_cockpit(
@@ -448,7 +461,7 @@ def run(console: Console) -> None:
                     audit_log_enabled=settings.audit_log_enabled,
                     sandbox_backend=settings.sandbox_backend,
                     sandbox_probe=(
-                        _windows_sandbox_backend(settings).probe
+                        windows_sandbox_backend(settings).probe
                         if settings.sandbox_backend == "windows-sandbox"
                         else None
                     ),
@@ -497,7 +510,7 @@ def run(console: Console) -> None:
                     console,
                     agent,
                     filesystem_tools.root,
-                    instruction_target,
+                    instruction_manager.current.target,
                     project_instructions,
                 )
                 if initialized is not None:
@@ -803,6 +816,8 @@ def _try_show_live_cockpit(
     workspace: Path,
     registry: ToolRegistry | None = None,
     audit_sink: JsonlAuditSink | None = None,
+    session_store: SessionStore | None = None,
+    file_checkpoints: FileCheckpointHistory | None = None,
 ) -> int | None:
     """Run Textual only in a terminal and return ``None`` for Rich fallback."""
 
@@ -816,6 +831,47 @@ def _try_show_live_cockpit(
         return None
 
     event_bus = EventBus(queue_size=1_024, max_observers=2)
+    event_store_subscription: EventSubscription | None = None
+    historical_events: tuple[RuntimeEvent, ...] = ()
+    persistence_enabled = False
+    if settings.runtime_event_store_enabled:
+        try:
+            event_store = JsonlEventStore(
+                workspace,
+                max_bytes=settings.runtime_event_store_max_bytes,
+            )
+            event_store.validate()
+            historical_events = event_store.load(max_records=MAX_TIME_MACHINE_EVENTS)
+            event_store_subscription = event_store.register(event_bus)
+            persistence_enabled = True
+        except Exception:  # noqa: BLE001 - optional persistence boundary.
+            event_bus.close(1)
+            event_bus = EventBus(queue_size=1_024, max_observers=2)
+            event_store_subscription = None
+            historical_events = ()
+            console.print(
+                "[yellow]Time Machine 持久事件存储不可用；本次仅保留内存回放。[/yellow]"
+            )
+
+    def time_machine_history() -> TimeMachineHistory:
+        index = (
+            session_store.list_sessions(
+                page=1,
+                page_size=MAX_TIME_MACHINE_SESSIONS,
+                sort_by="updated",
+                order="desc",
+            )
+            if session_store is not None
+            else None
+        )
+        return TimeMachineHistory(
+            sessions=() if index is None else index.sessions,
+            checkpoints=(
+                () if file_checkpoints is None else file_checkpoints.snapshots
+            ),
+            invalid_session_count=0 if index is None else index.invalid_count,
+        )
+
     previous_activity = agent.replace_activity_handler(None)
     previous_retry = llm.replace_retry_handler(None)
     previous_plan = task_tracker.replace_change_handler(None)
@@ -839,6 +895,10 @@ def _try_show_live_cockpit(
                 active_registry,
                 audit_probe=audit_probe,
             ),
+            historical_events=historical_events,
+            time_machine_history_provider=time_machine_history,
+            time_machine_persistence_enabled=persistence_enabled,
+            persistent_event_count=len(historical_events),
             approval_handler_owner=agent,
         )
     except Exception:  # noqa: BLE001 - optional UI degradation boundary.
@@ -849,6 +909,12 @@ def _try_show_live_cockpit(
         agent.replace_activity_handler(previous_activity)
         llm.replace_retry_handler(previous_retry)
         task_tracker.replace_change_handler(previous_plan)
+        if persistence_enabled and not event_bus.flush(1):
+            console.print(
+                "[yellow]Time Machine 事件持久化未在退出前全部完成。[/yellow]"
+            )
+        if event_store_subscription is not None:
+            event_store_subscription.close()
         event_bus.close(1)
 
 
@@ -935,18 +1001,9 @@ def _observe_security(
 ) -> SecurityShield:
     """Capture a metadata-only security snapshot for one explicit UI request."""
 
-    return observe_security_shield(
-        {
-            definition.name: registry.requires_approval(definition.name)
-            for definition in registry.definitions
-        },
-        sandbox_backend=settings.sandbox_backend,
-        audit_enabled=settings.audit_log_enabled,
-        sandbox_probe=(
-            windows_sandbox_backend(settings).probe
-            if settings.sandbox_backend == "windows-sandbox"
-            else None
-        ),
+    return observe_host_security(
+        settings,
+        registry,
         audit_probe=audit_probe,
     )
 

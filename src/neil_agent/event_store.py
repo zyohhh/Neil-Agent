@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+from collections import deque
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
@@ -81,8 +82,18 @@ class JsonlEventStore:
             raise EventStoreError("运行时事件超过单条记录大小上限。")
         self._append(line)
 
-    def load(self, *, include_backup: bool = True) -> tuple[RuntimeEvent, ...]:
+    def load(
+        self,
+        *,
+        include_backup: bool = True,
+        max_records: int | None = None,
+    ) -> tuple[RuntimeEvent, ...]:
         """Strictly load the retained event window in append order."""
+
+        if max_records is not None and (
+            type(max_records) is not int or max_records < 1
+        ):
+            raise EventStoreError("运行时事件加载记录上限必须至少为 1。")
 
         root = self._resolved_store_root(create=False)
         with self._lock(root, create=False):
@@ -94,7 +105,10 @@ class JsonlEventStore:
                 if include_backup
                 else (root / EVENT_STORE_FILENAME,)
             )
-            return tuple(event for path in paths for event in self._read_file(path))
+            retained: deque[RuntimeEvent] = deque(maxlen=max_records)
+            for path in paths:
+                retained.extend(self._read_file(path, max_records=max_records))
+            return tuple(retained)
 
     def _append(self, line: bytes) -> None:
         root = self._resolved_store_root(create=True)
@@ -175,13 +189,18 @@ class JsonlEventStore:
         except OSError as error:
             raise EventStoreError("运行时事件轮转失败。") from error
 
-    def _read_file(self, path: Path) -> tuple[RuntimeEvent, ...]:
+    def _read_file(
+        self,
+        path: Path,
+        *,
+        max_records: int | None,
+    ) -> tuple[RuntimeEvent, ...]:
         if self._regular_file_size(path) == 0:
             return ()
         descriptor = -1
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        events: list[RuntimeEvent] = []
+        events: deque[RuntimeEvent] = deque(maxlen=max_records)
         try:
             descriptor = os.open(path, flags)
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):

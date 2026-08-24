@@ -21,6 +21,57 @@ def test_system_prompt_and_thinking_mode_load_from_environment(
     assert settings.thinking_enabled is True
 
 
+def test_time_machine_event_persistence_is_explicit_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = Settings(_env_file=None, deepseek_api_key="test-key")
+    assert defaults.runtime_event_store_enabled is False
+
+    monkeypatch.setenv("RUNTIME_EVENT_STORE_ENABLED", "true")
+    monkeypatch.setenv("RUNTIME_EVENT_STORE_MAX_BYTES", "250000")
+    enabled = Settings(_env_file=None, deepseek_api_key="test-key")
+
+    assert enabled.runtime_event_store_enabled is True
+    assert enabled.runtime_event_store_max_bytes == 250_000
+
+    with pytest.raises(ValidationError, match="runtime_event_store_max_bytes"):
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            runtime_event_store_max_bytes=9_999,
+        )
+
+
+def test_web_runtime_model_allowlist_is_explicit_bounded_and_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = Settings(_env_file=None, deepseek_api_key="test-key")
+    assert defaults.web_runtime_model_allowlist == ()
+
+    monkeypatch.setenv(
+        "WEB_RUNTIME_MODEL_ALLOWLIST",
+        '["deepseek-fast", "deepseek-reasoning"]',
+    )
+    configured = Settings(_env_file=None, deepseek_api_key="test-key")
+    assert configured.web_runtime_model_allowlist == (
+        "deepseek-fast",
+        "deepseek-reasoning",
+    )
+
+    with pytest.raises(ValidationError, match="duplicates"):
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            web_runtime_model_allowlist=("duplicate", "duplicate"),
+        )
+    with pytest.raises(ValidationError, match="surrounding whitespace"):
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            web_runtime_model_allowlist=(" unsafe",),
+        )
+
+
 def test_legacy_deepseek_configuration_remains_the_default() -> None:
     settings = Settings(_env_file=None, deepseek_api_key="test-key")
 

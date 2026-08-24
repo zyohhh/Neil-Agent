@@ -1350,3 +1350,90 @@ CLI 展示修改预览并等待用户输入 y/yes
 ### 验证
 
 - `tests/test_host_runtime.py` 新增 Web cwd 作用域与沙箱注册路径回归。
+
+## 2026-08-23：Phase 3A Time Machine 只读回放
+
+### 历史投影与谱系数据
+
+- 新增版本 1 的 `TimeMachineSnapshot` 与纯文本渲染器。投影复用既有时间线、
+  DAG 和指标规范化逻辑，在最多 512 条事件上按稳定 event ID 选择游标并重建
+  as-of 状态；输入乱序、重复和异常仍按既有确定性规则处理。
+- 会话格式升级到版本 4，新增可选直接父会话 ID；版本 1–3 继续严格迁移，
+  重命名、保存、导出导入和分支均保留谱系。`/branch` 只记录源会话为父节点，
+  不继承审批或权限。
+- 任务文件检查点新增带时区的 UTC 创建时间和不可变历史读取接口。Time Machine
+  最多保留 50 个会话与 20 个进程内检查点，只投影根/分支/孤立分支、轮数、
+  压缩/检查状态以及文件/字符计数。
+
+### Textual 入口、持久化与隐私边界
+
+- `/cockpit --live` 新增 `F6` Time Machine。宽屏显示导航树与独立详情，窄屏
+  改为内联详情，矮屏隐藏次要标题但保留回答流、输入框和 Footer；再次按键返回
+  原 DAG/Context 视图。
+- `RUNTIME_EVENT_STORE_ENABLED` 默认关闭；显式开启后才加载并注册有界 JSONL
+  EventStore，`RUNTIME_EVENT_STORE_MAX_BYTES` 控制单文件轮转上限。存储损坏或
+  边界不安全时显示通用警告并退回内存回放；加载严格校验全部轮转记录但内存
+  只保留最后 512 条，退出前对已接受事件执行有界刷新。
+- 会话标题、预览和消息，以及检查点路径、哈希、原正文与结果正文，在宿主读取
+  后立即被不可逆地投影掉；长生命周期 Textual 应用只持有脱敏历史。新增 canary
+  回归同时检查快照、渲染输出和应用内部历史表示。
+- Time Machine 只观察既有事实，不调用模型、工具或 hook，不发布新事件，也没有
+  恢复按钮或状态修改回调。Phase 3B 安全恢复继续延后，跨进程主回退仍是 Git。
+
+### 验证与下一阶段
+
+- Ruff lint 与格式检查通过，mypy 对 62 个源文件检查通过；全量 pytest 为
+  753 项通过、23 项平台条件跳过。5 个内置离线评测和 wheel 构建也在提交前
+  通过，全部验证未调用真实付费模型 API。
+- 专用 Windows Sandbox runner 的三轮 workflow、独立 review 和认证仍是最高部署
+  门禁；在当前可直接开发的功能中，下一阶段优先设计 idle-only 运行时模型切换，
+  并继续阻止跨 Provider/模型私有状态的静默回放。
+
+## 2026-08-24：Web Workbench P9 idle-only 运行时模型切换
+
+### 显式模型目录与原子事务
+
+- 在 `feature/web-runtime-model-switching` 增加
+  `WEB_RUNTIME_MODEL_ALLOWLIST`：最多 15 个附加精确模型 ID，启动模型自动加入；
+  空白、首尾空格、控制字符、超长值、重复项和未列入白名单的目标全部拒绝。
+- 新增纯准备边界 `runtime_models.py`。切换只重建完整 `Settings`，强制 Provider
+  不变并保留完整候选目录；不接受浏览器提供 endpoint、凭据或 Provider，也不在
+  切换时构造 SDK client 或发送网络请求。
+- `switch_model` 要求控制租约、精确 revision、idle、无待审批以及空且未保存的
+  活动会话。候选 worker 与快照投影全部在提交前完成；提交时再次校验状态，并在
+  同一控制器锁内替换设置/worker、递增 revision 和发布 `model_changed`。任一准备
+  或并发检查失败都保留旧运行时。
+
+### Session v5 与绕过防护
+
+- 会话格式从 v4 升级到 v5，新增成对的可选 `runtime_provider` /
+  `runtime_model`。版本 1–4 继续严格迁移；未知未来版本拒绝。
+- 每个成功 Web turn 原子保存捕获的运行时绑定。已有绑定不能在后续保存中改写；
+  重命名、分支、摘要和导入导出均保留绑定，绑定与 Provider 私有状态冲突时拒绝。
+- 选择会话时先验证快照绑定，再验证逐消息私有状态。进程内发生过模型切换后，
+  含历史但未绑定的旧快照 fail closed，不能通过“先切空会话、再选旧历史”绕过
+  门禁；绑定会话只有在 Provider/模型完全一致时才能恢复。
+
+### Web 协议、页面与文档
+
+- 快照新增有界 `available_models`、`can_switch_model` 和会话运行时摘要；实时协议
+  新增幂等 `switch_model` 命令及有界 `model_changed` 投影。
+- 顶栏模型控件改为原生可访问 `select`，只在实时连接、持有控制且后端能力开放
+  时启用；运行/审批、非空会话、无白名单和观察标签页均显示禁用语义。
+- 更新 README、环境示例、总体架构、Host Runtime 能力矩阵、Web 开发/运维文档、
+  Claude Code 对照和 P9 威胁模型。跨 Provider 切换、自动路由与 fallback 仍不在
+  本阶段范围。
+- 重新生成 wheel 内生产静态资源及 SHA-256 manifest；P6 四断点视觉基线保持通过。
+
+### 验证与下一阶段
+
+- Ruff lint/格式、mypy（63 个源文件）通过；全量 pytest 为 762 项通过、23 项
+  平台条件跳过。新增配置、目录稳定性、v1–v4 迁移、绑定不可改写、运行/非空
+  门禁、factory 失败原子性、旧会话绕过、WebSocket 和幂等回归。
+- 前端 TypeScript、lint 和 12 项 Vitest 通过；Playwright 5 项 E2E/axe/四断点视觉
+  回归通过。5 个内置离线评测全部通过。
+- `uv build --wheel` 成功生成 `neil_agent-0.1.0-py3-none-any.whl`，wheel 已确认包含
+  新运行时模块、静态资源和 manifest。全部验证未调用真实付费模型 API。
+- 最高优先级仍是在专用 Windows runner 完成三轮强制 workflow、独立 review 与
+  运行时认证；认证后再推进 guest 产物导出和二次批准导入。Time Machine Phase 3B
+  继续保持延后与只读边界。

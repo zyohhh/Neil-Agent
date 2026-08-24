@@ -265,7 +265,7 @@ def create_app(
 
     @app.get("/api/v1/review", response_model=ReviewDto)
     def review(_auth: None = Depends(require_session)) -> ReviewDto:
-        return snapshot_service.review()
+        return workbench_controller.review()
 
     @app.get("/api/v1/review/diff", response_model=GitDiffDto)
     def review_diff(

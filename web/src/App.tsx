@@ -161,6 +161,9 @@ function Sidebar({
   interactionLocked,
   drawerMode,
   liveSnapshot,
+  hasControl,
+  onNewSession,
+  onSelectSession,
   onRefreshFiles,
 }: {
   open: boolean
@@ -168,24 +171,57 @@ function Sidebar({
   interactionLocked: boolean
   drawerMode: boolean
   liveSnapshot: WorkbenchSnapshotV1 | null
+  hasControl: boolean
+  onNewSession: () => void
+  onSelectSession: (sessionId: string) => void
   onRefreshFiles: () => void
 }) {
   const [selectedSession, setSelectedSession] = useState('workbench')
   const [activeTreeItem, setActiveTreeItem] = useState('src')
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const visibleFiles = liveSnapshot ? toFileNodes(liveSnapshot.files.items) : fixtureFiles
-  const visibleSessions = liveSnapshot
-    ? liveSnapshot.sessions.items.map((session, index) => ({
+  const activeSession = liveSnapshot?.active_session
+  const persistedSessions = liveSnapshot
+    ? liveSnapshot.sessions.items.map((session) => ({
       id: session.session_id,
       title: session.title,
       time: new Date(session.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
-      active: index === 0,
+      active: session.session_id === activeSession?.session_id,
+      persistence: session.session_id === activeSession?.session_id
+        ? activeSession.persistence_status
+        : 'saved' as const,
     }))
     : fixtureSessions
-
-  useEffect(() => {
-    if (liveSnapshot?.sessions.items[0]) setSelectedSession(liveSnapshot.sessions.items[0].session_id)
-  }, [liveSnapshot])
+  const visibleSessions = liveSnapshot && activeSession && !persistedSessions.some((session) => session.id === activeSession.session_id)
+    ? [{
+      id: activeSession.session_id,
+      title: activeSession.title,
+      time: `${activeSession.round_count} round${activeSession.round_count === 1 ? '' : 's'}`,
+      active: true,
+      persistence: activeSession.persistence_status,
+    }, ...persistedSessions]
+    : persistedSessions
+  const activeSessionId = liveSnapshot?.active_session?.session_id ?? selectedSession
+  const canReselectActive = activeSession?.persistence_status === 'save_failed'
+  const liveSessionLocked = Boolean(liveSnapshot && (
+    !hasControl
+    || interactionLocked
+    || !liveSnapshot.capabilities.can_select_session
+  ))
+  const liveCreateLocked = Boolean(liveSnapshot && (
+    !hasControl
+    || interactionLocked
+    || !liveSnapshot.capabilities.can_create_session
+  ))
+  const sessionLockReason = liveSnapshot
+    ? !hasControl
+      ? 'This tab is observing; acquire control before changing sessions.'
+      : interactionLocked
+        ? 'Session switching is disabled while a run or approval is active.'
+        : !liveSnapshot.capabilities.can_select_session
+          ? 'Session switching is temporarily unavailable.'
+          : 'The active session is already selected.'
+    : 'Session switching is disabled while this fixture run is active.'
 
   useEffect(() => {
     if (open && drawerMode) closeButtonRef.current?.focus()
@@ -277,27 +313,46 @@ function Sidebar({
       </section>
 
       <section className="sidebar-section sessions-section" aria-labelledby="sessions-heading">
-        <p className="eyebrow" id="sessions-heading">Sessions</p>
+        <div className="section-heading-row sessions-heading-row">
+          <p className="eyebrow" id="sessions-heading">Sessions</p>
+          {liveSnapshot ? (
+            <button
+              type="button"
+              className="text-button new-session-button"
+              onClick={onNewSession}
+              disabled={liveCreateLocked}
+              aria-describedby={liveCreateLocked ? 'session-lock-reason' : undefined}
+            >
+              <Icon name="plus" size={14} /> New
+            </button>
+          ) : null}
+        </div>
         <div className="session-list">
           {visibleSessions.map((session) => (
             <button
               type="button"
               key={session.id}
-              className={`session-item ${selectedSession === session.id ? 'is-active' : ''}`}
+              className={`session-item ${activeSessionId === session.id ? 'is-active' : ''}`}
               onClick={() => {
-                if (!interactionLocked) setSelectedSession(session.id)
+                if (liveSnapshot) {
+                  if (!liveSessionLocked && (activeSessionId !== session.id || canReselectActive)) onSelectSession(session.id)
+                } else if (!interactionLocked) setSelectedSession(session.id)
               }}
-              aria-pressed={selectedSession === session.id}
-              aria-disabled={interactionLocked && selectedSession !== session.id}
-              aria-describedby={interactionLocked ? 'session-lock-reason' : undefined}
+              aria-pressed={activeSessionId === session.id}
+              disabled={liveSnapshot ? liveSessionLocked || (activeSessionId === session.id && !canReselectActive) : false}
+              aria-disabled={liveSnapshot ? liveSessionLocked || (activeSessionId === session.id && !canReselectActive) : interactionLocked && activeSessionId !== session.id}
+              aria-describedby={(liveSessionLocked || (activeSessionId === session.id && !canReselectActive) || interactionLocked) ? 'session-lock-reason' : undefined}
             >
               <span className="status-orbit"><Icon name={session.active ? 'spark' : 'plus'} size={15} /></span>
-              <span className="session-title">{session.title}</span>
+              <span className="session-title">
+                {session.title}
+                {'persistence' in session && session.active ? <small className={`session-persistence is-${session.persistence}`}>{session.persistence.replace('_', ' ')}</small> : null}
+              </span>
               <time>{session.time}</time>
             </button>
           ))}
         </div>
-        <span className="sr-only" id="session-lock-reason">Session switching is disabled while this fixture run is active.</span>
+        <span className="sr-only" id="session-lock-reason">{sessionLockReason}</span>
       </section>
 
       <button type="button" className="settings-button" aria-label="Fixture settings are not implemented in P0" disabled>
@@ -659,6 +714,21 @@ function ReviewPanel({
         </div>
       </section>
 
+      {liveSnapshot ? (
+        <section className="review-section security-summary" aria-label="Observed security layers">
+          <div className="section-heading-row">
+            <p className="eyebrow">Security shield</p>
+            <span className="fixture-tag">v{liveSnapshot.security.shield_schema_version}</span>
+          </div>
+          <dl>
+            <div><dt>Application</dt><dd>{liveSnapshot.security.application_status}</dd></div>
+            <div><dt>OS sandbox</dt><dd>{liveSnapshot.security.os_sandbox_status}</dd></div>
+            <div><dt>Audit</dt><dd>{liveSnapshot.security.audit_status}</dd></div>
+          </dl>
+          <small>{liveSnapshot.security.direct_tool_count} direct · {liveSnapshot.security.approval_tool_count} approval-gated · {liveSnapshot.security.tool_count} total</small>
+        </section>
+      ) : null}
+
       <section className="approval-section">
         <p className="eyebrow">Single-tool approval</p>
         <div className={`approval-card ${approvalAvailable ? 'is-ready' : ''}`}>
@@ -796,7 +866,9 @@ function Header({
   reviewTriggerRef,
   liveSnapshot,
   connectionState,
+  hasControl,
   interactionLocked,
+  onSwitchModel,
   fixtureStatusLabel,
   fixtureTone,
 }: {
@@ -806,7 +878,9 @@ function Header({
   reviewTriggerRef: React.RefObject<HTMLButtonElement | null>
   liveSnapshot: WorkbenchSnapshotV1 | null
   connectionState: LiveConnectionState
+  hasControl: boolean
   interactionLocked: boolean
+  onSwitchModel: (model: string) => void
   fixtureStatusLabel: string
   fixtureTone: Scenario['runTone']
 }) {
@@ -827,6 +901,22 @@ function Header({
       selectMode(mode === 'focus' ? 'build' : 'focus', true)
     }
   }
+  const modelSwitchEnabled = Boolean(
+    liveSnapshot
+    && connectionState === 'live'
+    && hasControl
+    && !interactionLocked
+    && liveSnapshot.capabilities.can_switch_model,
+  )
+  const modelLockReason = !liveSnapshot
+    ? 'Runtime model selection is available only for a live local Workbench.'
+    : connectionState !== 'live'
+      ? 'Reconnect to the local Workbench before changing the runtime model.'
+    : !hasControl
+      ? 'This tab must hold control before changing the runtime model.'
+      : interactionLocked
+        ? 'Model switching is unavailable while a run or approval is active.'
+        : 'Create an empty unsaved session and configure an operator model allowlist before switching models.'
 
   return (
     <header className="global-header">
@@ -858,10 +948,21 @@ function Header({
       <span className="sr-only" id="mode-preview-reason">Mode is a local interface preview and does not change tool permissions.</span>
 
       <div className="header-right">
-        <button type="button" className="model-selector" disabled aria-describedby="model-lock-reason">
-          <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span><strong>{liveSnapshot?.provider.model ?? 'gpt-5'}</strong><Icon name="chevron" size={14} />
-        </button>
-        <span className="sr-only" id="model-lock-reason">Model selection is fixed when the local Web Workbench starts.</span>
+        <label className={`model-selector ${modelSwitchEnabled ? '' : 'is-disabled'}`}>
+          <span>{liveSnapshot?.provider.display_name ?? 'OpenAI'}</span>
+          <select
+            aria-label="Runtime model"
+            aria-describedby={!modelSwitchEnabled ? 'model-lock-reason' : undefined}
+            value={liveSnapshot?.provider.model ?? 'gpt-5'}
+            disabled={!modelSwitchEnabled}
+            onChange={(event) => onSwitchModel(event.target.value)}
+          >
+            {(liveSnapshot?.provider.available_models ?? [liveSnapshot?.provider.model ?? 'gpt-5']).map((model) => (
+              <option key={model} value={model}>{model}</option>
+            ))}
+          </select>
+        </label>
+        <span className="sr-only" id="model-lock-reason">{modelLockReason}</span>
 
         <div className={`run-status tone-${connectionState === 'live' ? 'success' : connectionState === 'offline' ? 'danger' : fixtureTone}`} role="status" aria-live="polite">
           <span className="status-dot" />
@@ -889,14 +990,14 @@ function PreviewBanner({
 }) {
   const scenarioId = useId()
   const label = connectionState === 'live'
-    ? 'P7 live Agent'
+    ? 'P8 live Agent'
     : connectionState === 'connecting'
-      ? 'P7 reconnecting'
+      ? 'P8 reconnecting'
       : connectionState === 'offline'
-        ? 'P7 offline · last known'
+        ? 'P8 offline · last known'
         : 'P0 fixture preview'
   const detail = connectionState === 'live'
-    ? 'Local realtime execution · bounded Git review · preview-gated tools · no aggregate approval or PTY'
+    ? 'Resumable local sessions · atomic saves · observed security layers · preview-gated tools'
     : connectionState === 'fixture'
       ? 'Synthetic data only · no Agent, model, file, Git, or approval action is connected'
       : 'Last-known state is preserved while the local event stream reconnects'
@@ -974,13 +1075,14 @@ function WorkspacePanel({
                 {liveSnapshot.run.status === 'cancelling' ? 'Cancelling…' : 'Cancel'}
               </button>
             ) : (
-              <button type="submit" className="start-run-button" disabled={!hasControl || !prompt.trim()}>Run Agent</button>
+              <button type="submit" className="start-run-button" disabled={!hasControl || !prompt.trim() || !liveSnapshot.capabilities.can_start_turn}>Run Agent</button>
             )}
           </div>
           <div className="live-task-meta">
             <span>{hasControl ? 'This tab has control' : 'Observing · another tab may have control'}</span>
-            <span>Mutations require one-tool preview approval</span>
+            <span>{liveSnapshot.active_session ? `${liveSnapshot.active_session.title} · ${liveSnapshot.active_session.persistence_status.replace('_', ' ')}` : 'Session unavailable'}</span>
           </div>
+          {liveSnapshot.active_session?.persistence_status === 'save_failed' ? <p className="command-error" role="alert">The previous turn could not be saved. Create or select a session before continuing.</p> : null}
           {commandError ? <p className="command-error" role="alert">{commandError}</p> : null}
         </form>
       ) : (
@@ -1016,6 +1118,9 @@ function App() {
     cancelTurn,
     approveTool,
     rejectTool,
+    newSession,
+    selectSession,
+    switchModel,
     refreshFiles,
     refreshReview,
   } = useWorkbenchConnection(Boolean(scenarioFromLocation))
@@ -1096,7 +1201,9 @@ function App() {
         reviewTriggerRef={reviewTriggerRef}
         liveSnapshot={liveSnapshot}
         connectionState={connectionState}
+        hasControl={hasControl}
         interactionLocked={interactionLocked}
+        onSwitchModel={switchModel}
         fixtureStatusLabel={scenario.label}
         fixtureTone={scenario.runTone}
       />
@@ -1106,6 +1213,9 @@ function App() {
         interactionLocked={interactionLocked}
         drawerMode={sidebarDrawerMode}
         liveSnapshot={liveSnapshot}
+        hasControl={hasControl}
+        onNewSession={newSession}
+        onSelectSession={selectSession}
         onRefreshFiles={refreshFiles}
       />
       <div id="workspace-main" className="workspace-cell" tabIndex={-1}>

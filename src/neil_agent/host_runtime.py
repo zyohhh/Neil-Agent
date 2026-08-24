@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from .audit import JsonlAuditSink
+from .audit import AuditLogStatus, JsonlAuditSink
 from .config import Settings
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
@@ -17,6 +18,7 @@ from .tools.registry import ToolRegistry
 from .tools.sandbox import SandboxCommandTools
 from .tools.shell import ShellTools
 from .sandbox import WindowsSandboxBackend
+from .security import SecurityShield, observe_security_shield
 
 
 class HostMode(str, Enum):
@@ -75,6 +77,30 @@ def windows_sandbox_backend(settings: Settings) -> WindowsSandboxBackend:
         certification_root=settings.sandbox_certification_root,
         trusted_reviewer=settings.sandbox_trusted_reviewer,
         trusted_review_sha256=settings.sandbox_trusted_review_sha256,
+    )
+
+
+def observe_host_security(
+    settings: Settings,
+    registry: ToolRegistry,
+    *,
+    audit_probe: Callable[[], AuditLogStatus] | None = None,
+) -> SecurityShield:
+    """Project one host's registered tools and configured enforcement layers."""
+
+    return observe_security_shield(
+        {
+            definition.name: registry.requires_approval(definition.name)
+            for definition in registry.definitions
+        },
+        sandbox_backend=settings.sandbox_backend,
+        audit_enabled=settings.audit_log_enabled,
+        sandbox_probe=(
+            windows_sandbox_backend(settings).probe
+            if settings.sandbox_backend == "windows-sandbox"
+            else None
+        ),
+        audit_probe=audit_probe,
     )
 
 

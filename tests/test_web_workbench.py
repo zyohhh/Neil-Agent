@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import Event
+from time import monotonic, sleep
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -17,14 +18,18 @@ from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from neil_agent.config import Settings
+from neil_agent.errors import SessionError
 from neil_agent.events import RuntimeEventFactory
 from neil_agent.schemas import ActivityEvent, Message, TokenUsage
 from neil_agent.schemas import ModelResponse, ToolCall
+from neil_agent.providers.base import ProviderId, ProviderTurnState
+from neil_agent.security import project_security_shield
 from neil_agent.session import SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 from neil_agent.web import WorkbenchController, WorkbenchSnapshotService, create_app
 from neil_agent.web.controller import (
     ClientCommand,
+    CompletedTurnState,
     ControllerSubscription,
     TurnCancelled,
 )
@@ -35,18 +40,32 @@ NOW = datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc)
 BOOTSTRAP = "test-bootstrap-secret-that-is-long-enough"
 
 
-def _settings(root: Path) -> Settings:
+def _settings(
+    root: Path,
+    *,
+    runtime_models: tuple[str, ...] = (),
+) -> Settings:
     return Settings(
         _env_file=None,
         deepseek_api_key="not-exposed",
         workspace_root=root,
         llm_model="deepseek-test-model",
         max_context_tokens=200_000,
+        web_runtime_model_allowlist=runtime_models,
     )
 
 
 class EchoWorker:
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
+    def run(
+        self,
+        prompt,
+        session,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):  # type: ignore[no-untyped-def]
         on_activity(ActivityEvent(status="running", message="Model request started"))
         factory = RuntimeEventFactory()
         correlation = factory.new_correlation_id("agent_turn")
@@ -71,7 +90,16 @@ class BlockingWorker:
         self.started = Event()
         self.cancelled = Event()
 
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
+    def run(
+        self,
+        prompt,
+        session,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):  # type: ignore[no-untyped-def]
         self.started.set()
         if not cancel.wait(2):
             raise AssertionError("test worker was not cancelled")
@@ -88,6 +116,7 @@ class ApprovalWorker:
     def run(  # type: ignore[no-untyped-def]
         self,
         prompt,
+        session,
         cancel,
         on_text,
         on_activity,
@@ -113,6 +142,7 @@ class DoubleApprovalWorker:
     def run(  # type: ignore[no-untyped-def]
         self,
         prompt,
+        session,
         cancel,
         on_text,
         on_activity,
@@ -135,7 +165,16 @@ class DoubleApprovalWorker:
 
 
 class QualityHistoryWorker:
-    def run(self, prompt, cancel, on_text, on_activity, on_runtime, request_approval):  # type: ignore[no-untyped-def]
+    def run(
+        self,
+        prompt,
+        session,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):  # type: ignore[no-untyped-def]
         factory = RuntimeEventFactory()
         for status in ("succeeded", "failed", "skipped"):
             correlation = factory.new_correlation_id("quality_check")
@@ -153,6 +192,57 @@ class QualityHistoryWorker:
                     correlation_id=correlation,
                 )
             )
+
+
+class SessionWorker:
+    def __init__(self) -> None:
+        self.restored_session_ids: list[str | None] = []
+
+    def run(  # type: ignore[no-untyped-def]
+        self,
+        prompt,
+        session,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):
+        self.restored_session_ids.append(
+            None if session is None else session.session_id
+        )
+        previous = () if session is None else session.messages
+        on_text(f"Saved: {prompt}")
+        return CompletedTurnState(
+            messages=(
+                *previous,
+                Message(role="user", content=prompt),
+                Message(role="assistant", content=f"Completed: {prompt}"),
+            ),
+            steps=(TaskStep("Persist Web session", "completed"),),
+            latest_quality_check=QualityCheckRecord(
+                check="pytest",
+                status="passed",
+                command="pytest -q",
+                exit_code=0,
+                output="passed",
+            ),
+            last_usage=TokenUsage(input_tokens=180, output_tokens=45),
+        )
+
+
+class FailingWorker:
+    def run(
+        self,
+        prompt,
+        session,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):  # type: ignore[no-untyped-def]
+        raise RuntimeError("worker failed")
 
 
 class ApprovalModel:
@@ -184,8 +274,9 @@ def _client(
     *,
     worker: Any | None = None,
     controller_options: dict[str, Any] | None = None,
+    runtime_models: tuple[str, ...] = (),
 ) -> TestClient:
-    settings = _settings(root)
+    settings = _settings(root, runtime_models=runtime_models)
     service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
     controller = WorkbenchController(
         service,
@@ -263,8 +354,47 @@ def test_health_is_generic_and_snapshot_requires_one_time_bootstrap(
     assert snapshot.headers["cache-control"] == "no-store"
     assert snapshot.json()["security"]["write_routes"] == 0
     assert snapshot.json()["security"]["agent_connected"] is True
+    security = snapshot.json()["security"]
+    assert security["application_status"] == "enforced"
+    assert security["os_sandbox_status"] == "disabled"
+    assert security["tool_count"] == (
+        security["direct_tool_count"] + security["approval_tool_count"]
+    )
+    assert snapshot.json()["active_session"]["persistence_status"] == "unsaved"
     assert "not-exposed" not in snapshot.text
     assert str(tmp_path.resolve()) not in snapshot.text
+
+
+def test_snapshot_refreshes_observed_security_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    observations = iter(
+        (
+            project_security_shield(
+                {"read_file": False},
+                sandbox_backend="disabled",
+                audit_enabled=False,
+            ),
+            project_security_shield(
+                {"read_file": True},
+                sandbox_backend="disabled",
+                audit_enabled=False,
+            ),
+        )
+    )
+
+    def observe(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return next(observations)
+
+    monkeypatch.setattr("neil_agent.web.service.observe_host_security", observe)
+
+    first = service.snapshot().security
+    second = service.snapshot().security
+
+    assert (first.direct_tool_count, first.approval_tool_count) == (1, 0)
+    assert (second.direct_tool_count, second.approval_tool_count) == (0, 1)
 
 
 def test_rejects_untrusted_host_origin_and_all_write_routes(tmp_path: Path) -> None:
@@ -348,6 +478,23 @@ def test_snapshot_projects_saved_metadata_without_message_or_quality_bodies(
     )
     client = _client(tmp_path)
     _authenticate(client)
+    controller: WorkbenchController = client.app.state.workbench_controller
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("privacy-control", "acquire_control", 0)),
+    )
+    selected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "privacy-select",
+                "select_session",
+                int(control["revision"]),
+                {"session_id": handle.session_id},
+            )
+        ),
+    )
+    assert selected["status"] == "accepted"
 
     snapshot = client.get("/api/v1/snapshot")
     payload = snapshot.json()
@@ -685,6 +832,22 @@ def _receive_result(socket, command_id: str) -> dict[str, object]:  # type: igno
     raise AssertionError(f"no result received for {command_id}")
 
 
+def _wait_for_run(
+    controller: WorkbenchController,
+    expected: str,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if controller.snapshot().run.status == expected:
+            return
+        sleep(0.01)
+    raise AssertionError(
+        f"run did not become {expected}: {controller.snapshot().run.status}"
+    )
+
+
 def test_ws_ticket_is_single_use_and_origin_is_required(tmp_path: Path) -> None:
     client = _client(tmp_path)
     _authenticate(client)
@@ -845,6 +1008,635 @@ def test_current_web_turn_keeps_bounded_quality_check_history(tmp_path: Path) ->
     assert review["quality_check"] == review["quality_checks"][-1]
 
 
+def test_session_select_restores_and_successful_turn_saves_atomically(
+    tmp_path: Path,
+) -> None:
+    suffixes = iter(("11111111", "22222222"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(suffixes),
+    )
+    handle = store.new_session()
+    saved = store.save(
+        handle,
+        (
+            Message(role="user", content="Inspect the project"),
+            Message(role="assistant", content="Inspection complete"),
+        ),
+        (TaskStep("Inspect", "completed"),),
+        None,
+        last_usage=TokenUsage(input_tokens=100, output_tokens=20),
+        create_only=True,
+    )
+    service = WorkbenchSnapshotService(
+        _settings(tmp_path),
+        clock=lambda: NOW,
+        session_store=store,
+    )
+    worker = SessionWorker()
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+
+    initial = controller.snapshot()
+    assert initial.active_session is not None
+    assert initial.active_session.persistence_status == "unsaved"
+    assert initial.task.source == "unavailable"
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("session-control", "acquire_control", 0)),
+    )
+    selected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "session-select",
+                "select_session",
+                int(control["revision"]),
+                {"session_id": saved.session_id},
+            )
+        ),
+    )
+
+    assert selected["status"] == "accepted"
+    restored = controller.snapshot()
+    assert restored.active_session is not None
+    assert restored.active_session.session_id == saved.session_id
+    assert restored.active_session.persistence_status == "saved"
+    assert restored.active_session.round_count == 1
+    assert restored.task.steps[0].title == "Inspect"
+    assert restored.context.total_tokens == 120
+
+    started = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "session-turn",
+                "start_turn",
+                restored.revision,
+                {"prompt": "Continue the work"},
+            )
+        ),
+    )
+    assert started["status"] == "accepted"
+    _wait_for_run(controller, "completed")
+
+    persisted = store.load(saved.session_id)
+    assert worker.restored_session_ids == [saved.session_id]
+    assert len(persisted.messages) == 4
+    assert persisted.messages[-2].content == "Continue the work"
+    assert persisted.restored_steps() == (TaskStep("Persist Web session", "completed"),)
+    assert persisted.runtime_provider is ProviderId.DEEPSEEK
+    assert persisted.runtime_model == "deepseek-test-model"
+    completed = controller.snapshot()
+    assert completed.active_session is not None
+    assert completed.active_session.persistence_status == "saved"
+    assert completed.active_session.round_count == 2
+
+
+def test_failed_and_cancelled_turns_do_not_overwrite_saved_session(
+    tmp_path: Path,
+) -> None:
+    suffixes = iter(("33333333", "44444444", "55555555"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(suffixes),
+    )
+    handle = store.new_session()
+    saved = store.save(
+        handle,
+        (
+            Message(role="user", content="Original"),
+            Message(role="assistant", content="Stable"),
+        ),
+        (),
+        None,
+        create_only=True,
+    )
+
+    for worker, terminal in (
+        (FailingWorker(), "failed"),
+        (BlockingWorker(), "cancelled"),
+    ):
+        service = WorkbenchSnapshotService(
+            _settings(tmp_path),
+            clock=lambda: NOW,
+            session_store=store,
+        )
+        controller = WorkbenchController(service, worker, clock=lambda: NOW)
+        control = controller.handle_command(
+            "owner",
+            ClientCommand.model_validate(
+                _command(f"control-{terminal}", "acquire_control", 0)
+            ),
+        )
+        selected = controller.handle_command(
+            "owner",
+            ClientCommand.model_validate(
+                _command(
+                    f"select-{terminal}",
+                    "select_session",
+                    int(control["revision"]),
+                    {"session_id": saved.session_id},
+                )
+            ),
+        )
+        controller.handle_command(
+            "owner",
+            ClientCommand.model_validate(
+                _command(
+                    f"turn-{terminal}",
+                    "start_turn",
+                    int(selected["revision"]),
+                    {"prompt": "Do not persist"},
+                )
+            ),
+        )
+        if isinstance(worker, BlockingWorker):
+            assert worker.started.wait(1)
+            snapshot = controller.snapshot()
+            controller.handle_command(
+                "owner",
+                ClientCommand.model_validate(
+                    _command("cancel-session", "cancel_turn", snapshot.revision)
+                ),
+            )
+        _wait_for_run(controller, terminal)
+        assert store.load(saved.session_id).messages == saved.messages
+        controller.close()
+
+
+def test_session_save_failure_blocks_turns_until_explicit_recovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    suffixes = iter(("66666666", "77777777", "88888888"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(suffixes),
+    )
+    handle = store.new_session()
+    baseline = store.save(
+        handle,
+        (
+            Message(role="user", content="Saved baseline"),
+            Message(role="assistant", content="Keep this state"),
+        ),
+        (),
+        None,
+        create_only=True,
+    )
+    service = WorkbenchSnapshotService(
+        _settings(tmp_path),
+        clock=lambda: NOW,
+        session_store=store,
+    )
+    controller = WorkbenchController(service, SessionWorker(), clock=lambda: NOW)
+
+    def fail_save(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise SessionError("simulated atomic save failure")
+
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("save-control", "acquire_control", 0)),
+    )
+    selected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "save-select",
+                "select_session",
+                int(control["revision"]),
+                {"session_id": baseline.session_id},
+            )
+        ),
+    )
+    monkeypatch.setattr(store, "save", fail_save)
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "save-turn",
+                "start_turn",
+                int(selected["revision"]),
+                {"prompt": "Save this"},
+            )
+        ),
+    )
+    _wait_for_run(controller, "failed")
+
+    failed = controller.snapshot()
+    assert failed.run.error_type == "SessionPersistenceError"
+    assert failed.active_session is not None
+    assert failed.active_session.persistence_status == "save_failed"
+    assert failed.capabilities.can_start_turn is False
+    assert failed.output[-1].kind == "warning"
+    blocked = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "save-blocked",
+                "start_turn",
+                failed.revision,
+                {"prompt": "Try again"},
+            )
+        ),
+    )
+    assert blocked["code"] == "session_save_failed"
+    assert store.load(baseline.session_id).messages == baseline.messages
+
+    recovered = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "save-recover",
+                "select_session",
+                failed.revision,
+                {"session_id": baseline.session_id},
+            )
+        ),
+    )
+    assert recovered["status"] == "accepted"
+    assert controller.snapshot().active_session is not None
+    assert controller.snapshot().active_session.persistence_status == "saved"
+
+    created = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("save-new", "new_session", int(recovered["revision"]))
+        ),
+    )
+    assert created["status"] == "accepted"
+    assert controller.snapshot().active_session is not None
+    assert controller.snapshot().active_session.persistence_status == "unsaved"
+
+
+def test_session_selection_rejects_provider_private_state_mismatch(
+    tmp_path: Path,
+) -> None:
+    suffixes = iter(("77777777", "88888888"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(suffixes),
+    )
+    handle = store.new_session()
+    foreign = store.save(
+        handle,
+        (
+            Message(role="user", content="Foreign state"),
+            Message(
+                role="assistant",
+                content="Foreign response",
+                provider_state=ProviderTurnState(
+                    provider=ProviderId.OPENAI,
+                    model="gpt-5",
+                    schema_version=1,
+                    payload={"response_id": "private"},
+                ),
+            ),
+        ),
+        (),
+        None,
+        create_only=True,
+    )
+    service = WorkbenchSnapshotService(
+        _settings(tmp_path),
+        clock=lambda: NOW,
+        session_store=store,
+    )
+    controller = WorkbenchController(service, SessionWorker(), clock=lambda: NOW)
+    original = controller.snapshot().active_session
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("private-control", "acquire_control", 0)),
+    )
+    rejected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "private-select",
+                "select_session",
+                int(control["revision"]),
+                {"session_id": foreign.session_id},
+            )
+        ),
+    )
+
+    assert rejected["code"] == "session_provider_mismatch"
+    assert controller.snapshot().active_session == original
+
+
+def test_idle_runtime_model_switch_is_allowlisted_bound_and_reversible(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, runtime_models=("deepseek-fast",))
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    prepared_models: list[str] = []
+
+    def worker_factory(candidate: Settings) -> SessionWorker:
+        prepared_models.append(candidate.selected_model)
+        return SessionWorker()
+
+    controller = WorkbenchController(
+        service,
+        SessionWorker(),
+        worker_factory=worker_factory,
+        clock=lambda: NOW,
+    )
+    initial = controller.snapshot()
+    assert initial.provider.model == "deepseek-test-model"
+    assert initial.provider.available_models == (
+        "deepseek-test-model",
+        "deepseek-fast",
+    )
+    assert initial.capabilities.can_switch_model is True
+    assert initial.active_session is not None
+    assert initial.active_session.runtime_model == "deepseek-test-model"
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("model-control", "acquire_control", 0)),
+    )
+    unlisted = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-unlisted",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-unknown"},
+            )
+        ),
+    )
+    assert unlisted["code"] == "model_not_allowlisted"
+
+    switched = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-fast",
+                "switch_model",
+                int(unlisted["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert switched["status"] == "accepted"
+    selected = controller.snapshot()
+    assert selected.provider.model == "deepseek-fast"
+    assert selected.provider.available_models == (
+        "deepseek-fast",
+        "deepseek-test-model",
+    )
+    assert selected.active_session is not None
+    assert selected.active_session.runtime_model == "deepseek-fast"
+    assert prepared_models == ["deepseek-fast"]
+    replayed = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-fast",
+                "switch_model",
+                int(unlisted["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert replayed == switched
+    assert prepared_models == ["deepseek-fast"]
+
+    started = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-bound-turn",
+                "start_turn",
+                selected.revision,
+                {"prompt": "Persist with the selected model"},
+            )
+        ),
+    )
+    assert started["status"] == "accepted"
+    _wait_for_run(controller, "completed")
+    completed = controller.snapshot()
+    assert completed.active_session is not None
+    bound_session_id = completed.active_session.session_id
+    persisted = service.session_store.load(bound_session_id)
+    assert persisted.runtime_provider is ProviderId.DEEPSEEK
+    assert persisted.runtime_model == "deepseek-fast"
+    assert completed.capabilities.can_switch_model is False
+    blocked = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-nonempty",
+                "switch_model",
+                completed.revision,
+                {"model": "deepseek-test-model"},
+            )
+        ),
+    )
+    assert blocked["code"] == "session_not_empty"
+
+    created = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("model-new-session", "new_session", int(blocked["revision"]))
+        ),
+    )
+    restored = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-back",
+                "switch_model",
+                int(created["revision"]),
+                {"model": "deepseek-test-model"},
+            )
+        ),
+    )
+    mismatch = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-bound-mismatch",
+                "select_session",
+                int(restored["revision"]),
+                {"session_id": bound_session_id},
+            )
+        ),
+    )
+    assert mismatch["code"] == "session_provider_mismatch"
+
+    switched_again = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-switch-again",
+                "switch_model",
+                int(mismatch["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    resumed = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "model-bound-resume",
+                "select_session",
+                int(switched_again["revision"]),
+                {"session_id": bound_session_id},
+            )
+        ),
+    )
+    assert resumed["status"] == "accepted"
+
+
+def test_runtime_model_switch_is_atomic_and_cannot_restore_unbound_history(
+    tmp_path: Path,
+) -> None:
+    identifiers = iter(("abababab", "cdcdcdcd", "efefefef"))
+    store = SessionStore(
+        tmp_path,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    legacy = store.save(
+        store.new_session(),
+        (
+            Message(role="user", content="Legacy public history"),
+            Message(role="assistant", content="No provider state"),
+        ),
+        (),
+        None,
+        create_only=True,
+    )
+    settings = _settings(tmp_path, runtime_models=("deepseek-fast",))
+    service = WorkbenchSnapshotService(
+        settings,
+        clock=lambda: NOW,
+        session_store=store,
+    )
+
+    def failing_factory(candidate: Settings) -> SessionWorker:
+        raise RuntimeError(candidate.selected_model)
+
+    controller = WorkbenchController(
+        service,
+        SessionWorker(),
+        worker_factory=failing_factory,
+        clock=lambda: NOW,
+    )
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("atomic-control", "acquire_control", 0)),
+    )
+    failed = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "atomic-switch",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert failed["code"] == "model_switch_failed"
+    assert controller.snapshot().provider.model == "deepseek-test-model"
+
+    controller = WorkbenchController(
+        service,
+        SessionWorker(),
+        worker_factory=lambda _settings: SessionWorker(),
+        clock=lambda: NOW,
+    )
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("legacy-control", "acquire_control", 0)),
+    )
+    switched = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "legacy-switch",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    rejected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "legacy-select",
+                "select_session",
+                int(switched["revision"]),
+                {"session_id": legacy.session_id},
+            )
+        ),
+    )
+    assert rejected["code"] == "session_runtime_unbound"
+
+
+def test_runtime_model_switch_is_rejected_while_a_turn_is_running(
+    tmp_path: Path,
+) -> None:
+    worker = BlockingWorker()
+    settings = _settings(tmp_path, runtime_models=("deepseek-fast",))
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    controller = WorkbenchController(
+        service,
+        worker,
+        worker_factory=lambda _settings: SessionWorker(),
+        clock=lambda: NOW,
+    )
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("running-control", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "running-turn",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Wait for cancellation"},
+            )
+        ),
+    )
+    assert worker.started.wait(1)
+    running = controller.snapshot()
+    assert running.capabilities.can_switch_model is False
+    rejected = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "running-switch",
+                "switch_model",
+                running.revision,
+                {"model": "deepseek-fast"},
+            )
+        ),
+    )
+    assert rejected["code"] == "run_conflict"
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "running-cancel",
+                "cancel_turn",
+                int(rejected["revision"]),
+            )
+        ),
+    )
+    assert worker.cancelled.wait(1)
+
+
 def test_single_turn_revision_control_and_cancel(tmp_path: Path) -> None:
     worker = BlockingWorker()
     client = _client(tmp_path, worker=worker)
@@ -878,6 +1670,109 @@ def test_single_turn_revision_control_and_cancel(tmp_path: Path) -> None:
         cancelled = _receive_result(socket, "cancel001")
         assert cancelled["status"] == "accepted"
         assert worker.cancelled.wait(1)
+
+
+def test_websocket_selects_and_creates_sessions_without_returning_bodies(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path, clock=lambda: NOW, id_factory=lambda: "99999999")
+    handle = store.new_session()
+    store.save(
+        handle,
+        (
+            Message(role="user", content="Visible session preview"),
+            Message(role="assistant", content="PRIVATE ASSISTANT BODY"),
+        ),
+        (),
+        None,
+        create_only=True,
+    )
+    client = _client(tmp_path)
+    _authenticate(client)
+
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_json(
+            _command("ws-session-control", "acquire_control", connected["revision"])
+        )
+        control = _receive_result(socket, "ws-session-control")
+        socket.send_json(
+            _command(
+                "ws-session-select",
+                "select_session",
+                int(control["revision"]),
+                {"session_id": handle.session_id},
+            )
+        )
+        selected = _receive_result(socket, "ws-session-select")
+        assert selected["status"] == "accepted"
+        selected_snapshot = client.get("/api/v1/snapshot")
+        assert (
+            selected_snapshot.json()["active_session"]["session_id"]
+            == handle.session_id
+        )
+        assert "PRIVATE ASSISTANT BODY" not in selected_snapshot.text
+        assert '"messages":' not in selected_snapshot.text
+
+        socket.send_json(
+            _command(
+                "ws-session-new",
+                "new_session",
+                int(selected["revision"]),
+            )
+        )
+        created = _receive_result(socket, "ws-session-new")
+        assert created["status"] == "accepted"
+        active = client.get("/api/v1/snapshot").json()["active_session"]
+        assert active["session_id"] != handle.session_id
+        assert active["persistence_status"] == "unsaved"
+
+
+def test_websocket_switches_one_allowlisted_idle_model(tmp_path: Path) -> None:
+    prepared_models: list[str] = []
+
+    def worker_factory(candidate: Settings) -> SessionWorker:
+        prepared_models.append(candidate.selected_model)
+        return SessionWorker()
+
+    client = _client(
+        tmp_path,
+        runtime_models=("deepseek-fast",),
+        controller_options={"worker_factory": worker_factory},
+    )
+    _authenticate(client)
+
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_json(
+            _command("ws-model-control", "acquire_control", connected["revision"])
+        )
+        control = _receive_result(socket, "ws-model-control")
+        socket.send_json(
+            _command(
+                "ws-model-switch",
+                "switch_model",
+                int(control["revision"]),
+                {"model": "deepseek-fast"},
+            )
+        )
+        switched = _receive_result(socket, "ws-model-switch")
+
+    snapshot = client.get("/api/v1/snapshot").json()
+    assert switched["status"] == "accepted"
+    assert snapshot["provider"]["model"] == "deepseek-fast"
+    assert snapshot["provider"]["available_models"] == [
+        "deepseek-fast",
+        "deepseek-test-model",
+    ]
+    assert snapshot["active_session"]["runtime_model"] == "deepseek-fast"
+    assert prepared_models == ["deepseek-fast"]
 
 
 def test_sequence_gap_and_slow_consumer_invalidate_snapshot(tmp_path: Path) -> None:
@@ -932,6 +1827,37 @@ def test_sequence_gap_and_slow_consumer_invalidate_snapshot(tmp_path: Path) -> N
         assert (await slow.queue.get())["payload"]["reason"] == "slow_client"
 
     asyncio.run(assert_invalidations())
+
+
+def test_superseded_session_events_require_snapshot_resync(tmp_path: Path) -> None:
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    controller = WorkbenchController(service, EchoWorker(), clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("coalesce-control", "acquire_control", 0)
+        ),
+    )
+    first = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("coalesce-new-one", "new_session", int(control["revision"]))
+        ),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command("coalesce-new-two", "new_session", int(first["revision"]))
+        ),
+    )
+
+    async def reconnect() -> None:
+        subscription = controller.subscribe("reconnected", 1)
+        invalidated = await subscription.queue.get()
+        assert invalidated["event_type"] == "snapshot_invalidated"
+        assert invalidated["payload"]["reason"] == "sequence_gap"
+
+    asyncio.run(reconnect())
 
 
 def test_process_close_signals_active_worker(tmp_path: Path) -> None:
@@ -1252,6 +2178,7 @@ def test_agent_worker_revalidates_preview_before_approved_write(
     with patch("neil_agent.web.controller.create_provider", return_value=model):
         worker.run(
             "Create approved.txt",
+            None,
             Event(),
             lambda text: None,
             lambda event: None,
@@ -1282,6 +2209,7 @@ def test_agent_worker_fails_closed_when_preview_changes_after_approval(
     with patch("neil_agent.web.controller.create_provider", return_value=model):
         worker.run(
             "Update approved.txt",
+            None,
             Event(),
             lambda text: None,
             lambda event: None,

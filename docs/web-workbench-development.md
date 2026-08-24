@@ -1,6 +1,6 @@
 # Neil Agent Web Workbench 开发文档
 
-> 状态：P7 completed · Resilient frontend architecture v1.1
+> 状态：P9 completed · idle-only same-provider runtime model switching
 >
 > 更新时间：2026-08-18
 >
@@ -246,7 +246,7 @@ offline -> connecting -> idle -> running -> waiting_for_approval
 - 只有存在有效待审批请求时才启用 Approve/Reject。
 - 用户向上滚动时间线后暂停自动跟随；回到底部或点击“Follow live”才恢复。
 - Output 支持折叠、拖拽高度和复制选中内容；不能执行任意命令。
-- 模型或模式切换只允许在 idle 状态进行，并明确作用于下一次 turn。
+- 模型切换只允许控制端在 idle、空且未保存的会话中进行，并明确只作用于下一次 turn；Focus/Build 仍是无权限含义的本地预览。
 - 所有服务端副作用命令必须携带唯一 `command_id`，重复提交不能重复执行。
 
 ## 7. 视觉设计规范
@@ -489,6 +489,7 @@ interface WorkbenchSnapshotV1 {
   model: ModelSummary;
   run: RunSummary;
   sessions: SessionPage;
+  activeSession: ActiveSessionSummary;
   timeline: TimelineStepDto[];
   review: ReviewSummary;
   context: ContextSummary;
@@ -508,11 +509,12 @@ interface WorkbenchSnapshotV1 {
 ```text
 acquire_control
 release_control
+new_session
+select_session
 start_turn
 cancel_turn
 approve_tool
 reject_tool
-select_session
 set_model_for_next_turn
 ping
 ```
@@ -546,10 +548,11 @@ activity
 runtime_step
 approval_requested
 approval_resolved
+session_changed
 service_closing
 ```
 
-`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期。`select_session` 与 `set_model_for_next_turn` 尚未实现。
+`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期；`session_changed` 只投影活动会话摘要、会话列表、任务、usage、review 与有界运行状态，不发送消息正文或 Provider 私有状态。`new_session` 与 `select_session` 已实现，`set_model_for_next_turn` 仍未实现。
 
 ### 11.6 重连流程
 
@@ -584,7 +587,7 @@ EventBus 是有界的，观察者可能丢事件。因此 Web 层必须把“发
 
 | UI 区域 | 真实来源 | 首版处理 | 后续缺口 |
 | --- | --- | --- | --- |
-| 模型选择 | `Settings` / Provider 描述 | idle 时选择下一 turn 模型 | 等 Provider runtime 配置收口 |
+| 模型选择 | `Settings` / Provider 描述 | 显式同 Provider 白名单；idle + 空会话时选择下一 turn 模型 | 跨 Provider 切换、自动路由与降级不在 P9 |
 | Running 状态 | Controller + Agent turn | 明确状态机 | 无 |
 | Sessions | `SessionStore` | 分页只读、idle 时恢复 | 搜索/虚拟列表优化 |
 | 时间线 | RuntimeEvent 投影 + ActivityEvent | 元数据与安全摘要 | 事件/活动稳定关联 ID |
@@ -721,7 +724,7 @@ Approve/Reject 仅接受当前控制租约持有者、当前 request ID 和精�
 
 当前 P4 已实现：Review 通过固定只读 Git 边界返回逐文件 numstat、rename/conflict/binary/untracked 状态，以及与 Git revision 绑定且最多 40K 字符的单文件 diff；未跟踪文件正文不通过 diff API 返回，路径不在当前安全变更集合、revision 过期或工作区越界时 fail closed。文件树使用 16 位内容 revision 做增量刷新，revision 未变化时只返回 `unchanged=true`，不重复传输整棵树。
 
-Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 Session v3 只持久化 `latest_quality_check`，所以刷新或恢复旧会话时协议真实返回 0–1 条；在会话存储升级前不伪造历史。Cost 仅在显式 `WEB_RATE_TABLE` 指向严格的 schema v1 本地 JSON、且 provider/model、费率生效日期、缓存价格和 input token 记账语义全部匹配时显示六位小数的美元 estimate；其余情况继续显示 `Unavailable`。仓库不内置会随时间失效的 Provider 价格。
+Web Controller 在当前 turn 内保留最近 20 条质量检查终态。Session v5 仍只持久化 `latest_quality_check`，所以刷新或恢复会话时协议真实返回 0–1 条，不伪造历史。Cost 仅在显式 `WEB_RATE_TABLE` 指向严格的 schema v1 本地 JSON、且 provider/model、费率生效日期、缓存价格和 input token 记账语义全部匹配时显示六位小数的美元 estimate；其余情况继续显示 `Unavailable`。仓库不内置会随时间失效的 Provider 价格。
 
 ### P5：打包与安全加固
 
@@ -754,7 +757,7 @@ Web Controller 在当前 turn 内保留最近 20 条质量检查终态。现有 
 - Playwright 直接管理 Vite preview，`npm run e2e` 可独立构建并运行五档溢出、抽屉、键盘、axe 和网络边界检查；
 - 四张断点截图现在由 `toHaveScreenshot` 与仓库基线实际比较，`npm run capture:baselines` 是显式审核后更新基线的唯一入口。
 
-P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约，继续继承 P5 威胁模型。PTY 如要实现，必须作为独立项目立项，不包含在 P0–P7 里程碑内。
+P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约，继续继承 P5 威胁模型。PTY 如要实现，必须作为独立项目立项，不包含在 P0–P8 里程碑内。
 
 ### P7：前端架构拆分与故障恢复
 
@@ -772,6 +775,40 @@ P6 不修改 DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSock
 P7 不修改 Python DTO、Agent、审批、Git、session、bootstrap、CSRF 或 WebSocket 契约。Focus/Build 权限、运行时模型切换、会话恢复和 PTY 仍需独立产品决策，不能通过前端恢复机制间接实现。
 
 P7 基本验收后的发布整改不新增产品阶段或能力：wheel 现在显式携带 WebSocket 运行时，启动器固定使用 `websockets-sansio` 并在运行时缺失时 fail closed；Ctrl+C 在 Uvicorn 完成 ASGI 关闭后按正常停止处理，优雅关闭上限为 10 秒。Uvicorn 协议日志使用 warning 级别，避免把查询参数中的单次 WebSocket ticket 写入终端。隔离 wheel 已完成真实 upgrade、控制租约、刷新重载、活动连接关闭、退出码和无残留进程复验；记录见 [`web-workbench-basic-acceptance.md`](web-workbench-basic-acceptance.md)。
+
+### P8：Web 会话连续性与运行时一致性
+
+状态：已于 `feature/web-session-continuity` 完成。P8 把左侧 Sessions 从只读展示升级为真实的 `new_session` / `select_session` 控制面，并补齐 Web 与 CLI 的剩余运行时一致性。控制器启动时创建不落盘的活动会话；只有持有控制租约、revision 精确匹配且没有活动 turn/待审批时才能新建或切换。选择已保存会话后，服务端恢复完整消息、计划、最近质量检查和服务端 usage；浏览器始终只收到摘要 DTO。
+
+每个 Web turn 仍创建独立的 Agent 与工具运行时，但会在发起模型请求前恢复控制器选中的 `SessionSnapshot`。仅成功完成的 turn 才通过 `SessionStore` 原子保存；模型/工具失败、取消或关闭不写会话。保存失败时旧快照保持不变，活动会话进入 `save_failed`，控制器禁止继续启动 turn，直到用户显式新建或重新选择会话。跨 Provider 或模型的私有状态在切换时预检并于网络请求前拒绝，不做静默丢弃或降级。`session_changed` 不携带完整 output 或嵌套 Git 文件列表，重放窗口只保留最新一条；断线客户端若跨过被取代的序号，会收到 `snapshot_invalidated` 并通过 HTTP 快照重建。
+
+P8 同时将 Security Shield 观察抽到 `host_runtime.observe_host_security()`，CLI 和 Web 使用同一工具审批、应用层、OS 沙箱与审计状态语义。Web 安全摘要显示实际注册工具数量和观察结果；未通过 Windows Sandbox 认证时继续显示 disabled/incomplete/unavailable，不把配置意图冒充为已生效隔离。
+
+交付：
+
+- 活动会话摘要、持久化状态与 `session_changed` 增量事件；
+- 新建、选择、恢复、成功保存及显式故障恢复；
+- 失败/取消不落盘、保存失败闭锁、跨 Provider 私有状态拒绝测试；
+- 前端真实会话操作、禁用原因、持久化状态和 Security Shield 摘要；
+- Web/CLI 共享 Security Shield 投影与更新后的威胁评审。
+
+### P9：idle-only 同 Provider 运行时模型切换
+
+状态：已于 `feature/web-runtime-model-switching` 完成。P9 只为 Web 进程增加操作方显式配置的同 Provider 候选模型，不实现跨 Provider 迁移、自动路由、fallback 或模型发现。`WEB_RUNTIME_MODEL_ALLOWLIST` 是最多 15 个附加精确模型 ID 的 JSON 数组；启动模型自动成为目录首项。没有附加项时，前端模型选择器保持禁用。
+
+`switch_model` WebSocket 命令必须同时满足：调用标签页持有控制租约、`expected_revision` 精确匹配、服务未关闭、没有运行中/取消中的 turn、没有待审批请求，并且活动会话尚未保存且没有历史。控制器先用候选模型重建完整 `Settings`，确认 Provider 不变并构造下一 turn worker；只有全部准备成功才在锁内一次性替换设置与 worker。构造失败不改变现有运行时，准备阶段不构造 SDK client、不调用模型 API，模型直到下一次 `start_turn` 才产生网络请求。成功后发布有界 `model_changed` 投影，更新 provider、context、cost、活动会话和 capabilities。
+
+会话格式升级到版本 5，以成对的 `runtime_provider` / `runtime_model` 保存可选绑定。每个成功 Web turn 都写入当前绑定，已绑定会话后续不能改写绑定；重命名、分支和导入导出继续保留。选择会话时先比较快照绑定，再逐消息检查 Provider 私有状态。当前进程发生过运行时切换后，含历史但没有绑定的 v1–v4 会话拒绝恢复，避免用户先在空会话切模型、再选择旧历史绕过门禁。跨进程打开此类旧会话仍保持既有兼容行为，直到由成功 turn 升级并绑定。
+
+前端使用原生可访问 `select`，仅在实时连接、持有控制、后端声明 `can_switch_model` 且无运行/审批时启用；禁用原因通过辅助文本说明。模型 ID 和会话绑定属于非秘密元数据，浏览器仍不会收到 API Key、endpoint、thinking、完整消息或 Provider 私有 payload。
+
+交付：
+
+- 显式有界模型目录、纯准备事务与同 Provider 强制约束；
+- `switch_model` / `model_changed` 协议、revision/idempotency 和前端 reducer；
+- Session v5 运行时绑定、v1–v4 严格迁移及分支/重命名保留；
+- 非空、运行中、未列入白名单、工厂失败、绑定不匹配与旧会话绕过回归；
+- 更新后的威胁模型、运维配置和 wheel 静态资源。
 
 ## 16. 测试策略
 
@@ -840,6 +877,8 @@ CI 不得以 Vite build 代替 TypeScript 类型检查。
 - 审批重复提交、过期、预览变化和非控制客户端操作全部被拒绝；
 - UI 不显示 thinking、API Key、环境变量、完整工具参数或未授权正文；
 - Git diff 和文件树不能越过 workspace；
+- 未配置模型白名单时选择器禁用；配置后，运行中、待审批、非空/已保存会话、无控制权、过期 revision、未知模型和跨 Provider 尝试全部被拒绝；
+- 成功模型切换只影响下一 turn，失败不改变旧运行时；保存后的会话绑定必须与恢复时 Provider/模型完全一致；
 - Web Workbench 关闭后 CLI/TUI 行为和已有测试保持不变；
 - 默认运行不访问远程字体、脚本、分析或遥测服务。
 
@@ -880,13 +919,13 @@ feat(api): add tool approval flow
 1. P0 已基于 Provider Runtime Phase 5；合并前是否先将 Provider 分支单独推送/合入 `main`？
 2. 产品名称使用 `Web Workbench`、`Workspace` 还是 `Mission Control`？
 3. Focus/Build 是纯展示模式，还是分别代表只读分析与可修改工具权限？在权限语义确定前不实现为真实开关。
-4. 首版是否允许在浏览器恢复/切换会话，还是只观察当前 CLI 会话？
-5. 模型切换是否由 Web 进程独立拥有，还是沿用启动时环境配置？
+4. 已决：P8 允许浏览器在控制租约、精确 revision 与 idle 门禁下恢复/切换工作区本地会话；浏览器不接收完整消息或 Provider 私有状态。
+5. 已决：P9 由 Web Controller 持有启动配置的不可变替代副本，只允许显式同 Provider 白名单；Provider、endpoint 与凭据仍由启动配置拥有。
 6. 质量检查输出允许显示多少正文、保留多久？
 7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
 8. 已决：P5 采用 wheel 内嵌生产产物；Vite 开发服务器只用于源码开发，不是发布启动项。
 
-P1–P7 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁和前端故障恢复；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、运行时模型切换和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
+P1–P9 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁、前端故障恢复、Web 会话连续性和受控模型切换；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、跨 Provider 切换、自动 fallback 和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
 
 其中第 1、3、5 项会影响后端边界，必须在接真实 Agent 前确定；其他项可在 fixture 原型评审后决定。
 

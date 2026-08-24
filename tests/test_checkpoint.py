@@ -1,6 +1,7 @@
 """Tests for minimal in-process file edit checkpoints."""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,20 @@ def test_checkpoint_history_evicts_old_content_within_bounds() -> None:
 
     assert history.count == 2
     assert history.latest == latest
+
+
+def test_checkpoint_history_exposes_immutable_metadata_timestamps() -> None:
+    observed = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    history = FileCheckpointHistory(
+        id_factory=lambda: "checkpoint-time",
+        clock=lambda: observed,
+    )
+
+    checkpoint = history.record("private-path.txt", "before", "after")
+
+    assert checkpoint.created_at == observed
+    assert history.snapshots == (checkpoint,)
+    assert isinstance(history.snapshots, tuple)
 
 
 def test_one_agent_task_groups_multiple_files_and_repeated_edits(
