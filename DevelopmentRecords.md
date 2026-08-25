@@ -1455,3 +1455,15 @@ CLI 展示修改预览并等待用户输入 y/yes
 
 - Review 面板新增 `ContextTomographyPanel`：按 TUI 同色带展示五层字符/token 估算、压力等级、轮次裁剪与服务端历史 usage。
 - 仅 live 快照且 `context.source === local_estimate` 时渲染；明确标注「本地估算、消息正文不出主机」。
+
+## 2026-08-25：Phase 3B Time Machine 检查点恢复
+
+### 安全恢复入口
+
+- 新增 `time_machine_restore.py`：判定是否可对**最新**任务检查点提供恢复，以及详情面板提示文案。
+- `FileSystemTools.prepare_checkpoint_restore()` 在检查点 ID 仍是最新时复用 `/rewind-task` 全量预检与预览。
+- `/cockpit --live` Time Machine（`F6`）在空闲且无待审批时，对最新检查点提供 `R` 审批对话框，批准后调用既有 `apply_latest_restore()`；较旧检查点提示使用 Git。
+
+### 验证
+
+- `tests/test_time_machine_restore.py`、`tests/test_checkpoint.py` 与 `tests/test_live_cockpit.py` 覆盖门禁、非最新拒绝与审批恢复闭环。

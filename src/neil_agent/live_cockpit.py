@@ -30,7 +30,8 @@ from .context import (
     ContextWhatIf,
     context_budget_pressure,
 )
-from .errors import NeilAgentError
+from .checkpoint import PreparedFileRestore
+from .errors import ToolError
 from .events import EventBus, EventSubscription, RuntimeEvent
 from .projections import (
     ExecutionGraph,
@@ -61,6 +62,8 @@ from .time_machine import (
     TimeMachineSnapshot,
     render_time_machine_snapshot,
 )
+from .time_machine_restore import can_offer_checkpoint_restore, checkpoint_restore_hint
+from .tools.filesystem import FileSystemTools, MAX_TASK_RESTORE_PREVIEW_CHARS
 
 MAX_LIVE_EVENTS = 10_000
 MAX_BRIDGE_EVENTS = 1_024
@@ -367,6 +370,98 @@ class ToolApprovalScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class CheckpointRestoreScreen(ModalScreen[bool]):
+    """Explicit yes/no approval for the latest task checkpoint restore."""
+
+    BINDINGS = [
+        Binding("y", "approve", "恢复", priority=True),
+        Binding("n,escape", "reject", "取消", priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    CheckpointRestoreScreen {
+        align: center middle;
+        background: rgba(3, 8, 14, 0.82);
+    }
+
+    #checkpoint-restore-dialog {
+        width: 82%;
+        max-width: 110;
+        height: 78%;
+        padding: 1 2;
+        background: #101923;
+        border: heavy #ff7f50;
+    }
+
+    #checkpoint-restore-kicker {
+        height: 1;
+        color: #ff7f50;
+        text-style: bold;
+    }
+
+    #checkpoint-restore-title {
+        height: 2;
+        margin-bottom: 1;
+        color: #f4f7fb;
+        text-style: bold;
+    }
+
+    #checkpoint-restore-preview {
+        height: 1fr;
+        padding: 1;
+        background: #080d14;
+        border: round #34495e;
+        color: #d9e2ec;
+    }
+
+    #checkpoint-restore-actions {
+        height: 3;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+
+    #checkpoint-restore-approve {
+        margin-right: 1;
+        background: #127d68;
+    }
+    """
+
+    def __init__(self, checkpoint_id: str, preview: str) -> None:
+        super().__init__()
+        self._checkpoint_id = _safe_inline(checkpoint_id)
+        self._preview = _safe_multiline(preview, MAX_TASK_RESTORE_PREVIEW_CHARS)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="checkpoint-restore-dialog"):
+            yield Static("TASK CHECKPOINT RESTORE", id="checkpoint-restore-kicker")
+            yield Static(
+                Text(
+                    f"恢复检查点 {self._checkpoint_id} 需要你的明确批准",
+                    style="bold",
+                ),
+                id="checkpoint-restore-title",
+            )
+            with VerticalScroll(id="checkpoint-restore-preview"):
+                yield Static(Text(self._preview))
+            with Horizontal(id="checkpoint-restore-actions"):
+                yield Button("恢复  Y", id="checkpoint-restore-approve", variant="success")
+                yield Button("取消  N", id="checkpoint-restore-reject", variant="error")
+
+    @on(Button.Pressed, "#checkpoint-restore-approve")
+    def approve_button(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#checkpoint-restore-reject")
+    def reject_button(self) -> None:
+        self.dismiss(False)
+
+    def action_approve(self) -> None:
+        self.dismiss(True)
+
+    def action_reject(self) -> None:
+        self.dismiss(False)
+
+
 class ContextWhatIfScreen(ModalScreen[int | None]):
     """Collect a bounded character count for a local-only simulation."""
 
@@ -542,7 +637,14 @@ class LiveCockpitApp(App[None]):
             "toggle_time_machine",
             "时间机器",
             priority=True,
-            tooltip="只读浏览事件、会话分支、压缩与任务检查点",
+            tooltip="浏览事件/会话/检查点；最新检查点可按 R 经审批恢复",
+        ),
+        Binding(
+            "r",
+            "restore_checkpoint",
+            "恢复检查点",
+            priority=True,
+            tooltip="预览并批准恢复最新任务检查点",
         ),
         Binding("1", "filter_all", "全部"),
         Binding("2", "filter_active", "进行中"),
@@ -958,6 +1060,7 @@ class LiveCockpitApp(App[None]):
         time_machine_history_provider: Callable[[], TimeMachineHistory] | None = None,
         time_machine_persistence_enabled: bool = False,
         persistent_event_count: int = 0,
+        filesystem_tools: FileSystemTools | None = None,
         max_events: int = MAX_LIVE_EVENTS,
     ) -> None:
         if max_events < 1:
@@ -972,6 +1075,10 @@ class LiveCockpitApp(App[None]):
             raise ValueError("time machine persistence flag must be boolean")
         if type(persistent_event_count) is not int or persistent_event_count < 0:
             raise ValueError("persistent event count cannot be negative")
+        if filesystem_tools is not None and not isinstance(
+            filesystem_tools, FileSystemTools
+        ):
+            raise ValueError("time machine restore requires FileSystemTools")
         super().__init__()
         self._agent = agent
         self._event_bus = event_bus
@@ -994,6 +1101,7 @@ class LiveCockpitApp(App[None]):
         ):
             raise ValueError("historical events must contain only RuntimeEvent values")
         self._time_machine_history_provider = time_machine_history_provider
+        self._filesystem_tools = filesystem_tools
         self._time_machine_history = TimeMachineHistoryProjection()
         self._time_machine_history_failures = 0
         self._time_machine_persistence_enabled = time_machine_persistence_enabled
@@ -1404,6 +1512,53 @@ class LiveCockpitApp(App[None]):
             else "time-machine"
         )
         self._set_monitor_view(target)
+
+    def action_restore_checkpoint(self) -> None:
+        if isinstance(self.screen, ModalScreen):
+            return
+        if self._monitor_view != "time-machine":
+            return
+        if not can_offer_checkpoint_restore(
+            self._time_machine_snapshot,
+            self._time_machine_selection,
+            busy=self._busy,
+            pending_approvals=len(self._pending_approvals),
+            restore_available=self._filesystem_tools is not None,
+        ):
+            self.notify("当前无法恢复任务检查点", severity="warning")
+            return
+        selection = self._time_machine_selection
+        tools = self._filesystem_tools
+        if selection is None or tools is None:
+            return
+        try:
+            prepared = tools.prepare_checkpoint_restore(selection.key)
+        except ToolError as error:
+            self.notify(str(error), severity="error")
+            return
+        self.push_screen(
+            CheckpointRestoreScreen(prepared.checkpoint_id, prepared.preview),
+            lambda approved: self._finish_checkpoint_restore(approved, prepared),
+        )
+
+    def _finish_checkpoint_restore(
+        self,
+        approved: bool,
+        prepared: PreparedFileRestore,
+    ) -> None:
+        if not approved:
+            self.notify("已取消任务检查点恢复", severity="warning")
+            return
+        tools = self._filesystem_tools
+        if tools is None:
+            return
+        try:
+            result = tools.apply_latest_restore(prepared)
+        except ToolError as error:
+            self.notify(str(error), severity="error")
+            return
+        self.notify(result, severity="information")
+        self._refresh_time_machine_snapshot(refresh_history=True)
 
     def action_context_what_if(self) -> None:
         if (
@@ -1884,6 +2039,15 @@ class LiveCockpitApp(App[None]):
             self._time_machine_snapshot,
             self._time_machine_selection,
         )
+        hint = checkpoint_restore_hint(
+            self._time_machine_snapshot,
+            self._time_machine_selection,
+            busy=self._busy,
+            pending_approvals=len(self._pending_approvals),
+            restore_available=self._filesystem_tools is not None,
+        )
+        if hint is not None:
+            rendered = f"{rendered}\n\n{hint}"
         content = Text(rendered)
         self._cockpit_screen.query_one("#time-machine-detail", Static).update(content)
         self._cockpit_screen.query_one(
@@ -2041,6 +2205,7 @@ def run_live_cockpit(
     time_machine_history_provider: Callable[[], TimeMachineHistory] | None = None,
     time_machine_persistence_enabled: bool = False,
     persistent_event_count: int = 0,
+    filesystem_tools: FileSystemTools | None = None,
     approval_handler_owner: object | None = None,
 ) -> int:
     """Run the app and return the number of successful turns it completed."""
@@ -2056,6 +2221,7 @@ def run_live_cockpit(
         time_machine_history_provider=time_machine_history_provider,
         time_machine_persistence_enabled=time_machine_persistence_enabled,
         persistent_event_count=persistent_event_count,
+        filesystem_tools=filesystem_tools,
     )
     previous_handler: object | None = None
     replace_handler = getattr(

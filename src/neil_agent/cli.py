@@ -414,6 +414,7 @@ def run(console: Console) -> None:
                     audit_sink,
                     session_store=session_store,
                     file_checkpoints=filesystem_tools.checkpoints,
+                    filesystem_tools=filesystem_tools,
                 )
                 if completed_turns is None:
                     _show_cockpit(
@@ -818,6 +819,7 @@ def _try_show_live_cockpit(
     audit_sink: JsonlAuditSink | None = None,
     session_store: SessionStore | None = None,
     file_checkpoints: FileCheckpointHistory | None = None,
+    filesystem_tools: FileSystemTools | None = None,
 ) -> int | None:
     """Run Textual only in a terminal and return ``None`` for Rich fallback."""
 
@@ -899,6 +901,7 @@ def _try_show_live_cockpit(
             time_machine_history_provider=time_machine_history,
             time_machine_persistence_enabled=persistence_enabled,
             persistent_event_count=len(historical_events),
+            filesystem_tools=filesystem_tools,
             approval_handler_owner=agent,
         )
     except Exception:  # noqa: BLE001 - optional UI degradation boundary.

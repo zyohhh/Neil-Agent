@@ -231,6 +231,18 @@ class FileSystemTools:
             f"{checkpoint.checkpoint_id}"
         )
 
+    def prepare_checkpoint_restore(self, checkpoint_id: str) -> PreparedFileRestore:
+        """Preview reversal of one task checkpoint after validating it is still latest."""
+
+        checkpoint = self.checkpoints.latest
+        if checkpoint is None:
+            raise ToolError("当前进程没有可恢复的文件任务检查点。")
+        if checkpoint.checkpoint_id != checkpoint_id:
+            raise ToolError(
+                "只能恢复最新的任务检查点；较旧的检查点请使用 Git 回退。"
+            )
+        return self.prepare_latest_restore()
+
     def prepare_latest_restore(self) -> PreparedFileRestore:
         """Preview reversal of every effective edit in the latest Agent task."""
 

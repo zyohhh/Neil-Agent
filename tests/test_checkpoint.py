@@ -340,3 +340,19 @@ def test_multi_file_restore_reports_incomplete_rollback(
     assert first.read_text(encoding="utf-8") == "one"
     assert second.read_text(encoding="utf-8") == "changed two"
     assert tools.checkpoints.count == 1
+
+
+def test_prepare_checkpoint_restore_rejects_non_latest_checkpoint(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "example.txt"
+    target.write_text("one\n", encoding="utf-8")
+    tools = FileSystemTools(tmp_path)
+    tools.write_file("example.txt", "two\n")
+    latest = tools.checkpoints.latest
+    assert latest is not None
+    tools.write_file("example.txt", "three\n")
+    older_id = latest.checkpoint_id
+
+    with pytest.raises(ToolError, match="只能恢复最新的任务检查点"):
+        tools.prepare_checkpoint_restore(older_id)

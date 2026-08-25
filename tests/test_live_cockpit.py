@@ -28,6 +28,7 @@ from neil_agent.events import (
     RuntimeStatus,
 )
 from neil_agent.live_cockpit import (
+    CheckpointRestoreScreen,
     ContextWhatIfScreen,
     LiveCockpitApp,
     RuntimeEventBridge,
@@ -55,6 +56,7 @@ from neil_agent.security import (
     project_security_shield,
 )
 from neil_agent.time_machine import TimeMachineHistory
+from neil_agent.tools.filesystem import FileSystemTools
 
 NOW = datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc)
 
@@ -787,6 +789,53 @@ async def test_live_app_browses_time_machine_without_model_or_source_content() -
         await pilot.pause()
         assert app.monitor_view == "execution"
         assert agent.prompts == []
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_restores_latest_checkpoint_from_time_machine(
+    tmp_path,
+) -> None:
+    target = tmp_path / "sample.txt"
+    target.write_text("before\n", encoding="utf-8")
+    tools = FileSystemTools(tmp_path)
+    tools.write_file("sample.txt", "after\n")
+    latest = tools.checkpoints.latest
+    assert latest is not None
+
+    bus = EventBus()
+    agent = FakeLiveAgent(bus)
+
+    def history_provider() -> TimeMachineHistory:
+        return TimeMachineHistory(checkpoints=tools.checkpoints.snapshots)
+
+    app = LiveCockpitApp(
+        agent,
+        bus,
+        model="deepseek-v4-flash",
+        workspace=str(tmp_path),
+        initial_events=_execution_events(),
+        time_machine_history_provider=history_provider,
+        filesystem_tools=tools,
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("f6")
+        await pilot.pause()
+        tree = app.query_one("#time-machine-tree", Tree)
+        checkpoint_node = tree.root.children[2].children[0]
+        tree.select_node(checkpoint_node)
+        await pilot.pause()
+        detail = app.query_one("#time-machine-detail").render().plain
+        assert "PRESS R TO PREVIEW" in detail
+        app.action_restore_checkpoint()
+        await pilot.pause()
+        assert isinstance(app.screen, CheckpointRestoreScreen)
+        await pilot.click("#checkpoint-restore-approve")
+        await pilot.pause()
+        assert target.read_text(encoding="utf-8") == "before\n"
+        assert tools.checkpoints.count == 0
 
     assert bus.close()
 
