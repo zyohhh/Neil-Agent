@@ -1513,3 +1513,8 @@ CLI 展示修改预览并等待用户输入 y/yes
 
 - `ApprovalRequestDto` 与 v2 `approval_requests` 条目新增 `binding_kind`（`generic-tool` / `sandbox-run-command` / `guest-export-import`）。
 - Web Workbench 审批卡片展示绑定种类标签；`tests/test_web_workbench.py` 覆盖 guest import 绑定投影。
+
+### 文档
+
+- 新增 [`docs/guest-export-import.md`](docs/guest-export-import.md)：端到端流程、工具参数、guest 写入约定、`binding_kind`、限制与手测清单。
+- 更新 `architecture.md`、`host-runtime.md`、`non-interactive.md`、`web-workbench-development.md`、`sandbox-certification-runbook.md`、`sandbox-assessment.md`、`claude-code-review.md`、`README.md` 交叉引用。

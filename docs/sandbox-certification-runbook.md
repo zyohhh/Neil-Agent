@@ -90,16 +90,54 @@ neil-agent doctor
 
 OS 沙箱应显示 `ready` 或等价 enforced 语义，且认证证据为「已验证并绑定」。此时 `run_command` 才会在 CLI/Web 条件注册。
 
-## 步骤 6：认证后开发（下一代码里程碑）
+## 步骤 6：认证后 Guest 产物工作流
 
-认证通过后按 [`DevelopmentRecords.md`](../DevelopmentRecords.md) 与
-[`claude-code-review.md`](claude-code-review.md) 推进：
+认证通过后，host 侧已实现受控 guest 产物导出与二次批准导入。运维与手测按本节执行；设计细节见 [`guest-export-import.md`](guest-export-import.md)。
 
-1. **Guest 产物导出 manifest**（`sandbox_export.py`）— 调用前声明路径、有界自哈希 manifest、无正文预览。
-2. **二次批准导入事务**（`import_guest_export` + `FileSystemTools`）— 绑定 certification、export manifest 与逐文件 hash，批准后原子写回工作区。
-3. **`run_command` + `export_paths`** — 声明路径、沙箱导出收集、manifest 暂存与 `import_guest_export` 衔接已完成；guest 侧写入约定见 runbook。
+### 6.1 能力检查
 
-Guest 进程应将声明文件写入沙箱内 `C:\NeilAgent\Export\{workspace-relative-path}`（与 `result.json` 同级或子路径）；host 在 exporter 完成后只收集 `export_paths` 中声明的路径，并拒绝任何额外文件。
+```powershell
+neil-agent doctor
+```
+
+OS 沙箱应显示 `ready`，且 `run_command` 与 `import_guest_export` 在 CLI/Web/非交互写入模式中可用。
+
+### 6.2 典型两步流程
+
+1. **`run_command`**（第一次审批，`binding_kind: sandbox-run-command`）
+   - 传入 `export_paths`，例如 `["out/result.txt"]`。
+   - Guest 将文件写入 `C:\NeilAgent\Export\out\result.txt`（工作区相对路径）。
+   - 成功后 JSON 含 `guest_export.manifest_sha256`。
+
+2. **`import_guest_export`**（第二次审批，`binding_kind: guest-export-import`）
+   - 参数 `manifest_sha256` 为上一步返回值。
+   - 预览显示有界 diff 与 digest，不泄漏正文。
+   - 批准后原子写入工作区；失败回滚。
+
+### 6.3 非交互 v2 示例
+
+```powershell
+# 第一次：request 模式捕获 run_command 与 import 的 approval_id
+uv run neil-agent -p "run sandbox tool and import result" `
+  --protocol-version 2 --permission-mode request --output-format json
+
+# 第二次：approve 模式分别消费 approval_id（须相同 prompt）
+uv run neil-agent -p "run sandbox tool and import result" `
+  --protocol-version 2 --permission-mode approve --approval-id <id> --output-format json
+```
+
+### 6.4 实现状态
+
+| 里程碑 | 状态 |
+| --- | --- |
+| Guest export manifest（`sandbox_export.py`） | ✅ |
+| 二次批准导入（`import_guest_export` + `FileSystemTools`） | ✅ |
+| `run_command` + `export_paths` 收集与暂存 | ✅ |
+| Web / 非交互 `binding_kind` 元数据 | ✅ |
+| Guest runner 侧声明路径强制（C#） | ⏳ 待办（可选纵深防御） |
+| 真实 WSB 端到端手测 | 需本机 `wsb.exe` + 认证 bundle |
+
+Guest 进程应将声明文件写入沙箱内 `C:\NeilAgent\Export\{workspace-relative-path}`；host 在 exporter 完成后只收集 `export_paths` 中声明的路径，并拒绝任何额外文件。
 
 ## 常见失败
 
@@ -113,6 +151,7 @@ Guest 进程应将声明文件写入沙箱内 `C:\NeilAgent\Export\{workspace-re
 ## 相关文件
 
 - 契约：[`sandbox-certification.md`](sandbox-certification.md)
+- Guest 导出导入：[`guest-export-import.md`](guest-export-import.md)
 - CI：`.github/workflows/windows-sandbox-security.yml`
 - 脚本：[`scripts/windows-sandbox-certify.ps1`](../scripts/windows-sandbox-certify.ps1)
 - 运行时加载：`src/neil_agent/sandbox_runtime.py`

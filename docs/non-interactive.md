@@ -49,8 +49,9 @@ approve 是一次新的模型运行，可能产生额外 API 用量；模型若�
 - prompt 与当前项目指令的 SHA-256，不保存它们的正文。
 - 工具名、规范化参数的 SHA-256，不保存独立参数正文。
 - 精确预览及其 SHA-256。预览可能包含目标文件 diff，这是用户判断是否批准所必需的内容。
-- 版本化的机器可读 binding kind 与摘要；它用于需要绑定额外安全语义的工具，
-  普通工具也使用域分离的稳定 binding。
+- 版本化的机器可读 `binding_kind` 与摘要。`generic-tool` 用于普通写操作；`sandbox-run-command` 用于认证沙箱命令（含可选 `export_paths`）；`guest-export-import` 用于导入已暂存的 guest export manifest。普通工具也使用域分离的稳定 binding 摘要。
+
+`approval_requests` / `approval_request` 事件中的每条记录包含 `binding_kind`（元数据）。Guest 导出导入流程见 [`guest-export-import.md`](guest-export-import.md)。
 
 返回给调用方的 approval ID 由内部 request ID 和完整审批记录摘要组成。第二次运行同时校验该摘要，因此即使工作区中的 pending 记录被外部进程修改，也不能把用户看到的授权替换成另一项操作。
 

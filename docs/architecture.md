@@ -251,7 +251,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 工具注册分为两类：
 
 - 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`、`set_task_plan`、`update_task_step`
-- 必须审批：`write_file`、`replace_text`、`run_quality_check`、`git_stage`、`git_commit`
+- 必须审批：`write_file`、`replace_text`、`run_quality_check`、`git_stage`、`git_commit`；认证就绪时还条件注册 `run_command` 与 `import_guest_export`（后者依赖已暂存的 guest export manifest）
 
 `/permissions` 只读取注册表与工作区配置，展示上述分类、敏感路径、命令和网络边界，并明确当前没有 OS 级命令沙箱；它不修改规则，也不把提示词描述成强制权限。
 
@@ -291,6 +291,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - 命令受 `COMMAND_TIMEOUT` 约束，返回内容受 `MAX_COMMAND_OUTPUT_CHARS` 约束。
 - 非零退出码和超时会作为 `ToolResult(is_error=True)` 返回模型，而不是绕过工具错误边界。
 - 上述限制是应用层白名单，不是 OS 沙箱。原生 Windows 的 AppContainer/LPAC 或独立 Windows Sandbox、Linux 的 namespace/seccomp 等都需要独立策略和平台实现；结论与开放通用命令前的门槛见 [`sandbox-assessment.md`](sandbox-assessment.md)。
+- 认证 Windows Sandbox 下，可选 `run_command(export_paths=...)` 允许 guest 在声明路径产出 UTF-8 文件，经 manifest 暂存与 `import_guest_export` 二次批准后写回工作区；未声明修改仍丢弃。完整流程见 [`guest-export-import.md`](guest-export-import.md)。
 
 ## 一次性运行与结构化协议
 

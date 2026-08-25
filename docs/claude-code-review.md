@@ -21,7 +21,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 | 自动化 | 离线评测，以及一次性 `text`、`json`、`stream-json` | v1 默认只读；v2 以两阶段精确审批开放受限写操作 |
 | Hooks | 类型化进程内 `before/after model/tool` 回调 | 支持审计、拒绝和有界上下文；有意不执行任意 shell |
 | 浏览器 UI | 本地 loopback Web Workbench，逐工具审批与只读 Git review | 桌面工作台方向一致；无 PTY、无批量 Apply |
-| OS 沙箱 | 不可变策略、认证契约、条件 `run_command`、fail-closed 诊断 | CLI/Web 同路径条件注册；真实 WSB 认证仍依赖专用 runner |
+| OS 沙箱 | 不可变策略、认证契约、条件 `run_command`、声明式 `export_paths`、二次批准 `import_guest_export`、fail-closed 诊断 | CLI/Web 同路径；host 侧导出导入已实现；真实 WSB 认证仍依赖专用 runner |
 | 多 Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM | 超出 Claude Code 单一生态；维护期见 provider 文档 |
 
 ## 已实施优化
@@ -34,7 +34,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 6. 新增 `-p/--print` 一次性入口；默认 v1 只读，`json` 和 `stream-json` 不混入终端装饰或思考内容，默认不保存会话。
 7. 新增类型化生命周期 hooks：前置阶段可拒绝，`before_model` 可提供有界请求上下文，后置阶段只审计；回调异常默认关闭相关操作。
 8. 依据 Provider 文档与字符比例调整 token 软估算，并明确实际请求与费用仍以服务端 `usage` 为准。
-9. 完成 Windows Sandbox 契约、guest runner、认证 bundle 与条件 `run_command` 实现；普通开发机缺少 `wsb.exe` 时按设计跳过，不产生认证。
+9. 完成 Windows Sandbox 契约、guest runner、认证 bundle 与条件 `run_command` 实现；认证宿主上可选 `export_paths` 与 `import_guest_export` 二次批准导入 guest UTF-8 产物。普通开发机缺少 `wsb.exe` 时按设计跳过，不产生认证。
 10. 接收并累加服务端 `usage`，在 `/context`、会话版本 3+、一次性结构化结果与 Web 快照中保留最近成功回合的实测；会话版本 4 以可选直接父 ID 记录本地分支谱系，版本 5 增加可选 Provider/模型绑定。
 11. 用独立版本化夹具固定 v1/v2 的 `json` / `stream-json` 字段与错误代码；v2 通过 request/approve 两次运行、精确预览绑定和一次性消费开放受限操作，不改变 v1。
 12. 增加可选的元数据 JSONL 审计 sink；它预检真实路径、限制单条与总大小并做单备份轮转，不记录正文或凭据。
@@ -55,16 +55,17 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 - Claude Code 的 `/export` 面向人类可读文本。Neil Agent 的 `/export` 仍是为安全导入设计的严格 JSON 信封；`-p --output-format json|stream-json` 才是脚本协议，两者语义必须持续区分。
 - Claude Code 的检查点可以按对话持续恢复多文件状态。Neil Agent 按单次 Agent 回合恢复多文件正文，但仍只存在于本进程；Git 仍是跨进程和持久化回退的可靠机制。
 - Claude Code 在 IDE/终端中提供持续的进程内会话。Neil Agent Web 为每个 turn 构造隔离 Agent 并从严格本地快照恢复；这保留了连续性，但没有把浏览器变成长驻 Agent 对象的直接宿主。
-- Claude Code 同时使用权限规则和已投入执行的 OS 级沙箱。Neil Agent CLI/Web 已共用认证契约与条件 `run_command`；没有通过专用 Windows runner 认证的宿主仍不能声称 OS 隔离等价。
+- Claude Code 同时使用权限规则和已投入执行的 OS 级沙箱。Neil Agent CLI/Web 已共用认证契约与条件 `run_command`；声明式 guest 导出与二次批准导入在 host 侧已实现，guest runner 侧路径强制与真实 WSB 手测仍待专用环境验证。没有通过专用 Windows runner 认证的宿主仍不能声称 OS 隔离等价。
 
 ## 后续优先级
 
-1. 在专用 Windows runner 完成三轮强制安全 workflow、独立 review 与运行时认证；随后评估 guest 产物导出与二次批准导入。
-2. 在认证完成后设计受控 guest 产物导出与二次批准导入，继续保持调用前声明、hash/revision 绑定和失败回滚。
-3. 维持 Time Machine Phase 3A 的只读边界；只有在审批、版本/哈希并发校验和失败原子性协议独立完成后，才评估 Phase 3B 安全恢复。
+1. 在专用 Windows runner 完成真实 WSB 端到端手测：`run_command(export_paths)` → `import_guest_export`。
+2. Guest runner（C#）侧强制只允许写入已声明的 `export_paths`（可选纵深防御）。
+3. 维持 Time Machine Phase 3B 的审批与原子性边界；不扩大恢复范围。
 
 ## 相关文档
 
+- [`guest-export-import.md`](guest-export-import.md) — Guest 产物导出与二次批准导入
 - [`architecture.md`](architecture.md) — 总体分层（含 Web）
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵与迁移状态
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
