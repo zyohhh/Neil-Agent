@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from inspect import signature
 from typing import Literal
 
+from ..approval import ApprovalBinding, ApprovalBindingResolver
 from ..errors import ToolError
 from ..schemas import ToolCall, ToolDefinition, ToolResult
 
@@ -21,6 +22,7 @@ class RegisteredTool:
     handler: ToolHandler
     requires_approval: bool = False
     preview_handler: ToolPreviewHandler | None = None
+    binding_resolver: ApprovalBindingResolver | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,7 @@ class ToolRegistry:
         *,
         requires_approval: bool = False,
         preview_handler: ToolPreviewHandler | None = None,
+        binding_resolver: ApprovalBindingResolver | None = None,
     ) -> None:
         """Register one tool, rejecting ambiguous duplicate names."""
 
@@ -56,6 +59,7 @@ class ToolRegistry:
             handler=handler,
             requires_approval=requires_approval,
             preview_handler=preview_handler,
+            binding_resolver=binding_resolver,
         )
 
     @property
@@ -69,6 +73,18 @@ class ToolRegistry:
 
         registered = self._tools.get(tool_name)
         return registered is not None and registered.requires_approval
+
+    def resolve_approval_binding(
+        self,
+        call: ToolCall,
+        preview: str,
+    ) -> ApprovalBinding | None:
+        """Return a tool-specific approval binding when one is registered."""
+
+        registered = self._tools.get(call.name)
+        if registered is None or registered.binding_resolver is None:
+            return None
+        return registered.binding_resolver(call, preview)
 
     def preview(self, call: ToolCall) -> ToolResult:
         """Build the user-facing preview for an approval-required tool."""

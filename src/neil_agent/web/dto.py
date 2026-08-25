@@ -491,6 +491,11 @@ class ApprovalRequestDto(WorkbenchDto):
     request_id: str = Field(pattern=r"^approval-[0-9a-f]{32}$")
     run_id: str = Field(pattern=r"^run-[0-9a-f]{32}$")
     tool_name: str = Field(min_length=1, max_length=128)
+    binding_kind: Literal[
+        "generic-tool",
+        "sandbox-run-command",
+        "guest-export-import",
+    ]
     preview: str = Field(min_length=1, max_length=30_000)
     created_at: AwareDatetime
     expires_at: AwareDatetime

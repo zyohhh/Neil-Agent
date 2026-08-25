@@ -95,8 +95,11 @@ OS 沙箱应显示 `ready` 或等价 enforced 语义，且认证证据为「已�
 认证通过后按 [`DevelopmentRecords.md`](../DevelopmentRecords.md) 与
 [`claude-code-review.md`](claude-code-review.md) 推进：
 
-1. **Guest 产物导出 manifest**（`sandbox_export.py`）— 调用前声明路径、有界自哈希 manifest、仅预览。
-2. **二次批准导入事务** — 绑定 certification、export manifest 与逐文件 hash，批准后原子写回工作区。
+1. **Guest 产物导出 manifest**（`sandbox_export.py`）— 调用前声明路径、有界自哈希 manifest、无正文预览。
+2. **二次批准导入事务**（`import_guest_export` + `FileSystemTools`）— 绑定 certification、export manifest 与逐文件 hash，批准后原子写回工作区。
+3. **`run_command` + `export_paths`** — 声明路径、沙箱导出收集、manifest 暂存与 `import_guest_export` 衔接已完成；guest 侧写入约定见 runbook。
+
+Guest 进程应将声明文件写入沙箱内 `C:\NeilAgent\Export\{workspace-relative-path}`（与 `result.json` 同级或子路径）；host 在 exporter 完成后只收集 `export_paths` 中声明的路径，并拒绝任何额外文件。
 
 ## 常见失败
 

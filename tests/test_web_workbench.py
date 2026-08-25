@@ -133,6 +133,47 @@ class ApprovalWorker:
         self.finished.set()
 
 
+class GuestImportApprovalWorker:
+    def __init__(self, settings: Settings) -> None:
+        from neil_agent.host_runtime import HostMode, build_host_runtime
+        from neil_agent.sandbox_export import build_guest_export_manifest
+
+        self.requested = Event()
+        self.finished = Event()
+        self.approved: bool | None = None
+        runtime = build_host_runtime(settings, mode=HostMode.WEB)
+        assert runtime.guest_import is not None
+        manifest = build_guest_export_manifest(
+            run_id="web-import",
+            request_hash="a" * 64,
+            certification_sha256="b" * 64,
+            files=(("web.txt", b"WEB_IMPORT_OK"),),
+        )
+        self.digest = runtime.guest_import.stage(manifest, {"web.txt": b"WEB_IMPORT_OK"})
+        self._registry = runtime.registry
+
+    def run(  # type: ignore[no-untyped-def]
+        self,
+        prompt,
+        session,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+    ):
+        call = ToolCall(
+            id="import-1",
+            name="import_guest_export",
+            arguments={"manifest_sha256": self.digest},
+        )
+        preview = self._registry.preview(call).content
+        self.requested.set()
+        self.approved = request_approval(call, preview)
+        on_text("approved" if self.approved else "rejected")
+        self.finished.set()
+
+
 class DoubleApprovalWorker:
     def __init__(self) -> None:
         self.first_requested = Event()
@@ -1995,6 +2036,7 @@ def test_single_tool_approval_accepts_exact_current_request(tmp_path: Path) -> N
     approval = _approval_snapshot(controller)
     snapshot = controller.snapshot()
     assert approval["tool_name"] == "write_file"
+    assert approval["binding_kind"] == "generic-tool"
     assert "approved content" in approval["preview"]
     assert snapshot.capabilities.can_approve_tool is True
     assert snapshot.review.state == "approval_required"
@@ -2016,6 +2058,33 @@ def test_single_tool_approval_accepts_exact_current_request(tmp_path: Path) -> N
     assert worker.approved is True
     assert controller.snapshot().approval is not None
     assert controller.snapshot().approval.state == "approved"
+
+
+def test_guest_import_approval_exposes_binding_kind(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    worker = GuestImportApprovalWorker(settings)
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    control = controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(_command("guestimport01", "acquire_control", 0)),
+    )
+    controller.handle_command(
+        "owner",
+        ClientCommand.model_validate(
+            _command(
+                "guestimport02",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Import staged guest export"},
+            )
+        ),
+    )
+    assert worker.requested.wait(1)
+    approval = _approval_snapshot(controller)
+    assert approval["tool_name"] == "import_guest_export"
+    assert approval["binding_kind"] == "guest-export-import"
+    assert "manifest" in approval["preview"].lower()
 
 
 def test_approval_rejects_stale_revision_wrong_id_and_duplicate(

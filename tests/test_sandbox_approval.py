@@ -79,6 +79,7 @@ def test_binding_has_deterministic_domain_separated_digest() -> None:
         ("active_process_limit", 5),
         ("process_memory_bytes", 65 * 1024 * 1024),
         ("job_memory_bytes", 129 * 1024 * 1024),
+        ("export_paths", ("out/result.txt",)),
     ),
 )
 def test_every_variable_execution_field_changes_digest(

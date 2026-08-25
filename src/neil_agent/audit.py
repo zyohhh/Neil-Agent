@@ -26,6 +26,10 @@ MAX_AUDIT_RECORD_BYTES = 4_096
 AUDIT_LOCK_TIMEOUT_SECONDS = 2.0
 AUDIT_LOCK_POLL_SECONDS = 0.05
 AUDIT_STAGES = frozenset({"before_model", "after_model", "before_tool", "after_tool"})
+TOOL_APPROVAL_BINDING_KINDS = {
+    "import_guest_export": "guest-export-import",
+    "run_command": "sandbox-run-command",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,10 +161,14 @@ class JsonlAuditSink:
                 response_metadata["usage"] = response.usage.model_dump()
             payload["model_response"] = response_metadata
         if event.tool_call is not None:
-            payload["tool"] = {
+            tool_payload: dict[str, Any] = {
                 "name": safe_tool_name(event.tool_call.name),
                 "argument_count": len(event.tool_call.arguments),
             }
+            binding_kind = TOOL_APPROVAL_BINDING_KINDS.get(event.tool_call.name)
+            if binding_kind is not None:
+                tool_payload["approval_binding_kind"] = binding_kind
+            payload["tool"] = tool_payload
         if event.tool_result is not None:
             payload["tool_result"] = {
                 "is_error": event.tool_result.is_error,

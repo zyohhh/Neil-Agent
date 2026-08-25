@@ -86,6 +86,7 @@ export interface LiveApproval {
   request_id: string
   run_id: string
   tool_name: string
+  binding_kind: 'generic-tool' | 'sandbox-run-command' | 'guest-export-import'
   preview: string
   created_at: string
   expires_at: string

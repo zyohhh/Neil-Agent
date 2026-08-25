@@ -15,6 +15,7 @@ from neil_agent.sandbox import (
     RunSpec,
     SandboxCertification,
     SandboxPolicy,
+    SandboxResult,
     WindowsSandboxBackend,
 )
 from neil_agent.sandbox_runtime import (
@@ -164,6 +165,52 @@ def test_run_command_is_registered_only_when_ready_and_discards_changes(
     assert preview.is_error is False
     assert executed.is_error is False
     assert json.loads(executed.content)["guest_modifications"] == "discarded"
+
+
+def test_run_command_stages_declared_guest_export_for_import(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    from neil_agent.tools.filesystem import FileSystemTools
+    from neil_agent.tools.guest_import import GuestExportImportTools
+
+    backend, _ = _backend(tmp_path)
+    stub_backend = MagicMock(wraps=backend)
+    stub_backend.run.return_value = SandboxResult(
+        backend="windows-sandbox",
+        termination_reason="succeeded",
+        exit_code=0,
+        stdout="ok",
+        run_id="c" * 32,
+        request_hash="d" * 64,
+        certification_sha256="b" * 64,
+        exported_files=(("out/result.txt", b"exported\n"),),
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "tool.exe").write_bytes(b"tool")
+    guest_import = GuestExportImportTools(FileSystemTools(workspace))
+    registry = ToolRegistry()
+    tools = SandboxCommandTools(workspace, stub_backend, guest_import=guest_import)
+    assert tools.register_if_ready(registry) is True
+    call = ToolCall(
+        id="call-export",
+        name="run_command",
+        arguments={
+            "executable": "tool.exe",
+            "argv": ["--write"],
+            "export_paths": ["out/result.txt"],
+        },
+    )
+    preview = registry.preview(call)
+    executed = registry.execute(
+        call,
+        approved=True,
+        approved_preview=preview.content,
+    )
+    payload = json.loads(executed.content)
+    assert payload["guest_modifications"] == "exported-for-import"
+    digest = payload["guest_export"]["staged_import_manifest_sha256"]
+    assert guest_import._require_staged(digest)[1]["out/result.txt"] == b"exported\n"
 
 
 def test_backend_rejects_certification_rotation_after_approval(tmp_path: Path) -> None:

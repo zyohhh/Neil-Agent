@@ -32,6 +32,7 @@ CONSUMED_DIRECTORY = "consumed"
 APPROVAL_RECORD_VERSION: Literal[2] = 2
 GENERIC_APPROVAL_BINDING_KIND: Literal["generic-tool"] = "generic-tool"
 SANDBOX_APPROVAL_BINDING_KIND: Literal["sandbox-run-command"] = "sandbox-run-command"
+GUEST_EXPORT_IMPORT_BINDING_KIND: Literal["guest-export-import"] = "guest-export-import"
 GENERIC_APPROVAL_BINDING_VERSION: Literal[1] = 1
 APPROVAL_TTL = timedelta(minutes=15)
 MAX_APPROVAL_PREVIEW_CHARS = 30_000
@@ -40,7 +41,11 @@ MAX_PENDING_APPROVALS = 100
 MAX_CONSUMED_APPROVALS = 1_000
 CONSUMED_APPROVAL_RETENTION = timedelta(days=1)
 ApprovalMode = Literal["request", "approve"]
-ApprovalBindingKind = Literal["generic-tool", "sandbox-run-command"]
+ApprovalBindingKind = Literal[
+    "generic-tool",
+    "sandbox-run-command",
+    "guest-export-import",
+]
 ApprovalRequestHandler = Callable[["ApprovalRequest"], None]
 InstructionProvider = Callable[[], str]
 
@@ -53,6 +58,9 @@ class ApprovalBinding(BaseModel):
     kind: ApprovalBindingKind
     version: StrictInt = Field(ge=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+ApprovalBindingResolver = Callable[[ToolCall, str], ApprovalBinding | None]
 
 
 class ApprovalRequest(BaseModel):
@@ -567,6 +575,7 @@ class NoninteractiveApprovalBroker:
         instructions: InstructionProvider,
         request_handler: ApprovalRequestHandler,
         approval_id: str | None = None,
+        binding_resolver: ApprovalBindingResolver | None = None,
     ) -> None:
         if mode == "request" and approval_id is not None:
             raise ApprovalError("生成审批请求时不能同时提供 approval ID。")
@@ -577,6 +586,7 @@ class NoninteractiveApprovalBroker:
         self._prompt = prompt
         self._instructions = instructions
         self._request_handler = request_handler
+        self._binding_resolver = binding_resolver
         self._expected = (
             store.claim(approval_id, prompt=prompt) if approval_id is not None else None
         )
@@ -593,6 +603,11 @@ class NoninteractiveApprovalBroker:
 
     def __call__(self, call: ToolCall, preview: str) -> bool:
         instructions = self._instructions()
+        binding = (
+            self._binding_resolver(call, preview)
+            if self._binding_resolver is not None
+            else None
+        )
         expected = self._expected
         if (
             self._mode == "approve"
@@ -605,6 +620,7 @@ class NoninteractiveApprovalBroker:
                 preview,
                 prompt=self._prompt,
                 instructions=instructions,
+                binding=binding,
             ):
                 self._consumed_request_id = expected.approval_id
                 return True
@@ -614,6 +630,7 @@ class NoninteractiveApprovalBroker:
             call,
             preview,
             instructions=instructions,
+            binding=binding,
         )
         if fingerprint not in self._requests:
             request = self._store.create(
@@ -621,6 +638,7 @@ class NoninteractiveApprovalBroker:
                 preview,
                 prompt=self._prompt,
                 instructions=instructions,
+                binding=binding,
             )
             self._requests[fingerprint] = request
             self._request_handler(request)

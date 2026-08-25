@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 from ..errors import SandboxError, ToolError
 from ..sandbox import (
@@ -17,17 +18,23 @@ from ..sandbox import (
     RunSpec,
     WindowsSandboxBackend,
 )
+from ..sandbox_export import GuestExportError, build_guest_export_manifest
+from ..sandbox_export_collect import normalize_export_paths
 from ..sandbox_guest import MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS
 from ..sandbox_snapshot import prepare_snapshot
-from ..schemas import ToolDefinition
+from ..schemas import ToolCall, ToolDefinition
 from .registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from .guest_import import GuestExportImportTools
 
 RUN_COMMAND = ToolDefinition(
     name="run_command",
     description=(
         "Run one explicit .exe plus argv in a certified, network-disabled "
-        "Windows Sandbox over a read-only workspace snapshot. Guest changes "
-        "are always discarded."
+        "Windows Sandbox over a read-only workspace snapshot. Optional "
+        "export_paths declare workspace-relative UTF-8 files the guest may "
+        "write under the export root for a follow-up import_guest_export."
     ),
     input_schema={
         "type": "object",
@@ -41,6 +48,14 @@ RUN_COMMAND = ToolDefinition(
                 "items": {"type": "string"},
                 "maxItems": MAX_ARGUMENTS,
                 "description": "Argument vector; no shell command string.",
+            },
+            "export_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional workspace-relative UTF-8 files the guest may "
+                    "export for later import."
+                ),
             },
         },
         "required": ["executable", "argv"],
@@ -57,6 +72,7 @@ class SandboxCommandTools:
         workspace_root: Path,
         backend: WindowsSandboxBackend,
         *,
+        guest_import: GuestExportImportTools | None = None,
         timeout_seconds: float = 120.0,
         max_output_bytes: int = 20_000,
     ) -> None:
@@ -67,6 +83,7 @@ class SandboxCommandTools:
         if not self._workspace.is_dir():
             raise ValueError("sandbox command workspace must be a directory")
         self._backend = backend
+        self._guest_import = guest_import
         self._limits = SandboxLimits(
             timeout_seconds=min(timeout_seconds, MAX_TIMEOUT_MS / 1_000),
             max_output_bytes=max(
@@ -85,11 +102,37 @@ class SandboxCommandTools:
             self.run_command,
             requires_approval=True,
             preview_handler=self.preview_run_command,
+            binding_resolver=self.resolve_approval_binding,
         )
         return True
 
-    def preview_run_command(self, executable: str, argv: list[str]) -> str:
-        with self._prepared_spec(executable, argv) as spec:
+    def resolve_approval_binding(self, call: ToolCall, _preview: str):
+        from ..approval import ApprovalBinding
+
+        executable = call.arguments.get("executable")
+        argv = call.arguments.get("argv")
+        export_paths = _export_paths_argument(call.arguments.get("export_paths"))
+        if not isinstance(executable, str) or not isinstance(argv, list):
+            raise ToolError("run_command 参数无效。")
+        try:
+            with self._prepared_spec(executable, argv, export_paths) as spec:
+                cli_executable = self._backend._require_certified_cli()
+                material = self._backend._load_runtime(cli_executable)
+                _manifest, _snapshot, _executable, binding = (
+                    self._backend._execution_binding(spec, material)
+                )
+        except SandboxError as error:
+            raise ToolError("Windows Sandbox 命令审批绑定不可用。") from error
+        approval_binding: ApprovalBinding = binding.approval_binding
+        return approval_binding
+
+    def preview_run_command(
+        self,
+        executable: str,
+        argv: list[str],
+        export_paths: list[str] | None = None,
+    ) -> str:
+        with self._prepared_spec(executable, argv, export_paths) as spec:
             try:
                 preview = self._backend.preview(spec)
             except (SandboxError, ValueError) as error:
@@ -97,8 +140,13 @@ class SandboxCommandTools:
         self._latest_preview = preview
         return preview
 
-    def run_command(self, executable: str, argv: list[str]) -> str:
-        with self._prepared_spec(executable, argv) as spec:
+    def run_command(
+        self,
+        executable: str,
+        argv: list[str],
+        export_paths: list[str] | None = None,
+    ) -> str:
+        with self._prepared_spec(executable, argv, export_paths) as spec:
             try:
                 current_preview = self._backend.preview(spec)
                 if self._latest_preview != current_preview:
@@ -115,16 +163,42 @@ class SandboxCommandTools:
                 ) from error
             finally:
                 self._latest_preview = None
+        payload: dict[str, object] = {
+            "backend": result.backend,
+            "termination_reason": result.termination_reason,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "elapsed_seconds": result.elapsed_seconds,
+            "guest_modifications": (
+                "exported-for-import" if result.exported_files else "discarded"
+            ),
+        }
+        if result.exported_files:
+            if (
+                self._guest_import is None
+                or result.run_id is None
+                or result.request_hash is None
+                or result.certification_sha256 is None
+            ):
+                raise ToolError("guest export 导入暂存不可用。")
+            manifest = build_guest_export_manifest(
+                run_id=result.run_id,
+                request_hash=result.request_hash,
+                certification_sha256=result.certification_sha256,
+                files=result.exported_files,
+            )
+            digest = self._guest_import.stage(
+                manifest,
+                dict(result.exported_files),
+            )
+            payload["guest_export"] = {
+                "manifest_sha256": manifest.manifest_sha256,
+                "file_count": len(result.exported_files),
+                "staged_import_manifest_sha256": digest,
+            }
         return json.dumps(
-            {
-                "backend": result.backend,
-                "termination_reason": result.termination_reason,
-                "exit_code": result.exit_code,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "elapsed_seconds": result.elapsed_seconds,
-                "guest_modifications": "discarded",
-            },
+            payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -135,9 +209,11 @@ class SandboxCommandTools:
         self,
         executable: str,
         argv: list[str],
+        export_paths: list[str] | None = None,
     ) -> Iterator[RunSpec]:
         relative = _validate_executable(executable)
         arguments = _validate_argv(argv)
+        declared_exports = _export_paths_argument(export_paths)
         try:
             with TemporaryDirectory(prefix="neil-agent-command-snapshot-") as temporary:
                 destination = Path(temporary).resolve(strict=True) / "snapshot"
@@ -157,11 +233,19 @@ class SandboxCommandTools:
                         ),
                         limits=self._limits,
                         workspace_snapshot=snapshot.root,
+                        export_paths=declared_exports,
                     )
         except ToolError:
             raise
         except (OSError, SandboxError, ValueError) as error:
             raise ToolError("无法建立安全、只读的命令工作区快照。") from error
+
+
+def _export_paths_argument(value: object) -> tuple[str, ...]:
+    try:
+        return normalize_export_paths(value)
+    except GuestExportError as error:
+        raise ToolError(str(error)) from error
 
 
 def _validate_executable(value: str) -> PureWindowsPath:

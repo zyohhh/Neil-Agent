@@ -14,6 +14,7 @@ from typing import Any, Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..agent import Agent
+from ..approval import GENERIC_APPROVAL_BINDING_KIND
 from ..config import Settings
 from ..errors import SessionError
 from ..events import EventBus, RuntimeEvent
@@ -864,10 +865,15 @@ class WorkbenchController:
         cancel: Event,
     ) -> bool:
         now = self._now()
+        binding = self._service.registry.resolve_approval_binding(call, preview)
+        binding_kind = (
+            binding.kind if binding is not None else GENERIC_APPROVAL_BINDING_KIND
+        )
         request = ApprovalRequestDto(
             request_id=f"approval-{secrets.token_hex(16)}",
             run_id=run_id,
             tool_name=call.name[:128],
+            binding_kind=binding_kind,
             preview=preview[:30_000],
             created_at=now,
             expires_at=now + APPROVAL_TTL,

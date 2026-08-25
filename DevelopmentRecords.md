@@ -1478,8 +1478,38 @@ CLI 展示修改预览并等待用户输入 y/yes
 ### Guest export manifest（预览阶段）
 
 - 新增 `sandbox_export.py`：`GuestExportManifest` v1、工作区相对路径校验、敏感/越界拒绝、自哈希 manifest 与无正文预览文案。
-- 本阶段仅生成审批用 manifest，不写回工作区；导入事务与 `run_command` 集成留待认证后下一批。
+- 本阶段仅生成审批用 manifest；导入事务见同日的「Guest Export 导入事务」条目。
 
 ### 验证
 
 - `tests/test_sandbox_export.py` 覆盖 digest 绑定、预览不泄漏正文与路径拒绝规则。
+
+## 2026-08-25：Guest Export 导入事务
+
+### 导入事务
+
+- `sandbox_approval.py`：新增 `GuestExportImportBinding`（`guest-export-import` 审批种类），绑定 run、certification、manifest 与逐文件 digest。
+- `sandbox_export.py`：新增 `PreparedGuestExportImport` / `PreparedGuestExportImportEntry` 与有界 diff 预览拼装。
+- `tools/filesystem.py`：`prepare_guest_export_import()` / `apply_guest_export_import()` — 预览后复核工作区、UTF-8 校验、原子写入、失败回滚。
+
+### 验证
+
+- `tests/test_guest_export_import.py` 覆盖审批绑定稳定性、新建/替换、非 UTF-8 拒绝、批准后竞态拒绝与部分失败回滚。
+
+### 工具与非交互接入
+
+- 新增 `tools/guest_import.py`：`import_guest_export` 工具、`stage()` 暂存认证产物、二次批准预览/应用与 `guest-export-import` 审批绑定解析。
+- `ToolRegistry` / `NoninteractiveApprovalBroker` 支持按工具解析审批绑定；`run_command` 同步接入 `sandbox-run-command` 绑定。
+- 审计日志在 `import_guest_export` / `run_command` 工具事件上记录 `approval_binding_kind`（仅元数据）。
+- `evals/tasks.json` 新增 `guest-export-import-approval` 离线场景。
+
+### run_command 声明式导出
+
+- `run_command` 新增可选 `export_paths`；审批绑定、RunSpec 与 WsbExecutionPlan 同步携带声明路径。
+- `sandbox_export_collect.py` 在 sealed export 根目录收集**仅**声明文件并拒绝未知项。
+- 命令成功后自动 `build_guest_export_manifest` + `guest_import.stage()`，JSON 结果返回 `guest_export.manifest_sha256` 供 `import_guest_export` 二次批准。
+
+### Web 与非交互审批元数据
+
+- `ApprovalRequestDto` 与 v2 `approval_requests` 条目新增 `binding_kind`（`generic-tool` / `sandbox-run-command` / `guest-export-import`）。
+- Web Workbench 审批卡片展示绑定种类标签；`tests/test_web_workbench.py` 覆盖 guest import 绑定投影。
