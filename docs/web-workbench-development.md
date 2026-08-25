@@ -701,7 +701,9 @@ P2 的 Agent 只注册 bounded read-only filesystem/Git 工具和内存 task-pla
 
 ### P3：逐工具 Web 审批
 
-状态：已于 `feature/web-workbench` 完成。P3 将文件写入、固定质量命令和 Git 写操作注册为现有 `ToolRegistry` 的 approval-required 工具，并把 `Agent` 的同步 approval handler 接到 `WorkbenchController` 的条件变量。每次只允许一个待审批工具；DTO 只返回工具名、有界 preview、随机 request ID、run ID、创建/过期时间和状态，不返回 thinking、环境变量或隐藏工具参数。
+状态：已于 `feature/web-workbench` 完成。P3 将文件写入、固定质量命令和 Git 写操作注册为现有 `ToolRegistry` 的 approval-required 工具，并把 `Agent` 的同步 approval handler 接到 `WorkbenchController` 的条件变量。每次只允许一个待审批工具；DTO 返回工具名、有界 preview、`binding_kind`、随机 request ID、run ID、创建/过期时间和状态，不返回 thinking、环境变量或隐藏工具参数。
+
+`binding_kind` 取值为 `generic-tool`、`sandbox-run-command` 或 `guest-export-import`，用于在 Review 面板区分普通写操作、沙箱命令与 guest 产物导入。解析由 `ToolRegistry.resolve_approval_binding()` 在控制器创建审批请求时完成，与 CLI/非交互 v2 语义一致。Guest 导出导入流程见 [`guest-export-import.md`](guest-export-import.md)。
 
 Approve/Reject 仅接受当前控制租约持有者、当前 request ID 和精确 revision。一个决定只对应一个工具；批准后仍由 `ToolRegistry.execute_approved()` 重新生成 preview 并逐字比对，绑定变化或预览失败不会执行。重复决定、错误 ID、旧 revision、并发标签、五分钟超时、控制客户端断线、主动释放控制、取消 turn 和服务退出均 fail closed。前端 Review 面板显示完整有界预览和明确的 `Approve one tool` / `Reject one tool` 文案，没有聚合应用语义；若配置启用 audit，Web Agent 也沿用现有 metadata-only lifecycle audit sink。
 

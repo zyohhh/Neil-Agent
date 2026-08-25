@@ -174,10 +174,13 @@ ready。workflow 还要求受保护 environment 声明一次性 runner 及其版
 commit 的 `actions/attest` 签署 aggregate，再从 raw transcript、真实 JUnit 和
 构建产物完整重放 bundle。普通开发机可以跳过真实平台用例；skip 绝不产生
 认证。只有 ready 时才条件注册最小 `run_command`，它只接收工作区相对 `.exe`
-与 argv，使用只读禁网快照并丢弃全部 guest 修改，不接受 shell 字符串。
-完整策略、候选边界和开放门禁见
-[`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)，证据格式与审查
-流程见 [`docs/sandbox-certification.md`](docs/sandbox-certification.md)。
+与 argv，使用只读禁网快照。未声明 `export_paths` 时丢弃全部 guest 修改；
+声明后可将 guest 产出的 UTF-8 文件经 manifest 暂存与 `import_guest_export`
+二次批准写回工作区。不接受 shell 字符串。完整流程见
+[`docs/guest-export-import.md`](docs/guest-export-import.md)。策略、候选边界和开放门禁见
+[`docs/sandbox-assessment.md`](docs/sandbox-assessment.md)，证据格式、审查
+流程与手测清单见 [`docs/sandbox-certification.md`](docs/sandbox-certification.md)
+与 [`docs/sandbox-certification-runbook.md`](docs/sandbox-certification-runbook.md)。
 
 离线评测支持单场景和 JSON 报告，也可由 `run_quality_check(eval)` 在受审批的固定命令中运行：
 

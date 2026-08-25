@@ -208,7 +208,8 @@ pins 和有效期；review 最晚在证据完成后 7 天内完成，证书不�
 90 天。默认空 trust 配置必然拒绝。运行时 `ready` 不能由布尔值打开：verifier
 还会将完整 bundle 与当前 commit、源码 manifest、OS/WSB/runner/compiler hashes
 及协议版本重新绑定。只有全部通过才向 `/doctor` 投影 ready 并注册需要逐次审批
-的 `run_command`；该工具只接受相对 `.exe` 和 argv，所有 guest 修改丢弃。
+的 `run_command`；该工具只接收相对 `.exe` 和 argv。未声明 `export_paths` 时
+所有 guest 修改丢弃；声明后可经二次批准的 `import_guest_export` 写回工作区。
 
 ## 开放通用命令前的硬门槛
 
@@ -220,7 +221,6 @@ pins 和有效期；review 最晚在证据完成后 7 天内完成，证书不�
    变化都要求重新批准。
 3. 通用能力只接受 argv，不接受 shell 字符串；只在交互审批或非交互 v2
    request/approve 中暴露，v1 始终只读。
-4. 首版命令修改全部丢弃。若要导入生成结果，必须先扫描有界 diff，再经过
-   第二次审批和现有文件检查点机制。
+4. 首版未声明 `export_paths` 时命令修改全部丢弃。若需导入 guest 生成结果，须调用前声明路径、经 manifest 暂存，并通过 `import_guest_export` 第二次审批与原子写入；见 [`guest-export-import.md`](guest-export-import.md)。
 5. 任一平台门禁没有通过时继续使用固定命令白名单，不增加
    `run_shell(command: str)`。
