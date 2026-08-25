@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from ..config import Settings
+from ..context_projection import build_host_context_tomography
 from ..errors import SessionError, ToolError
 from ..host_runtime import HostMode, build_host_runtime, observe_host_security
 from ..providers.factory import describe_provider
@@ -107,9 +108,7 @@ class WorkbenchSnapshotService:
             timeout=min(settings.command_timeout, 5.0),
             max_output_chars=max(settings.max_command_output_chars, 1_000),
         )
-        security_runtime = build_host_runtime(settings, mode=HostMode.WEB)
-        self._security_registry = security_runtime.registry
-        self._security_audit_sink = security_runtime.audit_sink
+        self._host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
 
     @property
     def session_store(self) -> SessionStore:
@@ -299,10 +298,10 @@ class WorkbenchSnapshotService:
         capabilities = provider.capabilities
         security = observe_host_security(
             settings,
-            self._security_registry,
+            self._host_runtime.registry,
             audit_probe=(
-                self._security_audit_sink.inspect
-                if self._security_audit_sink is not None
+                self._host_runtime.audit_sink.inspect
+                if self._host_runtime.audit_sink is not None
                 else None
             ),
         )
@@ -333,7 +332,7 @@ class WorkbenchSnapshotService:
             sessions=sessions,
             files=self.files(depth=2),
             task=self._task(selected),
-            context=self._context(selected, settings),
+            context=self.context_dto(selected, settings),
             review=review,
             security=SecurityDto(
                 sandbox_backend=settings.sandbox_backend,
@@ -371,23 +370,20 @@ class WorkbenchSnapshotService:
             ),
         )
 
-    def _context(
+    def context_dto(
         self,
-        latest: SessionSnapshot | None,
+        session: SessionSnapshot | None,
         settings: Settings,
     ) -> ContextDto:
-        usage = None if latest is None else latest.last_usage
-        if usage is None:
-            return ContextDto(
-                source="unavailable", limit_tokens=settings.max_context_tokens
-            )
-        return ContextDto(
-            source="server_reported",
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-            limit_tokens=settings.max_context_tokens,
+        messages = () if session is None else session.messages
+        usage = None if session is None else session.last_usage
+        tomography = build_host_context_tomography(
+            settings,
+            self._host_runtime,
+            messages,
+            last_server_usage=usage,
         )
+        return ContextDto.from_tomography(tomography)
 
     def _review_from(
         self,

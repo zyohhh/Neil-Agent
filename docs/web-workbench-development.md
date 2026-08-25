@@ -594,7 +594,7 @@ EventBus 是有界的，观察者可能丢事件。因此 Web 层必须把“发
 | 计划 | `TaskTracker.steps` | 只读展示 | 计划编辑不在首版 |
 | Test | `QualityCheckRecord` | 展示命令名、状态和有界输出 | 多检查历史 |
 | Changed files | Git porcelain/diff numstat 的新只读适配 | 有界列表和统计 | rename/conflict/submodule 完整语义 |
-| Context | `ContextTomography` + `TokenUsage` | 显示本地估算与服务端实测的区别 | Provider 上下文上限元数据 |
+| Context | `ContextTomography` + `TokenUsage` | 五层本地估算 + 服务端 usage + 压力 | Provider 上下文上限元数据、what-if UI |
 | Cost | 无 | 显示 unavailable，不显示 `$0.00` | 版本化费率表和缓存 token 规则 |
 | Approval | 现有逐工具审批 | 单请求 Approve/Reject | 不承诺 aggregate apply |
 | Terminal | 无 PTY | Output 面板 | 独立安全设计后再评估 |

@@ -1437,3 +1437,14 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 最高优先级仍是在专用 Windows runner 完成三轮强制 workflow、独立 review 与
   运行时认证；认证后再推进 guest 产物导出和二次批准导入。Time Machine Phase 3B
   继续保持延后与只读边界。
+
+## 2026-08-25：Web ContextTomography 快照投影
+
+### 运行时
+
+- 新增 `context_projection.py`：`build_host_context_tomography()` 复用 Agent 上下文选择规则。
+- `ContextDto.from_tomography()` 投影五层估算、压力、检查点状态与服务端 usage；`WorkbenchSnapshotService.context_dto()` 供快照与 `model_changed` 等事件共用。
+
+### 验证
+
+- `tests/test_context_projection.py` 与 `tests/test_web_workbench.py` 覆盖层序、无正文泄漏与快照一致性。

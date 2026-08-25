@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    from ..context import ContextTomography
 
 
 class WorkbenchDto(BaseModel):
@@ -162,12 +165,114 @@ class TaskDto(WorkbenchDto):
     steps: tuple[TaskStepDto, ...] = Field(default=(), max_length=5)
 
 
+class ContextLayerDto(WorkbenchDto):
+    kind: Literal[
+        "system",
+        "tool_schemas",
+        "project_instructions",
+        "selected_history",
+        "current_chain",
+    ]
+    chars: int = Field(ge=0)
+    estimated_tokens: int = Field(ge=0)
+    item_count: int = Field(ge=0, le=10_000)
+
+
+class ContextPressureDto(WorkbenchDto):
+    level: Literal["safe", "warning", "critical", "exceeded"]
+    limiting_dimension: Literal["characters", "tokens"]
+    character_basis_points: int = Field(ge=0)
+    token_basis_points: int | None = Field(default=None, ge=0)
+    character_headroom: int = Field(ge=0)
+    token_headroom: int | None = Field(default=None, ge=0)
+
+
+class ContextToolFootprintDto(WorkbenchDto):
+    ordinal: int = Field(ge=1, le=10_000)
+    chars: int = Field(ge=0)
+    estimated_tokens: int = Field(ge=0)
+    state: Literal["kept", "omitted"]
+
+
 class ContextDto(WorkbenchDto):
-    source: Literal["server_reported", "unavailable"]
+    source: Literal["local_estimate", "unavailable"]
+    tomography_schema_version: Literal[2] = 2
+    budget_chars: int | None = Field(default=None, ge=1)
+    limit_tokens: int | None = Field(default=None, ge=1_000)
+    estimated_chars: int | None = Field(default=None, ge=0)
+    estimated_tokens: int | None = Field(default=None, ge=0)
+    stored_rounds: int | None = Field(default=None, ge=0, le=10_000)
+    selected_rounds: int | None = Field(default=None, ge=0, le=10_000)
+    omitted_rounds: int | None = Field(default=None, ge=0, le=10_000)
+    stored_history_chars: int | None = Field(default=None, ge=0)
+    omitted_history_chars: int | None = Field(default=None, ge=0)
+    checkpoint_state: Literal["none", "kept", "omitted"] | None = None
+    layers: tuple[ContextLayerDto, ...] = Field(default=(), max_length=5)
+    pressure: ContextPressureDto | None = None
+    largest_tool_footprint: ContextToolFootprintDto | None = None
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
-    limit_tokens: int | None = Field(default=None, ge=1_000)
+
+    @classmethod
+    def from_tomography(cls, tomography: ContextTomography) -> ContextDto:
+        """Map one ContextTomography snapshot into the Web Workbench context DTO."""
+
+        from ..context import ContextTomography as ObservedTomography
+        from ..context import context_budget_pressure
+
+        if not isinstance(tomography, ObservedTomography):
+            raise ValueError("context tomography observation is invalid")
+        pressure = context_budget_pressure(tomography)
+        largest = (
+            tomography.tool_results.largest[0]
+            if tomography.tool_results.largest
+            else None
+        )
+        usage = tomography.last_server_usage
+        return cls(
+            source="local_estimate",
+            budget_chars=tomography.budget_chars,
+            limit_tokens=tomography.budget_tokens,
+            estimated_chars=tomography.estimated_chars,
+            estimated_tokens=tomography.estimated_tokens,
+            stored_rounds=tomography.stored_rounds,
+            selected_rounds=tomography.selected_rounds,
+            omitted_rounds=tomography.omitted_rounds,
+            stored_history_chars=tomography.stored_history_chars,
+            omitted_history_chars=tomography.omitted_history_chars,
+            checkpoint_state=tomography.checkpoint_state,
+            layers=tuple(
+                ContextLayerDto(
+                    kind=layer.kind,
+                    chars=layer.chars,
+                    estimated_tokens=layer.estimated_tokens,
+                    item_count=layer.item_count,
+                )
+                for layer in tomography.layers
+            ),
+            pressure=ContextPressureDto(
+                level=pressure.level,
+                limiting_dimension=pressure.limiting_dimension,
+                character_basis_points=pressure.character_basis_points,
+                token_basis_points=pressure.token_basis_points,
+                character_headroom=pressure.character_headroom,
+                token_headroom=pressure.token_headroom,
+            ),
+            largest_tool_footprint=(
+                None
+                if largest is None
+                else ContextToolFootprintDto(
+                    ordinal=largest.ordinal,
+                    chars=largest.chars,
+                    estimated_tokens=largest.estimated_tokens,
+                    state=largest.state,
+                )
+            ),
+            input_tokens=None if usage is None else usage.input_tokens,
+            output_tokens=None if usage is None else usage.output_tokens,
+            total_tokens=None if usage is None else usage.total_tokens,
+        )
 
 
 class QualityCheckDto(WorkbenchDto):

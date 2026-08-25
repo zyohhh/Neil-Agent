@@ -40,6 +40,7 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | ✅ 选择、恢复、成功后原子保存 |
 | 进程内模型切换 | ❌ 启动配置 | ❌ 启动配置 | ❌ 启动配置 | ✅ 同 Provider 显式白名单、idle + 空会话 |
 | Security Shield 投影 | ✅ `/cockpit` | ❌（无对应 UI） | ❌（无对应 UI） | ✅ 与 CLI 共用观察函数 |
+| ContextTomography 投影 | ✅ `/context`、驾驶舱 | ❌（无对应 UI） | ❌（无对应 UI） | ✅ 快照 `context` DTO（与 Agent 同源） |
 
 Web 与 CLI 的沙箱注册、指令 `cwd` 作用域、会话连续性和安全投影现已对齐。入口仍保留各自的交互语义：CLI 长驻一个 Agent；Web 每个 turn 构造隔离的 Agent，再从控制器选中的严格快照恢复，且只在成功完成后保存。P9 的模型选择是 Web Controller 能力，不进入共享工具装配：它只替换下一 turn 使用的不可变 `Settings` 与 `AgentTurnWorker`，而 `build_host_runtime()` 仍按该 turn 捕获的设置装配相同安全边界。
 
@@ -88,6 +89,7 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | Web 会话 load/save | ✅ |
 | Web idle-only 同 Provider 模型切换 | ✅ |
 | CLI / Web 共用 Security Shield 观察 | ✅ |
+| Web ContextTomography 快照投影 | ✅ |
 | 跨入口 parity 回归测试 | ✅ `tests/test_host_runtime.py` |
 
 ## 相关文档

@@ -170,7 +170,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - `new_session` / `select_session` 受控制租约、精确 revision 与 idle 状态约束；跨 Provider/模型私有状态在发网前拒绝，消息正文不进入浏览器快照或 `session_changed` 事件。
 - `switch_model` 只接受 `WEB_RUNTIME_MODEL_ALLOWLIST` 中同一启动 Provider 的精确模型 ID，并且仅在控制端、revision 匹配、无运行/审批且活动会话为空并未保存时生效。事务先重建并校验完整 `Settings` 与下一 turn worker，再一次性替换运行时；准备失败保持旧模型，切换本身不发送网络请求。
 - 会话版本 5 保存可选 Provider/模型绑定。Web 成功 turn 必须写入绑定；已绑定会话只能由完全相同的运行时恢复和续写。进程内发生过模型切换后，含历史但没有绑定的旧会话 fail closed，不能借 `select_session` 绕过空会话门禁。
-- Web 与 CLI 共用 `observe_host_security()`；条件 `run_command`、应用工具边界、OS 沙箱和审计状态使用同一注册与观察语义。详见 [`host-runtime.md`](host-runtime.md)。
+- Web 与 CLI 共用 `observe_host_security()`；条件 `run_command`、应用工具边界、OS 沙箱和审计状态使用同一注册与观察语义。Web 快照通过 `build_host_context_tomography()` 投影与 Agent `/context` 同源的 `ContextTomography` 元数据。详见 [`host-runtime.md`](host-runtime.md)。
 
 ## 上下文预算
 

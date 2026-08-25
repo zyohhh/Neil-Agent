@@ -18,6 +18,7 @@ from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from neil_agent.config import Settings
+from neil_agent.host_runtime import build_host_runtime
 from neil_agent.errors import SessionError
 from neil_agent.events import RuntimeEventFactory
 from neil_agent.schemas import ActivityEvent, Message, TokenUsage
@@ -361,8 +362,26 @@ def test_health_is_generic_and_snapshot_requires_one_time_bootstrap(
         security["direct_tool_count"] + security["approval_tool_count"]
     )
     assert snapshot.json()["active_session"]["persistence_status"] == "unsaved"
+    context = snapshot.json()["context"]
+    assert context["source"] == "local_estimate"
+    assert context["tomography_schema_version"] == 2
+    assert len(context["layers"]) == 5
+    assert context["pressure"]["level"] == "safe"
     assert "not-exposed" not in snapshot.text
     assert str(tmp_path.resolve()) not in snapshot.text
+
+
+def test_snapshot_context_matches_service_projection(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    expected = service.context_dto(None, settings).model_dump(mode="json")
+
+    client = _client(tmp_path)
+    _authenticate(client)
+    snapshot = client.get("/api/v1/snapshot")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["context"] == expected
 
 
 def test_snapshot_refreshes_observed_security_state(
@@ -506,7 +525,10 @@ def test_snapshot_projects_saved_metadata_without_message_or_quality_bodies(
     assert payload["task"]["steps"] == [
         {"title": "Inspect metadata", "status": "completed"}
     ]
+    assert payload["context"]["source"] == "local_estimate"
     assert payload["context"]["total_tokens"] == 150
+    assert payload["context"]["estimated_tokens"] is not None
+    assert len(payload["context"]["layers"]) == 5
     assert payload["review"]["quality_check"] == {
         "check": "pytest",
         "status": "passed",

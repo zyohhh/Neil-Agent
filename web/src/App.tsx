@@ -488,20 +488,39 @@ function LiveTimeline({ steps }: { steps: LiveRuntimeStep[] }) {
 }
 
 function ContextGauge({ liveSnapshot }: { liveSnapshot: WorkbenchSnapshotV1 | null }) {
-  const totalTokens = liveSnapshot ? (liveSnapshot.context.total_tokens ?? 0) : 142_000
-  const limitTokens = liveSnapshot ? liveSnapshot.context.limit_tokens : 200_000
-  const hasLiveUsage = Boolean(liveSnapshot && liveSnapshot.context.source === 'server_reported' && liveSnapshot.context.total_tokens !== null)
+  const context = liveSnapshot?.context
+  const hasServerUsage = Boolean(context && context.total_tokens !== null)
+  const hasLocalEstimate = Boolean(
+    context && context.source === 'local_estimate' && context.estimated_tokens !== null,
+  )
+  const totalTokens = hasServerUsage
+    ? (context!.total_tokens ?? 0)
+    : hasLocalEstimate
+      ? (context!.estimated_tokens ?? 0)
+      : liveSnapshot
+        ? 0
+        : 142_000
+  const limitTokens = context?.limit_tokens ?? (liveSnapshot ? null : 200_000)
   const progressMax = limitTokens ?? Math.max(totalTokens, 1)
-  const progressPercent = hasLiveUsage || !liveSnapshot ? Math.min((totalTokens / progressMax) * 100, 100) : 0
+  const progressPercent = hasServerUsage || hasLocalEstimate || !liveSnapshot
+    ? Math.min((totalTokens / progressMax) * 100, 100)
+    : 0
+  const usageLabel = hasServerUsage
+    ? 'Last server-reported token usage'
+    : hasLocalEstimate
+      ? 'Local context estimate'
+      : liveSnapshot
+        ? 'Context usage unavailable'
+        : 'Fixture context usage'
   return (
-    <div className="context-gauge" role="progressbar" aria-label={hasLiveUsage ? 'Last server-reported token usage' : liveSnapshot ? 'Context usage unavailable' : 'Fixture context usage'} aria-valuemin={0} aria-valuemax={progressMax} aria-valuenow={hasLiveUsage || !liveSnapshot ? totalTokens : undefined}>
+    <div className="context-gauge" role="progressbar" aria-label={usageLabel} aria-valuemin={0} aria-valuemax={progressMax} aria-valuenow={hasServerUsage || hasLocalEstimate || !liveSnapshot ? totalTokens : undefined}>
       <svg viewBox="0 0 160 94" aria-hidden="true">
         <path className="gauge-track" d="M18 80a62 62 0 0 1 124 0" pathLength="100" />
         <path className="gauge-value" d="M18 80a62 62 0 0 1 124 0" pathLength="100" strokeDasharray={`${progressPercent} 100`} />
       </svg>
       <span>
-        <strong>{hasLiveUsage ? totalTokens.toLocaleString() : liveSnapshot ? 'Unavailable' : '142K'}</strong>
-        <small>{hasLiveUsage ? (limitTokens ? `/ ${limitTokens.toLocaleString()}` : 'last saved run') : liveSnapshot ? 'No saved usage' : '/ 200K fixture'}</small>
+        <strong>{hasServerUsage || hasLocalEstimate ? totalTokens.toLocaleString() : liveSnapshot ? 'Unavailable' : '142K'}</strong>
+        <small>{hasServerUsage ? (limitTokens ? `/ ${limitTokens.toLocaleString()}` : 'last saved run') : hasLocalEstimate ? (limitTokens ? `/ ${limitTokens.toLocaleString()} est.` : 'local estimate') : liveSnapshot ? 'No context estimate' : '/ 200K fixture'}</small>
       </span>
     </div>
   )
