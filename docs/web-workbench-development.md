@@ -515,7 +515,7 @@ start_turn
 cancel_turn
 approve_tool
 reject_tool
-set_model_for_next_turn
+set_model_for_next_turn   # 实现名为 switch_model
 ping
 ```
 
@@ -552,7 +552,7 @@ session_changed
 service_closing
 ```
 
-`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期；`session_changed` 只投影活动会话摘要、会话列表、任务、usage、review 与有界运行状态，不发送消息正文或 Provider 私有状态。`new_session` 与 `select_session` 已实现，`set_model_for_next_turn` 仍未实现。
+`command_result` 同步返回命令接受/拒绝结果；`run_state` 表达 turn 生命周期；`session_changed` 只投影活动会话摘要、会话列表、任务、usage、review 与有界运行状态，不发送消息正文或 Provider 私有状态。`new_session`、`select_session` 与 `switch_model`（设计草案中的 `set_model_for_next_turn`）已实现。
 
 ### 11.6 重连流程
 

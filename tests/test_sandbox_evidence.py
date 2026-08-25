@@ -390,7 +390,28 @@ def _build_complete_bundle(root: Path) -> None:
     (root / "aggregate.attestation.sigstore.json").write_bytes(b"{}")
 
 
-def _collect_junit(junit_path: Path) -> OutcomeSummary:
+def _finalize_certified_bundle(root: Path) -> ReviewTrustPins:
+    bundle = verify_evidence_bundle(
+        root,
+        attestation_verifier=lambda aggregate, attestation, subject: None,
+    )
+    review = _review(bundle.aggregate)
+    pins = ReviewTrustPins(
+        reviewer_ids=frozenset({review.reviewer_id}),
+        review_sha256s=frozenset({review.review_sha256}),
+    )
+    issued_at = bundle.aggregate.evidence_finished_at + timedelta(hours=1)
+    expires_at = issued_at + timedelta(days=30)
+    certification = issue_certification(
+        bundle.aggregate,
+        review,
+        trust_pins=pins,
+        issued_at=issued_at,
+        expires_at=expires_at,
+    )
+    _write_canonical(root / "independent-review.json", review)
+    _write_canonical(root / "certification.json", certification)
+    return pins
     return collect_evidence_run(
         repeat_id="repeat-0",
         execution_nonce="0" * 32,
@@ -1246,6 +1267,36 @@ def test_complete_bundle_rejects_tampered_raw_transcript(tmp_path: Path) -> None
             root,
             attestation_verifier=lambda aggregate, attestation, subject: None,
         )
+
+
+def test_complete_certified_bundle_loads_runtime_certification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from neil_agent.sandbox_runtime import load_runtime_certification
+
+    root = (tmp_path / "bundle").resolve()
+    _build_complete_bundle(root)
+    pins = _finalize_certified_bundle(root)
+    wsb = tmp_path / "wsb.exe"
+    wsb.write_bytes(b"wsb")
+    monkeypatch.setattr(
+        "neil_agent.sandbox_runtime._verify_current_host",
+        lambda *args, **kwargs: None,
+    )
+
+    material = load_runtime_certification(
+        wsb.resolve(),
+        certification_root=root,
+        repository_root=tmp_path,
+        trust_pins=pins,
+        now=_START + timedelta(days=1),
+        attestation_verifier=lambda aggregate, attestation, subject: None,
+    )
+
+    assert material.runner_binary_path.name == "neil-sandbox-runner.exe"
+    assert material.certification.backend == "windows-sandbox"
+    assert material.certification.required_gate_ids == REQUIRED_SECURITY_GATE_IDS
 
 
 def test_junit_collection_distinguishes_skip_xfail_and_xpass(tmp_path: Path) -> None:

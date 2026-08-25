@@ -100,10 +100,12 @@ Object 或 restricted token 单独只能管理生命周期/资源，不能提供
 
 ### 当前 Windows 候选实现边界
 
-仓库现在包含五层彼此约束的候选构件：
+仓库现在包含五层彼此约束的候选构件，并在通过独立审查与运行时认证后可进入
+`ready` 状态：
 
 1. `sandbox.py` 保留平台无关契约、只读探测和 fail-closed 公共边界；
-   `WindowsSandboxBackend.run()` 仍拒绝执行。
+   `WindowsSandboxBackend.run()` 在持有有效 `certification.json` 且 probe
+   为 `ready` 时执行有界 guest 命令。
 2. `sandbox_snapshot.py` 从真实仓库复制过滤后的独立只读快照，生成 canonical
    manifest 与 SHA-256；Windows 遍历期间用不共享 delete 的目录/文件句柄
    阻止 junction、reparse point、硬链接和并发替换。
@@ -127,17 +129,12 @@ Object 或 restricted token 单独只能管理生命周期/资源，不能提供
    结果绑定、租约、输入 manifest 复核或清理确认失败都会拒绝结果，没有宿主
    subprocess fallback。
 
-这些构件的安全保证字符串升级为
-`candidate-restricted-low-integrity-job-not-certified`。固定攻击集现在包括受限令牌/
-完整性级别、runner `OpenProcess` 写权限、结果/control 伪造、SCM、Task Scheduler、
-WMI broker、Job breakaway、聚合 Job 内存、guest tree ready 后取消，以及完整
-生命周期句柄租约。它们仍必须在一次性 Windows 11 Pro/Enterprise 24H2+ WSB
-runner 上重复执行并接受独立审查；本机单元测试和直接 Job 测试不能替代该证据。
-
-真实 `wsb.exe --raw` schema、网络隔离和资源终止语义也尚未在目标平台执行，
-没有可接受的独立安全审查记录。因此候选执行器没有接入
-`WindowsSandboxBackend.run()`、工具注册表或审批执行面，`/doctor` 仍不会
-报告 ready。
+候选执行器在未认证前仍使用
+`candidate-restricted-low-integrity-job-not-certified` 保证字符串；固定攻击集
+必须在一次性 Windows 11 Pro/Enterprise 24H2+ WSB runner 上重复执行并接受
+独立审查。`host_runtime.py` 仅在 probe `ready` 时注册条件 `run_command`；
+`/doctor` 会报告 `ready` 或具体 fail-closed 原因（`cli_executable_required`、
+`certification_required` 等），不会把配置意图冒充为已生效隔离。
 
 目标机器没有可用 Windows Sandbox 组件时，普通平台验收会明确跳过，同时
 诊断报告 `unavailable`。这种跳过不能用于把后端标成 `ready`；设置
