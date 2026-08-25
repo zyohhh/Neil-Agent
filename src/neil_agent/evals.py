@@ -173,6 +173,7 @@ def run_offline_evals(
         "explicit-context-compaction": _eval_compaction,
         "compaction-failure-atomicity": _eval_compaction_failure,
         "retry-approval-session-consistency": _eval_workflow_consistency,
+        "guest-export-import-approval": _eval_guest_export_import_approval,
     }
     results = []
     for task_id in selected_task_ids:
@@ -841,6 +842,109 @@ def _eval_workflow_consistency() -> str:
             "saved tool round could not be restored",
         )
     return "连接异常真实经过重试；拒绝写入后完整工具轮次可恢复"
+
+
+def _eval_guest_export_import_approval() -> str:
+    from io import StringIO
+
+    from neil_agent.host_runtime import HostMode, build_host_runtime
+    from neil_agent.noninteractive import run_noninteractive
+    from neil_agent.sandbox_export import build_guest_export_manifest
+    from neil_agent.schemas import ModelResponse, ToolCall
+
+    with TemporaryDirectory(prefix="neil-agent-eval-import-") as temporary:
+        root = Path(temporary)
+        settings = Settings.model_validate(
+            {
+                "deepseek_api_key": "offline-key",
+                "workspace_root": root,
+            }
+        )
+        runtime = build_host_runtime(settings, mode=HostMode.NONINTERACTIVE_WRITE)
+        assert runtime.guest_import is not None
+        manifest = build_guest_export_manifest(
+            run_id="run-eval",
+            request_hash="d" * 64,
+            certification_sha256="e" * 64,
+            files=(("eval.txt", b"EVAL_IMPORT_OK"),),
+        )
+        digest = runtime.guest_import.stage(manifest, {"eval.txt": b"EVAL_IMPORT_OK"})
+
+        class ImportModel:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete(self, messages, *, system_prompt: str) -> str:
+                del messages, system_prompt
+                return "done"
+
+            def stream(self, messages, *, system_prompt: str, tools=()):
+                del messages, system_prompt, tools
+                self.calls += 1
+                if self.calls == 1:
+                    yield ModelResponse(
+                        tool_calls=(
+                            ToolCall(
+                                id="import-eval",
+                                name="import_guest_export",
+                                arguments={"manifest_sha256": digest},
+                            ),
+                        )
+                    )
+                    return
+                yield "import complete"
+                yield ModelResponse(content="import complete")
+
+        model = ImportModel()
+        request_stdout = StringIO()
+        request_exit = run_noninteractive(
+            settings,
+            "import guest export",
+            output_format="json",
+            stdout=request_stdout,
+            stderr=StringIO(),
+            protocol_version=2,
+            permission_mode="request",
+            llm=model,
+        )
+        request = _parse_json_object(request_stdout.getvalue())
+        _require(request_exit == 3, "request mode did not stop for approval")
+        approvals = request.get("approval_requests")
+        _require(
+            isinstance(approvals, list) and len(approvals) == 1,
+            "request mode did not emit one approval",
+        )
+        approval = approvals[0]
+        _require(
+            isinstance(approval, dict)
+            and approval.get("tool_name") == "import_guest_export"
+            and approval.get("binding_kind") == "guest-export-import",
+            "approval targeted the wrong tool or binding",
+        )
+        approval_id = approval.get("approval_id")
+        _require(isinstance(approval_id, str), "approval id missing")
+
+        approve_stdout = StringIO()
+        approve_exit = run_noninteractive(
+            settings,
+            "import guest export",
+            output_format="json",
+            stdout=approve_stdout,
+            stderr=StringIO(),
+            protocol_version=2,
+            permission_mode="approve",
+            approval_id=approval_id,
+            llm=ImportModel(),
+        )
+        approved = _parse_json_object(approve_stdout.getvalue())
+        _require(approve_exit == 0, "approve mode failed")
+        _require(approved.get("success") is True, "approve result was not successful")
+        target = root / "eval.txt"
+        _require(
+            target.is_file() and target.read_text(encoding="utf-8") == "EVAL_IMPORT_OK",
+            "guest export import did not write the staged file",
+        )
+    return "guest export 二次批准导入在非交互 v2 下完成且绑定正确"
 
 
 def _require(condition: bool, detail: str) -> None:

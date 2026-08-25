@@ -152,6 +152,7 @@ class ProtocolWriter:
         payload: dict[str, object] = {
             "approval_id": request.approval_id,
             "tool_name": request.tool_name,
+            "binding_kind": request.binding_kind,
             "preview": request.preview,
             "expires_at": request.expires_at.isoformat(),
         }
@@ -325,6 +326,7 @@ def run_noninteractive(
                 instructions=lambda: instruction_manager.current.prompt_section(),
                 request_handler=writer.approval_request,
                 approval_id=approval_id,
+                binding_resolver=registry.resolve_approval_binding,
             )
         session_store = SessionStore(filesystem.root)
         session = session_store.new_session()

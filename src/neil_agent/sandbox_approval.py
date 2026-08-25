@@ -16,13 +16,17 @@ from pydantic import (
     Field,
     StrictInt,
     StrictStr,
+    field_validator,
     model_validator,
 )
 
 from .approval import (
+    GUEST_EXPORT_IMPORT_BINDING_KIND,
     SANDBOX_APPROVAL_BINDING_KIND,
     ApprovalBinding,
 )
+from .sandbox_export import MAX_EXPORT_FILES
+from .sandbox_export_collect import normalize_export_paths
 from .sandbox_guest import (
     GUEST_PROTOCOL_VERSION,
     GUEST_RUNNER_VERSION,
@@ -83,6 +87,15 @@ class RunCommandApprovalBinding(BaseModel):
         ge=MIN_MEMORY_BYTES,
         le=MAX_JOB_MEMORY_BYTES,
     )
+    export_paths: tuple[StrictStr, ...] = Field(
+        default_factory=tuple,
+        max_length=MAX_EXPORT_FILES,
+    )
+
+    @field_validator("export_paths", mode="before")
+    @classmethod
+    def canonicalize_export_paths(cls, value: object) -> tuple[str, ...]:
+        return normalize_export_paths(value)
 
     @model_validator(mode="after")
     def validate_guest_semantics(self) -> RunCommandApprovalBinding:
@@ -167,6 +180,82 @@ class RunCommandApprovalBinding(BaseModel):
                 f"Active process limit: {self.active_process_limit}",
                 f"Process memory limit (bytes): {self.process_memory_bytes}",
                 f"Job memory limit (bytes): {self.job_memory_bytes}",
+                f"Declared export path count: {len(self.export_paths)}",
+                *(
+                    f"Declared export path {index:02d}: {path}"
+                    for index, path in enumerate(self.export_paths, start=1)
+                ),
                 f"Approval-Binding-SHA256: {self.digest}",
+            )
+        )
+
+
+GUEST_EXPORT_IMPORT_BINDING_VERSION: Literal[1] = 1
+_GUEST_EXPORT_IMPORT_BINDING_DOMAIN = (
+    b"neil-agent:guest-export-import-approval:v1\0"
+)
+
+
+class GuestExportImportBinding(BaseModel):
+    """Stable approval identity for importing one guest export manifest."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    version: Literal[1] = GUEST_EXPORT_IMPORT_BINDING_VERSION
+    run_id: StrictStr
+    request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    certification_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    file_digests: tuple[str, ...] = Field(min_length=1, max_length=32)
+
+    @classmethod
+    def from_manifest(cls, manifest: object) -> GuestExportImportBinding:
+        from .sandbox_export import GuestExportManifest
+
+        if not isinstance(manifest, GuestExportManifest):
+            raise ValueError("guest export import binding requires a manifest")
+        return cls(
+            run_id=manifest.run_id,
+            request_hash=manifest.request_hash,
+            certification_sha256=manifest.certification_sha256,
+            manifest_sha256=manifest.manifest_sha256,
+            file_digests=tuple(item.sha256 for item in manifest.files),
+        )
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            self.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+
+    @property
+    def digest(self) -> str:
+        return sha256(
+            _GUEST_EXPORT_IMPORT_BINDING_DOMAIN + self.canonical_bytes()
+        ).hexdigest()
+
+    @property
+    def approval_binding(self) -> ApprovalBinding:
+        return ApprovalBinding(
+            kind=GUEST_EXPORT_IMPORT_BINDING_KIND,
+            version=self.version,
+            sha256=self.digest,
+        )
+
+    def render_preview(self, manifest_preview: str) -> str:
+        return "\n".join(
+            (
+                "Guest export import approval",
+                f"Run ID: {self.run_id}",
+                f"Request SHA-256: {self.request_hash}",
+                f"Certification SHA-256: {self.certification_sha256}",
+                f"Manifest SHA-256: {self.manifest_sha256}",
+                f"File digest count: {len(self.file_digests)}",
+                f"Approval-Binding-SHA256: {self.digest}",
+                "",
+                manifest_preview,
             )
         )

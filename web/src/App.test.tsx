@@ -274,6 +274,7 @@ describe('WebWorkbenchApp', () => {
           request_id: `approval-${'a'.repeat(32)}`,
           run_id: `run-${'b'.repeat(32)}`,
           tool_name: 'write_file',
+          binding_kind: 'generic-tool',
           preview: 'Write one file',
           created_at: '2026-08-13T08:00:01Z',
           expires_at: '2026-08-13T08:05:01Z',

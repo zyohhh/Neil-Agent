@@ -14,6 +14,7 @@ from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
 from .task import PlanChangeHandler, TaskTracker
 from .tools.filesystem import FileSystemTools
+from .tools.guest_import import GuestExportImportTools
 from .tools.registry import ToolRegistry
 from .tools.sandbox import SandboxCommandTools
 from .tools.shell import ShellTools
@@ -56,6 +57,7 @@ class HostRuntime:
     hooks: LifecycleHooks
     audit_sink: JsonlAuditSink | None
     task_tracker: TaskTracker | None
+    guest_import: GuestExportImportTools | None
     profile: HostProfile
 
 
@@ -108,12 +110,15 @@ def _register_sandbox_tools(
     settings: Settings,
     filesystem: FileSystemTools,
     registry: ToolRegistry,
+    *,
+    guest_import: GuestExportImportTools | None = None,
 ) -> bool:
     if settings.sandbox_backend != "windows-sandbox":
         return False
     SandboxCommandTools(
         filesystem.root,
         windows_sandbox_backend(settings),
+        guest_import=guest_import,
         timeout_seconds=settings.command_timeout,
         max_output_bytes=settings.max_command_output_chars,
     ).register_if_ready(registry)
@@ -143,16 +148,24 @@ def build_host_runtime(
         timeout=settings.command_timeout,
         max_output_chars=settings.max_command_output_chars,
     )
+    guest_import: GuestExportImportTools | None = None
     if mode is HostMode.NONINTERACTIVE_READONLY:
         filesystem.register_read_only(registry)
         shell.register_read_only(registry)
     else:
         filesystem.register(registry)
         shell.register(registry)
+        guest_import = GuestExportImportTools(filesystem)
+        guest_import.register(registry)
 
     sandbox_tools_enabled = False
     if mode in {HostMode.CLI, HostMode.NONINTERACTIVE_WRITE, HostMode.WEB}:
-        sandbox_tools_enabled = _register_sandbox_tools(settings, filesystem, registry)
+        sandbox_tools_enabled = _register_sandbox_tools(
+            settings,
+            filesystem,
+            registry,
+            guest_import=guest_import,
+        )
 
     instruction_manager, instruction_scope = _instruction_scope_for_mode(
         filesystem.root,
@@ -188,5 +201,6 @@ def build_host_runtime(
         hooks=hooks,
         audit_sink=audit_sink,
         task_tracker=task_tracker,
+        guest_import=guest_import,
         profile=profile,
     )

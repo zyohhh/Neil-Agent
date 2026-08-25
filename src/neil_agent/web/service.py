@@ -24,6 +24,7 @@ from ..session import (
     SessionSnapshot,
     SessionStore,
 )
+from ..tools.registry import ToolRegistry
 from ..tools.shell import (
     BLOCKED_GIT_DIRECTORIES,
     BLOCKED_GIT_FILE_NAMES,
@@ -115,6 +116,12 @@ class WorkbenchSnapshotService:
         """Return the validated workspace-local store shared by the controller."""
 
         return self._sessions
+
+    @property
+    def registry(self) -> ToolRegistry:
+        """Return the shared tool registry for approval binding resolution."""
+
+        return self._host_runtime.registry
 
     def health(self) -> dict[str, object]:
         """Return generic liveness facts without workspace metadata."""

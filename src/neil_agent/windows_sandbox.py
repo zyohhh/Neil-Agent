@@ -24,7 +24,7 @@ import stat
 import subprocess
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -59,7 +59,8 @@ from .sandbox_lease import (
     HandleLeaseFactory,
     acquire_bounded_tree_lease,
 )
-from .sandbox_snapshot import inspect_prepared_snapshot
+from .sandbox_export import GuestExportError, MAX_EXPORT_TOTAL_BYTES
+from .sandbox_export_collect import collect_declared_guest_exports
 
 WSB_GUEST_SNAPSHOT = GUEST_SNAPSHOT_DIRECTORY
 WSB_GUEST_CONTROL = GUEST_CONTROL_DIRECTORY
@@ -152,6 +153,7 @@ class WsbExecutionPlan:
     approval_binding_version: Literal[1]
     approval_binding_sha256: str
     timeout_seconds: float = 120.0
+    export_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_uuid4("instance ID", self.instance_id)
@@ -191,6 +193,15 @@ class WsbExecutionPlan:
                 "WSB timeout must be between 0.1 and "
                 f"{MAX_CLI_TIMEOUT_SECONDS:g} seconds"
             )
+        if not isinstance(self.export_paths, tuple):
+            raise ValueError("export paths must be an immutable tuple")
+        from .sandbox_export_collect import normalize_export_paths
+
+        object.__setattr__(
+            self,
+            "export_paths",
+            normalize_export_paths(list(self.export_paths)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +219,8 @@ class WsbExecutionResult:
     error_code: GuestErrorCode | None
     result_hash: str
     job_terminated: bool
+    certification_sha256: str | None = None
+    exported_files: tuple[tuple[str, bytes], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,14 +628,25 @@ class WsbHostExecutor:
                     require_exit_code=True,
                 )
                 output_root_lease.validate()
-                result_lease = leases.enter_context(
-                    self._lease_factory(
-                        output,
-                        expected_names=frozenset({WSB_RESULT_FILENAME}),
-                        max_entries=1,
-                        max_total_bytes=MAX_RESULT_JSON_BYTES,
+                if plan.export_paths:
+                    result_lease = leases.enter_context(
+                        self._lease_factory(
+                            output,
+                            max_entries=1 + len(plan.export_paths),
+                            max_total_bytes=(
+                                MAX_EXPORT_TOTAL_BYTES + MAX_RESULT_JSON_BYTES
+                            ),
+                        )
                     )
-                )
+                else:
+                    result_lease = leases.enter_context(
+                        self._lease_factory(
+                            output,
+                            expected_names=frozenset({WSB_RESULT_FILENAME}),
+                            max_entries=1,
+                            max_total_bytes=MAX_RESULT_JSON_BYTES,
+                        )
+                    )
                 _validate_held_inputs(
                     plan,
                     request,
@@ -673,7 +697,24 @@ class WsbHostExecutor:
                 WSB_RESULT_FILENAME,
                 MAX_RESULT_JSON_BYTES,
             )
-            return _load_result_bytes(raw, plan, request)
+            exported_files: tuple[tuple[str, bytes], ...] = ()
+            if plan.export_paths:
+                try:
+                    collected = collect_declared_guest_exports(
+                        output,
+                        plan.export_paths,
+                    )
+                except GuestExportError as error:
+                    raise WsbHostExecutionError(
+                        "declared guest export files could not be collected."
+                    ) from error
+                exported_files = tuple(sorted(collected.items()))
+            result = _load_result_bytes(raw, plan, request)
+            return replace(
+                result,
+                certification_sha256=plan.certification_sha256,
+                exported_files=exported_files,
+            )
 
     def _invoke(
         self,

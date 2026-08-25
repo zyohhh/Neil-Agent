@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import './App.css'
 import {
   fetchLiveDiff,
+  type LiveApproval,
   type LiveConnectionState,
   type LiveGitDiff,
   type LiveRuntimeStep,
@@ -541,6 +542,16 @@ const CONTEXT_PRESSURE_LABELS: Record<NonNullable<WorkbenchSnapshotV1['context']
   exceeded: 'Over',
 }
 
+const APPROVAL_BINDING_LABELS: Record<LiveApproval['binding_kind'], string> = {
+  'generic-tool': 'Workspace write',
+  'sandbox-run-command': 'Sandbox command',
+  'guest-export-import': 'Guest export import',
+}
+
+function approvalBindingLabel(kind: LiveApproval['binding_kind']): string {
+  return APPROVAL_BINDING_LABELS[kind]
+}
+
 function ContextTomographyPanel({ context }: { context: WorkbenchSnapshotV1['context'] }) {
   if (context.source !== 'local_estimate' || context.layers.length === 0) return null
   const totalChars = Math.max(context.estimated_chars ?? 1, 1)
@@ -873,8 +884,8 @@ function ReviewPanel({
         <p className="eyebrow">Single-tool approval</p>
         <div className={`approval-card ${approvalAvailable ? 'is-ready' : ''}`}>
           <span>
-            <strong>{liveApproval ? `${liveApproval.tool_name} · ${liveApproval.state}` : decision === 'approved' ? 'Fixture approved' : decision === 'rejected' ? 'Fixture rejected' : approvalAvailable ? 'Write App.tsx' : 'No pending tool'}</strong>
-            <small>{liveApproval?.decision_detail ?? (liveApproval ? 'This decision applies to exactly one tool preview' : approvalAvailable ? 'One synthetic action' : 'No real side effect')}</small>
+            <strong>{liveApproval ? `${liveApproval.tool_name} · ${approvalBindingLabel(liveApproval.binding_kind)} · ${liveApproval.state}` : decision === 'approved' ? 'Fixture approved' : decision === 'rejected' ? 'Fixture rejected' : approvalAvailable ? 'Write App.tsx' : 'No pending tool'}</strong>
+            <small>{liveApproval?.decision_detail ?? (liveApproval ? 'This decision applies to exactly one bound tool preview' : approvalAvailable ? 'One synthetic action' : 'No real side effect')}</small>
           </span>
           <span className="shield-badge"><Icon name={decision === 'rejected' ? 'x' : 'check'} size={17} /></span>
         </div>

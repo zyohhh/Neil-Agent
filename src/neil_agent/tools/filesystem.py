@@ -8,6 +8,7 @@ import tempfile
 from difflib import unified_diff
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 
 from ..checkpoint import (
     FileEditCheckpoint,
@@ -17,6 +18,14 @@ from ..checkpoint import (
     content_hash,
 )
 from ..errors import ToolError
+from ..sandbox_approval import GuestExportImportBinding
+from ..sandbox_export import (
+    GuestExportError,
+    GuestExportManifest,
+    PreparedGuestExportImport,
+    PreparedGuestExportImportEntry,
+    format_guest_export_import_sections,
+)
 from ..schemas import ToolDefinition
 from .registry import ToolRegistry
 
@@ -24,6 +33,7 @@ MAX_FILE_SIZE_BYTES = 1_000_000
 MAX_SEARCH_RESULTS = 100
 MAX_DIFF_PREVIEW_CHARS = 20_000
 MAX_TASK_RESTORE_PREVIEW_CHARS = 100_000
+MAX_GUEST_EXPORT_IMPORT_PREVIEW_CHARS = 100_000
 BLOCKED_DIRECTORIES = frozenset(
     {
         ".git",
@@ -352,6 +362,136 @@ class FileSystemTools:
             f"（恢复 {restored_count}，删除 {prepared.delete_count}）"
         )
 
+    def prepare_guest_export_import(
+        self,
+        manifest: GuestExportManifest,
+        file_contents: dict[str, bytes],
+    ) -> PreparedGuestExportImport:
+        """Preview importing one certified guest export manifest into the workspace."""
+
+        binding = GuestExportImportBinding.from_manifest(manifest)
+        manifest_paths = {item.path for item in manifest.files}
+        if set(file_contents) != manifest_paths:
+            raise ToolError("guest export import 文件集合与 manifest 不一致。")
+
+        entries: list[PreparedGuestExportImportEntry] = []
+        previews: list[tuple[str, str, str]] = []
+        for file_entry in manifest.files:
+            payload = file_contents[file_entry.path]
+            if sha256(payload).hexdigest() != file_entry.sha256:
+                raise ToolError(
+                    f"guest export 文件 {file_entry.path} 内容与 manifest 摘要不一致。"
+                )
+            try:
+                content = payload.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ToolError(
+                    f"guest export 文件 {file_entry.path} 不是 UTF-8 文本。"
+                ) from error
+            self._validate_new_content(content)
+            _file_path, action, prior_hash, prior_content = (
+                self._prepare_guest_import_target(file_entry.path)
+            )
+            action_label = "新建" if action == "create" else "替换"
+            preview = self._format_diff(_file_path, prior_content, content)
+            entries.append(
+                PreparedGuestExportImportEntry(
+                    path=file_entry.path,
+                    content=content,
+                    action=action,
+                    prior_hash=prior_hash,
+                    prior_content=prior_content,
+                )
+            )
+            previews.append((file_entry.path, action_label, preview))
+
+        try:
+            sections = format_guest_export_import_sections(
+                tuple(previews),
+                max_chars=MAX_GUEST_EXPORT_IMPORT_PREVIEW_CHARS,
+            )
+        except GuestExportError as error:
+            raise ToolError(str(error)) from error
+
+        return PreparedGuestExportImport(
+            manifest_sha256=manifest.manifest_sha256,
+            binding_digest=binding.digest,
+            files=tuple(entries),
+            preview=binding.render_preview(sections),
+        )
+
+    def apply_guest_export_import(
+        self,
+        manifest: GuestExportManifest,
+        prepared: PreparedGuestExportImport,
+    ) -> str:
+        """Apply one guest export import after approval, with in-process rollback."""
+
+        binding = GuestExportImportBinding.from_manifest(manifest)
+        if prepared.manifest_sha256 != manifest.manifest_sha256:
+            raise ToolError("guest export manifest 已变化，请重新预览。")
+        if prepared.binding_digest != binding.digest:
+            raise ToolError("guest export 审批绑定无效，请重新预览。")
+        manifest_paths = tuple(item.path for item in manifest.files)
+        if tuple(entry.path for entry in prepared.files) != manifest_paths:
+            raise ToolError("guest export import 文件列表已变化，请重新预览。")
+
+        prepared_by_path = {entry.path: entry for entry in prepared.files}
+        for file_entry in manifest.files:
+            entry = prepared_by_path[file_entry.path]
+            if sha256(entry.content.encode("utf-8")).hexdigest() != file_entry.sha256:
+                raise ToolError(
+                    f"guest export 预览内容 {file_entry.path} 无效，请重新预览。"
+                )
+            _file_path, action, prior_hash, prior_content = (
+                self._prepare_guest_import_target(file_entry.path)
+            )
+            if action != entry.action:
+                raise ToolError(
+                    f"guest export 文件 {file_entry.path} 在批准后发生变化，拒绝导入。"
+                )
+            if action == "replace" and (
+                prior_hash != entry.prior_hash or prior_content != entry.prior_content
+            ):
+                raise ToolError(
+                    f"批准后工作区文件 {file_entry.path} 发生变化，拒绝导入。"
+                )
+
+        applied: list[PreparedGuestExportImportEntry] = []
+        try:
+            for file_entry in manifest.files:
+                entry = prepared_by_path[file_entry.path]
+                file_path, action, prior_hash, _prior_content = (
+                    self._prepare_guest_import_target(file_entry.path)
+                )
+                if action != entry.action or (
+                    action == "replace" and prior_hash != entry.prior_hash
+                ):
+                    raise ToolError(
+                        f"导入过程中工作区文件 {file_entry.path} 发生变化，拒绝继续。"
+                    )
+                if action == "create":
+                    file_path = self._prepare_write_target(file_entry.path)
+                else:
+                    file_path = self._resolve_checkpoint_file(file_entry.path)
+                self._atomic_write(file_path, entry.content)
+                applied.append(entry)
+        except ToolError as error:
+            rollback_complete = self._rollback_guest_export_import(applied)
+            if not rollback_complete:
+                raise ToolError(
+                    "guest export 导入失败且自动回滚不完整；"
+                    "请立即检查工作区并使用 Git 恢复。"
+                ) from error
+            raise ToolError(
+                "guest export 导入失败，已回滚本次导入操作。"
+            ) from error
+
+        return (
+            f"已导入 guest export：{prepared.file_count} 个文件"
+            f"（新建 {prepared.create_count}，替换 {prepared.replace_count}）"
+        )
+
     def _rollback_task_restore(
         self,
         applied: list[tuple[FileEditCheckpoint, PreparedFileRestoreEntry]],
@@ -375,6 +515,81 @@ class FileSystemTools:
             except ToolError:
                 complete = False
         return complete
+
+    def _rollback_guest_export_import(
+        self,
+        applied: list[PreparedGuestExportImportEntry],
+    ) -> bool:
+        """Best-effort rollback for a partially applied guest export import."""
+
+        complete = True
+        for entry in reversed(applied):
+            try:
+                if entry.action == "create":
+                    file_path = self._lexical_import_path(entry.path)
+                    if not file_path.exists():
+                        continue
+                    try:
+                        file_stat = file_path.lstat()
+                        resolved = file_path.resolve(strict=True)
+                    except OSError as error:
+                        raise ToolError(
+                            f"回滚 guest export 新建文件失败：{entry.path}"
+                        ) from error
+                    if (
+                        file_path.is_symlink()
+                        or not stat.S_ISREG(file_stat.st_mode)
+                        or resolved != file_path
+                    ):
+                        raise ToolError(
+                            "guest export 回滚期间文件路径发生外部变化。"
+                        )
+                    current_content = self._read_required_text(file_path, entry.path)
+                    if content_hash(current_content) != content_hash(entry.content):
+                        raise ToolError(
+                            "guest export 回滚期间文件发生外部变化。"
+                        )
+                    file_path.unlink()
+                else:
+                    file_path = self._resolve_checkpoint_file(entry.path)
+                    current_content = self._read_required_text(file_path, entry.path)
+                    if content_hash(current_content) != content_hash(entry.content):
+                        raise ToolError(
+                            "guest export 回滚期间文件发生外部变化。"
+                        )
+                    if entry.prior_content is None:
+                        raise ToolError("guest export 回滚缺少原始内容。")
+                    self._atomic_write(file_path, entry.prior_content)
+            except ToolError:
+                complete = False
+        return complete
+
+    def _prepare_guest_import_target(
+        self,
+        path: str,
+    ) -> tuple[Path, Literal["create", "replace"], str | None, str | None]:
+        """Resolve one import target and capture the current workspace state."""
+
+        lexical = self._lexical_import_path(path)
+        if not lexical.exists():
+            file_path = self._prepare_write_target(path)
+            return file_path, "create", None, None
+        file_path = self._resolve_checkpoint_file(path)
+        prior_content = self._read_required_text(file_path, path)
+        return file_path, "replace", content_hash(prior_content), prior_content
+
+    def _lexical_import_path(self, path: str) -> Path:
+        requested = Path(path)
+        if requested.is_absolute():
+            raise ToolError("guest export 路径无效，拒绝导入。")
+        lexical = self.root / requested
+        try:
+            lexical.relative_to(self.root)
+        except ValueError as error:
+            raise ToolError("拒绝导入工作区之外的路径。") from error
+        if not self._is_allowed(lexical):
+            raise ToolError("该路径包含受保护的目录或敏感文件。")
+        return lexical
 
     def _resolve_checkpoint_file(self, path: str) -> Path:
         """Resolve a recorded path without following a replacement link."""

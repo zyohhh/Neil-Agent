@@ -334,6 +334,7 @@ class RunSpec:
     limits: SandboxLimits = field(default_factory=SandboxLimits)
     workspace_snapshot: Path | None = None
     working_directory: str = "."
+    export_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.executable, Path):
@@ -388,6 +389,19 @@ class RunSpec:
         if self.policy.workspace_mode == "none" and normalized_working_directory != ".":
             raise ValueError("a working directory requires a workspace snapshot")
         object.__setattr__(self, "working_directory", normalized_working_directory)
+        if not isinstance(self.export_paths, tuple):
+            raise ValueError("sandbox export paths must be an immutable tuple")
+        try:
+            from .sandbox_export import GuestExportError
+            from .sandbox_export_collect import normalize_export_paths
+
+            object.__setattr__(
+                self,
+                "export_paths",
+                normalize_export_paths(list(self.export_paths)),
+            )
+        except GuestExportError as error:
+            raise ValueError("sandbox export paths are invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,6 +621,10 @@ class SandboxResult:
     stdout: str = ""
     stderr: str = ""
     elapsed_seconds: float = 0.0
+    run_id: str | None = None
+    request_hash: str | None = None
+    certification_sha256: str | None = None
+    exported_files: tuple[tuple[str, bytes], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.backend.strip():
@@ -920,6 +938,7 @@ class WindowsSandboxBackend:
                     approval_binding_version=request.approval_binding_version,
                     approval_binding_sha256=binding.digest,
                     timeout_seconds=max(60.0, spec.limits.timeout_seconds + 30.0),
+                    export_paths=spec.export_paths,
                 )
                 factory = self._host_executor_factory
                 executor = (
@@ -1036,6 +1055,7 @@ class WindowsSandboxBackend:
             active_process_limit=spec.limits.max_processes,
             process_memory_bytes=min(job_memory, MAX_PROCESS_MEMORY_BYTES),
             job_memory_bytes=job_memory,
+            export_paths=spec.export_paths,
         )
         return manifest, snapshot, executable, binding
 
@@ -1112,6 +1132,10 @@ def _map_wsb_result(result: WsbExecutionResult) -> SandboxResult:
         stdout=result.stdout.decode("utf-8", errors="replace"),
         stderr=result.stderr.decode("utf-8", errors="replace"),
         elapsed_seconds=result.duration_ms / 1_000,
+        run_id=result.run_id.hex,
+        request_hash=result.request_hash,
+        certification_sha256=result.certification_sha256,
+        exported_files=result.exported_files,
     )
 
 

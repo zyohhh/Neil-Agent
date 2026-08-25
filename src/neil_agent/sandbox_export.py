@@ -1,13 +1,10 @@
-"""Bounded guest export manifest for post-certification writable workflows.
-
-Phase 1 is preview-only: validate declared relative paths and build a self-hashing
-manifest for approval binding. Import into the workspace is implemented separately.
-"""
+"""Bounded guest export manifest for post-certification writable workflows."""
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
@@ -52,6 +49,39 @@ class GuestExportFileEntry(BaseModel):
         normalized = _normalize_relative_path(self.path)
         object.__setattr__(self, "path", normalized)
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedGuestExportImportEntry:
+    """One import target captured during preview for later atomic apply."""
+
+    path: str
+    content: str = field(repr=False)
+    action: Literal["create", "replace"]
+    prior_hash: str | None
+    prior_content: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedGuestExportImport:
+    """A guest export import candidate bound to one approval identity."""
+
+    manifest_sha256: str
+    binding_digest: str
+    files: tuple[PreparedGuestExportImportEntry, ...]
+    preview: str
+
+    @property
+    def file_count(self) -> int:
+        return len(self.files)
+
+    @property
+    def create_count(self) -> int:
+        return sum(entry.action == "create" for entry in self.files)
+
+    @property
+    def replace_count(self) -> int:
+        return sum(entry.action == "replace" for entry in self.files)
 
 
 class GuestExportManifest(BaseModel):
@@ -155,8 +185,31 @@ def format_guest_export_preview(manifest: GuestExportManifest) -> str:
             f"sha256={entry.sha256}"
         )
     lines.append("")
-    lines.append("IMPORT INTO WORKSPACE IS NOT ENABLED IN THIS PHASE.")
     return "\n".join(lines)
+
+
+def format_guest_export_import_sections(
+    sections: tuple[tuple[str, str, str], ...],
+    *,
+    max_chars: int,
+) -> str:
+    """Render bounded per-file diff sections for an import approval preview."""
+
+    if not sections:
+        raise GuestExportError("guest export import preview is empty")
+    headers = [f"=== {path} · {action} ===\n" for path, action, _ in sections]
+    separators_size = max(len(sections) - 1, 0) * 2
+    available = max_chars - sum(len(header) for header in headers) - separators_size
+    if available < 0:
+        raise GuestExportError("guest export import scope is too large to preview")
+    per_file_limit = available // len(sections)
+    marker = "\n... 该文件的导入 diff 已按预览上限截断。"
+    rendered: list[str] = []
+    for header, (_path, _action, body) in zip(headers, sections, strict=True):
+        if len(body) > per_file_limit:
+            body = body[:per_file_limit] + marker
+        rendered.append(header + body)
+    return "\n\n".join(rendered)
 
 
 def _normalize_relative_path(value: str) -> str:

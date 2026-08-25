@@ -70,5 +70,19 @@
       "The rejected tool is not executed.",
       "Only the final successful round is saved and remains valid after resume."
     ]
+  },
+  {
+    "id": "guest-export-import-approval",
+    "capability": "guest_export_import",
+    "setup": "Stage one certified guest export manifest with a single UTF-8 text file.",
+    "steps": [
+      "Run non-interactive protocol v2 in request mode and capture the approval ID.",
+      "Re-run the same prompt in approve mode with that approval ID."
+    ],
+    "expected": [
+      "The approval request targets import_guest_export with guest-export-import binding metadata.",
+      "Approve mode writes the staged file atomically.",
+      "Replaying the same approval ID does not apply a second import."
+    ]
   }
 ]
