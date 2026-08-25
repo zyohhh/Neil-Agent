@@ -526,6 +526,78 @@ function ContextGauge({ liveSnapshot }: { liveSnapshot: WorkbenchSnapshotV1 | nu
   )
 }
 
+const CONTEXT_LAYER_LABELS: Record<WorkbenchSnapshotV1['context']['layers'][number]['kind'], string> = {
+  system: 'System fixed',
+  tool_schemas: 'Tool schemas',
+  project_instructions: 'Project rules',
+  selected_history: 'History kept',
+  current_chain: 'Current chain',
+}
+
+const CONTEXT_PRESSURE_LABELS: Record<NonNullable<WorkbenchSnapshotV1['context']['pressure']>['level'], string> = {
+  safe: 'Safe',
+  warning: 'Watch',
+  critical: 'High',
+  exceeded: 'Over',
+}
+
+function ContextTomographyPanel({ context }: { context: WorkbenchSnapshotV1['context'] }) {
+  if (context.source !== 'local_estimate' || context.layers.length === 0) return null
+  const totalChars = Math.max(context.estimated_chars ?? 1, 1)
+  const pressure = context.pressure
+  const footprint = context.largest_tool_footprint
+  return (
+    <section className="review-section context-tomography" aria-label="Context tomography layers">
+      <div className="section-heading-row">
+        <p className="eyebrow">Context layers</p>
+        {pressure ? (
+          <span className={`context-pressure context-pressure-${pressure.level}`}>
+            {CONTEXT_PRESSURE_LABELS[pressure.level]}
+          </span>
+        ) : null}
+      </div>
+      <ol className="context-layer-list">
+        {context.layers.map((layer) => {
+          const width = Math.max(Math.round((layer.chars / totalChars) * 100), layer.chars > 0 ? 6 : 0)
+          return (
+            <li className="context-layer-row" key={layer.kind} data-layer={layer.kind}>
+              <span className="context-layer-label">{CONTEXT_LAYER_LABELS[layer.kind]}</span>
+              <span className="context-layer-bar" aria-hidden="true">
+                <span className="context-layer-bar-fill" style={{ width: `${width}%` }} />
+              </span>
+              <span className="context-layer-meta">
+                {layer.chars.toLocaleString()}c · ~{layer.estimated_tokens.toLocaleString()}t
+              </span>
+            </li>
+          )
+        })}
+      </ol>
+      <dl className="context-tomography-meta">
+        <div>
+          <dt>Rounds</dt>
+          <dd>{context.selected_rounds ?? 0}/{context.stored_rounds ?? 0} kept{context.omitted_rounds ? ` · ${context.omitted_rounds} omitted` : ''}</dd>
+        </div>
+        {context.checkpoint_state && context.checkpoint_state !== 'none' ? (
+          <div><dt>Checkpoint</dt><dd>{context.checkpoint_state}</dd></div>
+        ) : null}
+        {context.total_tokens !== null ? (
+          <div>
+            <dt>Server hist.</dt>
+            <dd>IN {context.input_tokens?.toLocaleString() ?? '0'} · OUT {context.output_tokens?.toLocaleString() ?? '0'}</dd>
+          </div>
+        ) : null}
+        {footprint ? (
+          <div>
+            <dt>Tool result</dt>
+            <dd>#{footprint.ordinal} · {footprint.chars.toLocaleString()}c · {footprint.state}</dd>
+          </div>
+        ) : null}
+      </dl>
+      <small className="context-tomography-note">Local estimate only · message bodies never leave the host</small>
+    </section>
+  )
+}
+
 function ReviewPanel({
   open,
   onClose,
@@ -732,6 +804,8 @@ function ReviewPanel({
           <small>{liveSnapshot?.review.cost_available ? `Estimate · ${liveSnapshot.review.cost.rate_table_version}` : liveSnapshot ? liveSnapshot.review.cost.reason.replaceAll('_', ' ') : 'No rate table'}</small>
         </div>
       </section>
+
+      {liveSnapshot ? <ContextTomographyPanel context={liveSnapshot.context} /> : null}
 
       {liveSnapshot ? (
         <section className="review-section security-summary" aria-label="Observed security layers">

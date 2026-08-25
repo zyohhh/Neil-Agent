@@ -1448,3 +1448,10 @@ CLI 展示修改预览并等待用户输入 y/yes
 ### 验证
 
 - `tests/test_context_projection.py` 与 `tests/test_web_workbench.py` 覆盖层序、无正文泄漏与快照一致性。
+
+## 2026-08-25：Web Context 五层断层图 UI
+
+### 前端
+
+- Review 面板新增 `ContextTomographyPanel`：按 TUI 同色带展示五层字符/token 估算、压力等级、轮次裁剪与服务端历史 usage。
+- 仅 live 快照且 `context.source === local_estimate` 时渲染；明确标注「本地估算、消息正文不出主机」。
