@@ -194,13 +194,49 @@ export interface WorkbenchSnapshotV1 {
     agent_connected: true
     sandbox_backend: 'disabled' | 'windows-sandbox'
     audit_enabled: boolean
-    shield_schema_version: number
-    application_status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
-    os_sandbox_status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
+    shield_schema_version: 2
     audit_status: 'recording' | 'busy' | 'disabled' | 'degraded' | 'unavailable'
     tool_count: number
     direct_tool_count: number
     approval_tool_count: number
+    application: {
+      layer: 'application'
+      status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
+      headline: string
+      details: string[]
+    }
+    os_sandbox: {
+      layer: 'os'
+      status: 'enforced' | 'ready' | 'disabled' | 'incomplete' | 'unavailable'
+      headline: string
+      details: string[]
+    }
+    capabilities: Array<{
+      key: string
+      label: string
+      state: 'direct' | 'approval' | 'forbidden' | 'unavailable'
+      layer: 'application' | 'os'
+      tool_count: number
+      summary: string
+    }>
+    capability_legend: {
+      direct: number
+      approval: number
+      forbidden: number
+      unavailable: number
+    }
+    boundary_watch: {
+      observation_count: number
+      warning_count: number
+      changes_stable: boolean
+      signals: Array<{
+        key: 'path' | 'network' | 'command' | 'audit'
+        state: string
+        layer: 'application' | 'os'
+        qualifier: 'os_ready' | 'os_disabled' | 'os_fail_closed' | 'application'
+        label: string
+      }>
+    }
   }
 }
 
@@ -328,7 +364,9 @@ const isSnapshot = (value: unknown): value is WorkbenchSnapshotV1 => {
     && typeof capabilities.can_switch_model === 'boolean'
     && Array.isArray((record.provider as Record<string, unknown> | undefined)?.available_models)
     && typeof security?.shield_schema_version === 'number'
-    && typeof security.application_status === 'string'
+    && typeof (security?.application as Record<string, unknown> | undefined)?.status === 'string'
+    && Array.isArray(security?.capabilities)
+    && typeof (security?.boundary_watch as Record<string, unknown> | undefined)?.changes_stable === 'boolean'
 }
 
 interface RealtimeHandlers {

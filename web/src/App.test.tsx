@@ -57,7 +57,48 @@ const snapshot = {
     total_tokens: null,
   },
   review: { state: 'stale', quality_check: null, quality_checks: [], approval_available: false, cost_available: false, cost: { source: 'unavailable', estimated_usd: null, rate_table_version: null, rate_effective_date: null, model: null, reason: 'no_rate_table' } },
-  security: { mode: 'approval_gated', binding: 'loopback', bootstrap_token_required: true, write_routes: 0, agent_connected: true, sandbox_backend: 'disabled', audit_enabled: true, shield_schema_version: 2, application_status: 'enforced', os_sandbox_status: 'disabled', audit_status: 'recording', tool_count: 12, direct_tool_count: 6, approval_tool_count: 6 },
+  security: {
+    mode: 'approval_gated',
+    binding: 'loopback',
+    bootstrap_token_required: true,
+    write_routes: 0,
+    agent_connected: true,
+    sandbox_backend: 'disabled',
+    audit_enabled: true,
+    shield_schema_version: 2,
+    audit_status: 'recording',
+    tool_count: 12,
+    direct_tool_count: 6,
+    approval_tool_count: 6,
+    application: {
+      layer: 'application',
+      status: 'enforced',
+      headline: 'Application tools gated by approval',
+      details: ['Workspace read direct', 'Writes require approval'],
+    },
+    os_sandbox: {
+      layer: 'os',
+      status: 'disabled',
+      headline: 'OS sandbox disabled',
+      details: ['No isolated command execution'],
+    },
+    capabilities: [
+      { key: 'workspace-read', label: 'Workspace read', state: 'direct', layer: 'application', tool_count: 2, summary: 'Read-only file access' },
+      { key: 'workspace-write', label: 'Workspace write', state: 'approval', layer: 'application', tool_count: 2, summary: 'Writes require approval' },
+    ],
+    capability_legend: { direct: 6, approval: 6, forbidden: 0, unavailable: 0 },
+    boundary_watch: {
+      observation_count: 1,
+      warning_count: 0,
+      changes_stable: true,
+      signals: [
+        { key: 'path', state: 'application_only', layer: 'application', qualifier: 'application', label: 'PATH APP' },
+        { key: 'network', state: 'absent', layer: 'application', qualifier: 'application', label: 'NETWORK ABSENT' },
+        { key: 'command', state: 'restricted', layer: 'application', qualifier: 'application', label: 'COMMAND FIXED' },
+        { key: 'audit', state: 'recording', layer: 'application', qualifier: 'application', label: 'AUDIT RECORDING' },
+      ],
+    },
+  },
 } satisfies WorkbenchSnapshotV1
 
 describe('WebWorkbenchApp', () => {

@@ -1208,6 +1208,18 @@
   margin: 0 0 10px;
 }
 
+.security-shield {
+  display: grid;
+  gap: 10px;
+}
+
+.security-layer-meta {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.security-layer-meta > div,
 .security-summary dl > div {
   display: flex;
   justify-content: space-between;
@@ -1216,17 +1228,123 @@
   font-size: 12px;
 }
 
+.security-layer-meta dt,
+.security-layer-meta dd,
 .security-summary dt,
 .security-summary dd {
   margin: 0;
 }
 
+.security-layer-meta dd,
 .security-summary dd {
   color: var(--color-accent);
   font-weight: 650;
   text-transform: uppercase;
 }
 
+.security-headline {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.security-headline-os {
+  color: var(--color-text-faint);
+}
+
+.security-capability-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.security-capability-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+}
+
+.security-capability-label {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.security-capability-state {
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.security-capability-state-direct {
+  background: color-mix(in srgb, var(--color-success) 18%, transparent);
+  color: var(--color-success);
+}
+
+.security-capability-state-approval {
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+  color: var(--color-warning);
+}
+
+.security-capability-state-forbidden,
+.security-capability-state-unavailable {
+  background: color-mix(in srgb, var(--color-text-faint) 22%, transparent);
+  color: var(--color-text-faint);
+}
+
+.security-capability-meta {
+  color: var(--color-text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.security-boundary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.security-boundary-chip {
+  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent);
+  border-radius: 999px;
+  color: var(--color-accent);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  padding: 3px 8px;
+  text-transform: uppercase;
+}
+
+.security-boundary-stability {
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  text-transform: uppercase;
+}
+
+.security-boundary-stability.is-stable {
+  background: color-mix(in srgb, var(--color-success) 16%, transparent);
+  color: var(--color-success);
+}
+
+.security-boundary-stability.is-changing {
+  background: color-mix(in srgb, var(--color-warning) 16%, transparent);
+  color: var(--color-warning);
+}
+
+.security-legend,
 .security-summary small {
   color: var(--color-text-faint);
   font-size: 10px;

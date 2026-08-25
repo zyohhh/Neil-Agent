@@ -9,6 +9,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 
 if TYPE_CHECKING:
     from ..context import ContextTomography
+    from ..security import SecurityShield
 
 
 class WorkbenchDto(BaseModel):
@@ -321,25 +322,143 @@ class GitDiffDto(WorkbenchDto):
     truncated: bool = False
 
 
+class SecurityCapabilityBandDto(WorkbenchDto):
+    key: str = Field(min_length=1, max_length=48)
+    label: str = Field(min_length=1, max_length=48)
+    state: Literal["direct", "approval", "forbidden", "unavailable"]
+    layer: Literal["application", "os"]
+    tool_count: int = Field(ge=0, le=64)
+    summary: str = Field(min_length=1, max_length=120)
+
+
+class SecurityBoundaryLayerDto(WorkbenchDto):
+    layer: Literal["application", "os"]
+    status: Literal["enforced", "ready", "disabled", "incomplete", "unavailable"]
+    headline: str = Field(min_length=1, max_length=120)
+    details: tuple[str, ...] = Field(min_length=1, max_length=8)
+
+
+class SecurityBoundarySignalDto(WorkbenchDto):
+    key: Literal["path", "network", "command", "audit"]
+    state: Literal[
+        "enforced",
+        "application_only",
+        "restricted",
+        "absent",
+        "recording",
+        "busy",
+        "disabled",
+        "degraded",
+        "unavailable",
+    ]
+    layer: Literal["application", "os"]
+    qualifier: Literal["os_ready", "os_disabled", "os_fail_closed", "application"]
+    label: str = Field(min_length=1, max_length=32)
+
+
+class SecurityCapabilityLegendDto(WorkbenchDto):
+    direct: int = Field(ge=0, le=64)
+    approval: int = Field(ge=0, le=64)
+    forbidden: int = Field(ge=0, le=64)
+    unavailable: int = Field(ge=0, le=64)
+
+
+class SecurityBoundaryWatchDto(WorkbenchDto):
+    observation_count: int = Field(ge=1, le=64)
+    warning_count: int = Field(ge=0, le=8)
+    changes_stable: bool
+    signals: tuple[SecurityBoundarySignalDto, ...] = Field(min_length=4, max_length=4)
+
+
 class SecurityDto(WorkbenchDto):
     mode: Literal["approval_gated"] = "approval_gated"
     binding: Literal["loopback"] = "loopback"
     bootstrap_token_required: Literal[True] = True
     write_routes: Literal[0] = 0
     agent_connected: Literal[True] = True
+    shield_schema_version: Literal[2] = 2
     sandbox_backend: Literal["disabled", "windows-sandbox"]
     audit_enabled: bool
-    shield_schema_version: int = Field(ge=1)
-    application_status: Literal[
-        "enforced", "ready", "disabled", "incomplete", "unavailable"
-    ]
-    os_sandbox_status: Literal[
-        "enforced", "ready", "disabled", "incomplete", "unavailable"
-    ]
     audit_status: Literal["recording", "busy", "disabled", "degraded", "unavailable"]
-    tool_count: int = Field(ge=0)
-    direct_tool_count: int = Field(ge=0)
-    approval_tool_count: int = Field(ge=0)
+    tool_count: int = Field(ge=0, le=64)
+    direct_tool_count: int = Field(ge=0, le=64)
+    approval_tool_count: int = Field(ge=0, le=64)
+    application: SecurityBoundaryLayerDto
+    os_sandbox: SecurityBoundaryLayerDto
+    capabilities: tuple[SecurityCapabilityBandDto, ...] = Field(
+        min_length=1, max_length=24
+    )
+    capability_legend: SecurityCapabilityLegendDto
+    boundary_watch: SecurityBoundaryWatchDto
+
+    @classmethod
+    def from_security_shield(
+        cls,
+        shield: SecurityShield,
+        *,
+        sandbox_backend: Literal["disabled", "windows-sandbox"],
+    ) -> SecurityDto:
+        """Map one observed Security Shield into the Web Workbench security DTO."""
+
+        from ..security import SecurityShield as ObservedShield
+        from ..security_projection import basic_boundary_label, project_security_shield_basic
+
+        if not isinstance(shield, ObservedShield):
+            raise ValueError("security shield observation is invalid")
+        projection = project_security_shield_basic(shield)
+        watch = projection.boundary_watch
+        return cls(
+            sandbox_backend=sandbox_backend,
+            audit_enabled=shield.audit_enabled,
+            audit_status=shield.audit_status,
+            tool_count=shield.tool_count,
+            direct_tool_count=shield.direct_tool_count,
+            approval_tool_count=shield.approval_tool_count,
+            application=SecurityBoundaryLayerDto(
+                layer=shield.application.layer,
+                status=shield.application.status,
+                headline=shield.application.headline,
+                details=shield.application.details,
+            ),
+            os_sandbox=SecurityBoundaryLayerDto(
+                layer=shield.os_sandbox.layer,
+                status=shield.os_sandbox.status,
+                headline=shield.os_sandbox.headline,
+                details=shield.os_sandbox.details,
+            ),
+            capabilities=tuple(
+                SecurityCapabilityBandDto(
+                    key=capability.key,
+                    label=capability.label,
+                    state=capability.state,
+                    layer=capability.layer,
+                    tool_count=capability.tool_count,
+                    summary=capability.summary,
+                )
+                for capability in shield.capabilities
+            ),
+            capability_legend=SecurityCapabilityLegendDto(
+                direct=projection.capability_legend.direct,
+                approval=projection.capability_legend.approval,
+                forbidden=projection.capability_legend.forbidden,
+                unavailable=projection.capability_legend.unavailable,
+            ),
+            boundary_watch=SecurityBoundaryWatchDto(
+                observation_count=watch.observation_count,
+                warning_count=watch.warning_count,
+                changes_stable=watch.total_change_count == 0,
+                signals=tuple(
+                    SecurityBoundarySignalDto(
+                        key=signal.key,
+                        state=signal.state,
+                        layer=signal.layer,
+                        qualifier=signal.qualifier,
+                        label=basic_boundary_label(signal),
+                    )
+                    for signal in watch.signals
+                ),
+            ),
+        )
 
 
 class RunDto(WorkbenchDto):

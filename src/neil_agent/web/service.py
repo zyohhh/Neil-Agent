@@ -334,16 +334,9 @@ class WorkbenchSnapshotService:
             task=self._task(selected),
             context=self.context_dto(selected, settings),
             review=review,
-            security=SecurityDto(
+            security=SecurityDto.from_security_shield(
+                security,
                 sandbox_backend=settings.sandbox_backend,
-                audit_enabled=settings.audit_log_enabled,
-                shield_schema_version=security.schema_version,
-                application_status=security.application.status,
-                os_sandbox_status=security.os_sandbox.status,
-                audit_status=security.audit_status,
-                tool_count=security.tool_count,
-                direct_tool_count=security.direct_tool_count,
-                approval_tool_count=security.approval_tool_count,
             ),
         )
 

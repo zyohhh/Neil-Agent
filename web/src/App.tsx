@@ -598,6 +598,66 @@ function ContextTomographyPanel({ context }: { context: WorkbenchSnapshotV1['con
   )
 }
 
+const SECURITY_CAPABILITY_LABELS: Record<WorkbenchSnapshotV1['security']['capabilities'][number]['state'], string> = {
+  direct: 'Direct',
+  approval: 'Approval',
+  forbidden: 'Forbidden',
+  unavailable: 'Unavailable',
+}
+
+function SecurityShieldPanel({ security }: { security: WorkbenchSnapshotV1['security'] }) {
+  const legend = security.capability_legend
+  const watch = security.boundary_watch
+  return (
+    <section className="review-section security-shield" aria-label="Observed security layers">
+      <div className="section-heading-row">
+        <p className="eyebrow">Security shield</p>
+        <span className="fixture-tag">v{security.shield_schema_version}</span>
+      </div>
+      <dl className="security-layer-meta">
+        <div>
+          <dt>Application</dt>
+          <dd data-status={security.application.status}>{security.application.status}</dd>
+        </div>
+        <div>
+          <dt>OS sandbox</dt>
+          <dd data-status={security.os_sandbox.status}>{security.os_sandbox.status}</dd>
+        </div>
+        <div>
+          <dt>Audit</dt>
+          <dd data-status={security.audit_status}>{security.audit_status}</dd>
+        </div>
+      </dl>
+      <p className="security-headline">{security.application.headline}</p>
+      <p className="security-headline security-headline-os">{security.os_sandbox.headline}</p>
+      <ol className="security-capability-list">
+        {security.capabilities.map((band) => (
+          <li className="security-capability-row" key={band.key} data-state={band.state} data-layer={band.layer}>
+            <span className="security-capability-label">{band.label}</span>
+            <span className={`security-capability-state security-capability-state-${band.state}`}>
+              {SECURITY_CAPABILITY_LABELS[band.state]}
+            </span>
+            <span className="security-capability-meta">{band.tool_count} tools</span>
+          </li>
+        ))}
+      </ol>
+      <div className="security-boundary-row" aria-label="Boundary watch signals">
+        {watch.signals.map((signal) => (
+          <span className="security-boundary-chip" key={signal.key} data-key={signal.key}>
+            {signal.label}
+          </span>
+        ))}
+        <span className={`security-boundary-stability ${watch.changes_stable ? 'is-stable' : 'is-changing'}`}>
+          {watch.changes_stable ? 'Stable' : `${watch.warning_count} alert${watch.warning_count === 1 ? '' : 's'}`}
+        </span>
+      </div>
+      <small className="security-legend">
+        {legend.direct} direct · {legend.approval} approval · {legend.forbidden} forbidden · {legend.unavailable} unavailable · {security.tool_count} total
+      </small>
+    </section>
+  )
+}
+
 function ReviewPanel({
   open,
   onClose,
@@ -807,20 +867,7 @@ function ReviewPanel({
 
       {liveSnapshot ? <ContextTomographyPanel context={liveSnapshot.context} /> : null}
 
-      {liveSnapshot ? (
-        <section className="review-section security-summary" aria-label="Observed security layers">
-          <div className="section-heading-row">
-            <p className="eyebrow">Security shield</p>
-            <span className="fixture-tag">v{liveSnapshot.security.shield_schema_version}</span>
-          </div>
-          <dl>
-            <div><dt>Application</dt><dd>{liveSnapshot.security.application_status}</dd></div>
-            <div><dt>OS sandbox</dt><dd>{liveSnapshot.security.os_sandbox_status}</dd></div>
-            <div><dt>Audit</dt><dd>{liveSnapshot.security.audit_status}</dd></div>
-          </dl>
-          <small>{liveSnapshot.security.direct_tool_count} direct · {liveSnapshot.security.approval_tool_count} approval-gated · {liveSnapshot.security.tool_count} total</small>
-        </section>
-      ) : null}
+      {liveSnapshot ? <SecurityShieldPanel security={liveSnapshot.security} /> : null}
 
       <section className="approval-section">
         <p className="eyebrow">Single-tool approval</p>

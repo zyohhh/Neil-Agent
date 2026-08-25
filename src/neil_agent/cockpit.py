@@ -14,10 +14,10 @@ from rich.text import Text
 from .context import ContextStats
 from .schemas import TokenUsage
 from .security import (
-    SecurityBoundarySignal,
     SecurityShield,
     project_security_boundary_watch,
 )
+from .security_projection import basic_boundary_label
 from .task import QualityCheckRecord, TaskStep
 
 COCKPIT_METER_WIDTH = 24
@@ -206,7 +206,7 @@ def _security_view(snapshot: CockpitSnapshot) -> RenderableType:
         "四类边界",
         Text(
             " · ".join(
-                _basic_boundary_token(signal) for signal in boundary_watch.signals
+                basic_boundary_label(signal) for signal in boundary_watch.signals
             ),
             style="cyan",
         ),
@@ -268,32 +268,6 @@ def _security_legend(security: SecurityShield) -> Text:
             style=styles[state],
         )
     return legend
-
-
-def _basic_boundary_token(signal: SecurityBoundarySignal) -> str:
-    labels = {
-        "path": {
-            "enforced": "PATH OS",
-            "application_only": "PATH APP",
-            "absent": "PATH NONE",
-        },
-        "network": {
-            "enforced": "NETWORK DENY",
-            "absent": "NETWORK ABSENT",
-        },
-        "command": {
-            "restricted": "COMMAND FIXED",
-            "absent": "COMMAND NONE",
-        },
-        "audit": {
-            "recording": "AUDIT RECORDING",
-            "busy": "AUDIT BUSY",
-            "disabled": "AUDIT DISABLED",
-            "degraded": "AUDIT DEGRADED",
-            "unavailable": "AUDIT UNAVAILABLE",
-        },
-    }
-    return labels.get(signal.key, {}).get(signal.state, "UNKNOWN")
 
 
 def _workspace_view(snapshot: CockpitSnapshot) -> RenderableType:

@@ -356,8 +356,8 @@ def test_health_is_generic_and_snapshot_requires_one_time_bootstrap(
     assert snapshot.json()["security"]["write_routes"] == 0
     assert snapshot.json()["security"]["agent_connected"] is True
     security = snapshot.json()["security"]
-    assert security["application_status"] == "enforced"
-    assert security["os_sandbox_status"] == "disabled"
+    assert security["application"]["status"] == "enforced"
+    assert security["os_sandbox"]["status"] == "disabled"
     assert security["tool_count"] == (
         security["direct_tool_count"] + security["approval_tool_count"]
     )
