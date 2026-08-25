@@ -1,5 +1,9 @@
 # Windows Sandbox 目标平台证据契约
 
+运维步骤见 [`sandbox-certification-runbook.md`](sandbox-certification-runbook.md)；
+仓库提供 [`scripts/windows-sandbox-certify.ps1`](../scripts/windows-sandbox-certify.ps1)
+封装 `bundle-verify`、`review` 与 `certify`。
+
 本契约把真实平台证据、独立审查和运行时能力严格分层。单轮测试、三轮
 aggregate，甚至未经 pin 的 certification 都不会改变 `WindowsSandboxBackend`
 状态；只有完整 bundle 重新推导、GitHub Sigstore provenance、独立 review pin、

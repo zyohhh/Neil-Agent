@@ -1467,3 +1467,19 @@ CLI 展示修改预览并等待用户输入 y/yes
 ### 验证
 
 - `tests/test_time_machine_restore.py`、`tests/test_checkpoint.py` 与 `tests/test_live_cockpit.py` 覆盖门禁、非最新拒绝与审批恢复闭环。
+
+## 2026-08-25：WSB 认证运维与 Guest Export 协议首步
+
+### 认证运维
+
+- 新增 [`docs/sandbox-certification-runbook.md`](docs/sandbox-certification-runbook.md)：从 CI artifact 到运行时环境变量的逐步清单。
+- 新增 [`scripts/windows-sandbox-certify.ps1`](scripts/windows-sandbox-certify.ps1)：封装 `bundle-verify`、独立 `review` 与 `certify`，并打印需 out-of-band pin 的 `review_sha256`。
+
+### Guest export manifest（预览阶段）
+
+- 新增 `sandbox_export.py`：`GuestExportManifest` v1、工作区相对路径校验、敏感/越界拒绝、自哈希 manifest 与无正文预览文案。
+- 本阶段仅生成审批用 manifest，不写回工作区；导入事务与 `run_command` 集成留待认证后下一批。
+
+### 验证
+
+- `tests/test_sandbox_export.py` 覆盖 digest 绑定、预览不泄漏正文与路径拒绝规则。
