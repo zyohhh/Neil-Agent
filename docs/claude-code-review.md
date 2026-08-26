@@ -1,4 +1,4 @@
-# Claude Code 官方文档对照审核（更新于 2026-08-23）
+# Claude Code 官方文档对照审核（更新于 2026-08-26）
 
 本审核把 Claude Code 当作成熟产品参考，不把 Neil Agent 改造成 Claude Code 的复制品。结论基于 Anthropic 官方的[项目指令](https://code.claude.com/docs/en/memory)、[权限](https://code.claude.com/docs/en/permissions)、[沙箱](https://code.claude.com/docs/en/sandboxing)、[会话](https://code.claude.com/docs/en/sessions)、[检查点](https://code.claude.com/docs/en/checkpointing)、[非交互模式](https://code.claude.com/docs/en/headless)和 [hooks](https://code.claude.com/docs/en/hooks) 文档。
 
@@ -47,6 +47,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 19. 完成 Textual Time Machine Phase 3A：按事件游标只读重建历史 DAG/指标，浏览脱敏会话分支、压缩与进程内任务检查点；默认不持久化事件，不重新调用模型或工具，也不混入恢复能力。
 20. 完成 Textual Time Machine Phase 3B：在 `/cockpit --live` Time Machine 为**最新**任务检查点提供 `R` 审批恢复，复用 `/rewind-task` 预检与回滚；较旧检查点仍用 Git。
 21. Web 可在控制租约、精确 revision、idle 且空会话门禁下选择操作方明确允许的同 Provider 模型；事务失败保持旧 worker，会话绑定阻止通过历史恢复绕过预检。
+22. 完成 Textual Neural Map Phase 4：`F7` 打开目录级读/写/检查热度与风险着色；`tool_call` 事件记录脱敏 `workspace_path` 与 `activity_kind`，投影不扫描或保存文件正文（见 [`visualization-development.md`](visualization-development.md)）。
 
 本轮实现后的自动化与显式真实验收结果见开发记录；常规测试和离线检查不调用真实付费 API，除非显式开启 smoke 或 eval 验收。
 
@@ -60,15 +61,17 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 
 ## 后续优先级
 
+编号可视化路线（Phase 0A–4）与 Web Workbench P0–P9 均已交付；下列为跨路线仍开放的验证与可选增强，不构成新的编号 Phase。
+
 1. 在专用 Windows runner 完成真实 WSB 端到端手测：`run_command(export_paths)` → `import_guest_export`（host 侧已实现，见 [`guest-export-import.md`](guest-export-import.md)）。
-2. Guest runner（C#）侧强制只允许写入已声明的 `export_paths`（可选纵深防御）。
+2. Guest runner（C#）侧强制只允许写入已声明的 `export_paths`（可选纵深防御，见 [`guest-export-import.md`](guest-export-import.md) 与 [`sandbox-certification-runbook.md`](sandbox-certification-runbook.md)）。
 3. 维持 Time Machine Phase 3B 的审批与原子性边界；不扩大恢复范围（较旧检查点与会话 as-of 仍用 Git）。
-4. 可视化 Phase 4 Neural Map（可选）：先用静态夹具验证信息价值，见 [`visualization-development.md`](visualization-development.md)。
+4. Web Terminal/PTY、Focus/Build 真实权限、跨 Provider 切换与自动 fallback 等仍未立项，见 [`web-workbench-development.md`](web-workbench-development.md) §19。
 
 ## 相关文档
 
 - [`guest-export-import.md`](guest-export-import.md) — Guest 产物导出与二次批准导入
-- [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 4 可选）
+- [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 0A–4 已收口）
 - [`architecture.md`](architecture.md) — 总体分层（含 Web）
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵与迁移状态
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议

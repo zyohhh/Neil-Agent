@@ -1522,7 +1522,7 @@ CLI 展示修改预览并等待用户输入 y/yes
 
 ### 可视化路线
 
-- `visualization-development.md`：Phase 3B 由「进行中」更正为「已完成」；Phase 4（Neural Map）仍为唯一明确未开始的可选 Phase。
+- `visualization-development.md`：Phase 3B 由「进行中」更正为「已完成」；当时 Phase 4 仍标为可选未开始（已于同日后续提交完成，见下节）。
 - `Phase 3A` 条目与 Phase 3B 交付说明对齐；保留「较旧检查点 / 跨进程仍用 Git」约束。
 
 ### Web / 开发记录
@@ -1533,7 +1533,7 @@ CLI 展示修改预览并等待用户输入 y/yes
 
 ### 对照审核
 
-- `claude-code-review.md` 后续优先级：guest export host 侧标为已实现；补充 Phase 4 可选与文档链接。
+- `claude-code-review.md` 后续优先级：guest export host 侧标为已实现；补充 Phase 4 文档链接（Phase 4 已于同日后续提交完成）。
 
 ## 2026-08-26：Phase 4 Neural Map
 
@@ -1549,3 +1549,11 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 仅聚合已记录的工具活动元数据，不扫描工作区或保存文件正文。
 - 目录节点上限 48，事件窗口 512；超限时向父目录 rollup。
 - `git_stage` 多路径以分号拼接进有界 `workspace_path` 字段。
+
+## 2026-08-26：Phase 4 后文档交叉引用同步
+
+### 收口表述
+
+- `visualization-development.md`：Phase 3 的 Git 回退条目改为**持续约束**；新增「路线收口与跨路线后续项」表，明确编号 Phase 已全部完成。
+- `claude-code-review.md`：Phase 4 移入「已实施优化」；「后续优先级」改为跨路线开放项（WSB 手测、guest runner 可选加固、Web 未立项能力）。
+- `host-runtime.md`、`README.md`：修正 Phase 4 / F7 Neural Map 的过时描述。

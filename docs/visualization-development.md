@@ -99,7 +99,8 @@ Agent / ToolRegistry / Context
             ├──► ExecutionGraphProjector
             ├──► TimelineProjector
             ├──► MetricsProjector
-            └──► TimeMachineProjector ◄── sanitized session/checkpoint metadata
+            ├──► TimeMachineProjector ◄── sanitized session/checkpoint metadata
+            └──► NeuralMapProjector
                        │
                        ▼
                Textual / Rich views
@@ -172,7 +173,8 @@ Agent / ToolRegistry / Context
 - [x] 回放只重建投影，不重新调用模型或工具。
 - [x] 将“查看历史”与“恢复状态”设计成两个独立能力。
 - [x] 恢复必须具有明确审批、哈希/版本并发校验、原子应用和失败回滚（仅最新任务检查点；Time Machine `R` 入口复用 `/rewind-task` 语义）。
-- [ ] 多文件可靠恢复完成前，继续把 Git 作为主回退机制。
+
+**持续约束（非待交付 Phase）：** 多文件可靠恢复能力完善前，跨进程与较旧检查点仍把 Git 作为主回退机制；Time Machine 不扩大为会话/事件 as-of 恢复。
 
 Phase 3A 交付边界：事件窗口最多 512 条、会话最多 50 个、任务检查点最多 20 个；持久事件存储需显式开启，默认是内存回放。浏览器只展示脱敏元数据和 as-of 投影，不保存会话标题/消息、文件路径/哈希/正文。Phase 3B 已在 `/cockpit --live` 的 Time Machine 视图为**最新**任务检查点提供 `R` 审批恢复入口，复用 `/rewind-task` 的全量预检、哈希复核、原子应用与失败回滚；较旧检查点仍须使用 Git。
 
@@ -184,6 +186,23 @@ Phase 3A 交付边界：事件窗口最多 512 条、会话最多 50 个、任�
 - [x] 先用静态夹具验证信息价值，再决定是否进入实时主界面。
 
 Phase 4 交付边界：`tool_call` 事件新增脱敏 `workspace_path` 与 `activity_kind` 元数据；`NeuralMapProjector` 在最多 512 条事件上投影最多 48 个目录节点，含 EARLY/MID/LATE 时间窗口与低/中/高风险着色。`/cockpit --live` 使用 `F7` 在同一监控槽打开 Neural Map；静态夹具 `build_neural_map_fixture_events()` 与单元测试先行验证信息价值。不记录文件正文、哈希或绝对路径。
+
+## 路线收口与跨路线后续项
+
+**编号路线状态：** Phase 0A–4 的检查清单已全部勾选完成；`visualization-development.md` 中不再有未开始的编号 Phase。
+
+**本路线持续约束：**
+
+- Time Machine 仅支持**最新**任务检查点的审批恢复；较旧检查点与会话 as-of 状态仍须使用 Git。
+- Neural Map 只聚合已脱敏的工具活动元数据，不扫描工作区或持久化文件正文。
+
+**跨路线、非本文件编号范围的后续项**（见各自文档）：
+
+| 项 | 状态 | 文档 |
+| --- | --- | --- |
+| 真实 WSB 端到端手测（`export_paths` → `import_guest_export`） | 待专用环境验证 | [`guest-export-import.md`](guest-export-import.md) |
+| Guest runner（C#）`export_paths` 强制 | 可选纵深防御 | [`sandbox-certification-runbook.md`](sandbox-certification-runbook.md) |
+| Web Terminal/PTY、Focus/Build、跨 Provider 切换 | 仍未立项 | [`web-workbench-development.md`](web-workbench-development.md) |
 
 ## 每个批次的完成标准
 

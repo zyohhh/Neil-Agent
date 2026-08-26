@@ -99,6 +99,6 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 
 - [`architecture.md`](architecture.md) — 总体分层
 - [`guest-export-import.md`](guest-export-import.md) — Guest 产物导出与二次批准导入
-- [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 4 可选未开始）
+- [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 0A–4 已收口）
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`claude-code-review.md`](claude-code-review.md) — 与 Claude Code 的能力对照
