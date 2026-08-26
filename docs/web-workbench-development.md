@@ -914,22 +914,24 @@ feat(api): add tool approval flow
 
 不要用 stash 作为长期保存 Provider WIP 的方案；如确需 stash，必须由改动所有者明确确认并包含未跟踪文件。
 
-## 19. 待确认决策
+## 19. 产品决策记录（历史）
 
-在 P0/P1 开始前需确认：
+P0–P9 已全部完成。下列为立项期决策；已决项不再阻塞实现。
 
-1. P0 已基于 Provider Runtime Phase 5；合并前是否先将 Provider 分支单独推送/合入 `main`？
-2. 产品名称使用 `Web Workbench`、`Workspace` 还是 `Mission Control`？
-3. Focus/Build 是纯展示模式，还是分别代表只读分析与可修改工具权限？在权限语义确定前不实现为真实开关。
-4. 已决：P8 允许浏览器在控制租约、精确 revision 与 idle 门禁下恢复/切换工作区本地会话；浏览器不接收完整消息或 Provider 私有状态。
-5. 已决：P9 由 Web Controller 持有启动配置的不可变替代副本，只允许显式同 Provider 白名单；Provider、endpoint 与凭据仍由启动配置拥有。
-6. 质量检查输出允许显示多少正文、保留多久？
-7. P4 美元成本已采用显式、操作方维护的版本化费率表；仓库只提供 schema 示例，不内置会过期的价格。
-8. 已决：P5 采用 wheel 内嵌生产产物；Vite 开发服务器只用于源码开发，不是发布启动项。
+| # | 议题 | 状态 |
+| --- | --- | --- |
+| 1 | P0 基于 Provider Phase 5 基线合入 `main` | ✅ 已决（已合入） |
+| 2 | 产品名称 `Web Workbench` / `Workspace` / `Mission Control` | 已采用 **Web Workbench** |
+| 3 | Focus/Build 权限语义 | ⏸ 未立项；UI 保持不可用，不作真实开关 |
+| 4 | P8 会话恢复与切换 | ✅ 已决并实现 |
+| 5 | P9 同 Provider 模型白名单 | ✅ 已决并实现 |
+| 6 | 质量检查输出正文保留策略 | 当前 turn 内最多 20 条；持久化仅 `latest_quality_check` |
+| 7 | P4 Cost 费率表 | ✅ 显式 `WEB_RATE_TABLE`，无表则 unavailable |
+| 8 | P5 wheel 内嵌静态资源 | ✅ 已决并实现 |
 
-P1–P9 已接入真实 Agent、逐工具审批、Review、wheel 分发、参考图回归门禁、前端故障恢复、Web 会话连续性和受控模型切换；稳定的 P0 fixture 仍只用于视觉与状态回归。Focus/Build 的真实权限语义、跨 Provider 切换、自动 fallback 和跨进程完整质量历史仍是后续产品决策，在契约明确前继续保持不可操作或 unavailable。
+**仍未立项（非 P10+ Phase）：** Web Terminal/PTY（需独立安全评审）、Focus/Build 真实权限、跨 Provider 切换、自动 fallback、跨 turn 完整质量检查历史。在契约明确前继续保持 unavailable。
 
-其中第 1、3、5 项会影响后端边界，必须在接真实 Agent 前确定；其他项可在 fixture 原型评审后决定。
+P1–P9 已接入真实 Agent、逐工具审批（含 `binding_kind`）、Review、wheel 分发、参考图回归、前端故障恢复、Web 会话连续性、受控模型切换与 guest export 导入；P0 fixture 仍用于视觉与状态回归。
 
 ## 20. 完成定义
 

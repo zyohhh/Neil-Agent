@@ -13,6 +13,7 @@ from .activity import (
     describe_tool_result,
     safe_tool_name,
 )
+from .neural_map import tool_activity_metadata
 from .checkpoint import FileCheckpointHistory
 from .config import DEFAULT_SYSTEM_PROMPT
 from .context import (
@@ -1080,6 +1081,7 @@ class Agent:
                 "tool_name": safe_tool_name(call.name),
                 "argument_count": len(call.arguments),
                 "requires_approval": requires_approval,
+                **tool_activity_metadata(call),
             },
         )
         quality_span = (

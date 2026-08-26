@@ -312,7 +312,7 @@ Provider 初始化时应生成最终能力快照。Agent 请求某项能力前�
 - 新增 `providers/base.py`、`errors.py`、`retry.py`、`factory.py` 和 `anthropic_messages.py`，落地 Provider 身份、能力快照、停止原因、私有状态、统一错误与重试策略。
 - `Message`、`ToolCall`、`ToolResult` 和 `ToolDefinition` 不再携带 Anthropic `to_api_dict()`；协议编码集中到 Anthropic Messages 适配边界，上下文预算与压缩改用 provider-neutral 领域 JSON。
 - Settings 默认兼容 DeepSeek，同时支持 `LLM_PROVIDER`、`LLM_MODEL`、`LLM_BASE_URL` 及按选中 Provider 条件校验的密钥；Ollama/vLLM 不再要求云 API Key。
-- ProviderFactory 当前仅注册 DeepSeek；选择尚未实现的 Claude/OpenAI/Ollama/vLLM 会在网络请求前 fail closed，不会静默回落。
+- ProviderFactory 在 Phase 1 时仅注册 DeepSeek；**此后 Phase 2–5 已完成** DeepSeek、Claude、OpenAI、Ollama 与 vLLM 注册（见 Phase 5 完成记录）。
 - `ModelResponse` 已加入统一 `stop_reason` 和可选 `provider_state`，旧 `LLMClient` 继续作为 DeepSeek 兼容入口。
 
 ### Phase 2：完成 Anthropic Messages 家族（2～3 天）

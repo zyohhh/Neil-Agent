@@ -158,7 +158,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - `Agent.context_what_if()` 接受 1–1,000,000 个字符，使用明确标注的 ASCII（约 0.3 token/字符）合成输入重新运行同一完整轮次选择路径，生成版本 1 的只含计数 `ContextWhatIf`。它不调用模型、工具或 hook，不发布运行时事件，也不修改历史或最近服务端 usage。
 - Textual 使用同一个工作区槽位承载 DAG 和 Context，`F3`（或 `Ctrl+T`）切换，不再增加会压缩回答区的第三个纵向面板。Context 视图按 `F4` 打开本地模拟对话框，输入 `0` 可清除；Agent 回合执行时禁用模拟，避免与历史写入并发。宽屏显示完整前后对照，窄屏压缩为四行洞察，矮屏将基础与模拟压力收进边框副标题，完整保留五层和回答区。
 - 快照只在驾驶舱挂载、用户提交和回合结束时计算，不由 250 ms 指标刷新反复扫描历史。提交态的 `CURRENT CHAIN` 目前只表示规范化后的当前用户消息，界面明确标记 `SUBMIT SNAPSHOT`；工具循环追加消息和 `before_model` hook 的动态上下文尚未纳入本切片。
-- Phase 2A 的三批交付已全部完成；Phase 2B Security Shield 与 Phase 3A Time Machine 只读回放亦已收口；Phase 3B 最新检查点恢复已在 Time Machine 提供审批入口。
+- Phase 2A 的三批交付已全部完成；Phase 2B Security Shield、Phase 3A Time Machine 只读回放、Phase 3B 最新检查点恢复与 Phase 4 Neural Map 均已收口，见 [`visualization-development.md`](visualization-development.md)。
 
 ### Web Workbench（P9 已完成）
 

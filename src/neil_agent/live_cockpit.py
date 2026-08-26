@@ -54,6 +54,11 @@ from .security import (
     project_security_boundary_watch,
     project_security_shield,
 )
+from .neural_map import (
+    NeuralMapProjector,
+    NeuralMapSnapshot,
+    render_neural_map_snapshot,
+)
 from .time_machine import (
     TimeMachineHistory,
     TimeMachineHistoryProjection,
@@ -76,7 +81,7 @@ SHORT_TERMINAL_HEIGHT = 36
 
 NodeFilter = Literal["all", "active", "failed", "tools"]
 PrimaryMonitorView = Literal["execution", "context"]
-MonitorView = Literal["execution", "context", "security", "time-machine"]
+MonitorView = Literal["execution", "context", "security", "time-machine", "neural-map"]
 
 _FILTER_LABELS: dict[NodeFilter, str] = {
     "all": "ALL",
@@ -136,6 +141,16 @@ _CONTEXT_PRESSURE_BORDER_COLORS = {
     "warning": "#c49a24",
     "critical": "#ffb454",
     "exceeded": "#d72d5b",
+}
+_NEURAL_MAP_RISK_STYLES = {
+    "low": "dim",
+    "medium": "bold #ffb454",
+    "high": "bold #ff4f7d",
+}
+_NEURAL_MAP_RISK_MARKERS = {
+    "low": "·",
+    "medium": "!",
+    "high": "*",
 }
 _SECURITY_STATE_LABELS: dict[CapabilityState, str] = {
     "direct": "DIRECT",
@@ -640,6 +655,13 @@ class LiveCockpitApp(App[None]):
             tooltip="浏览事件/会话/检查点；最新检查点可按 R 经审批恢复",
         ),
         Binding(
+            "f7",
+            "toggle_neural_map",
+            "神经图谱",
+            priority=True,
+            tooltip="查看目录级读/写/检查热度与风险着色",
+        ),
+        Binding(
             "r",
             "restore_checkpoint",
             "恢复检查点",
@@ -745,6 +767,21 @@ class LiveCockpitApp(App[None]):
         background: #100f1b;
     }
 
+    #neural-map-panel {
+        width: 2fr;
+        min-width: 40;
+        margin-right: 1;
+        border: round #2f6f4a;
+        background: #09140f;
+    }
+
+    #neural-map-detail-panel {
+        width: 1fr;
+        min-width: 28;
+        border: round #3f7a5d;
+        background: #0f1713;
+    }
+
     .panel-title {
         height: 2;
         padding: 0 1;
@@ -786,6 +823,16 @@ class LiveCockpitApp(App[None]):
     #time-machine-detail-panel .panel-title {
         color: #c8b8ff;
         background: #1b1730;
+    }
+
+    #neural-map-panel .panel-title {
+        color: #9ee37d;
+        background: #102018;
+    }
+
+    #neural-map-detail-panel .panel-title {
+        color: #8fd6b0;
+        background: #13231a;
     }
 
     #execution-tree {
@@ -866,6 +913,31 @@ class LiveCockpitApp(App[None]):
         scrollbar-background: #100f1b;
     }
 
+    #neural-map-tree {
+        height: 1fr;
+        padding: 0 1 1 1;
+        scrollbar-color: #2f6f4a;
+        scrollbar-background: #09140f;
+    }
+
+    #neural-map-inline-detail {
+        display: none;
+        height: auto;
+        max-height: 9;
+        padding: 0 1 1 1;
+        color: #c6d4df;
+        overflow-y: auto;
+    }
+
+    #neural-map-detail {
+        height: 1fr;
+        padding: 1 2;
+        color: #c6d4df;
+        overflow-y: auto;
+        scrollbar-color: #3f7a5d;
+        scrollbar-background: #0f1713;
+    }
+
     #conversation {
         height: 1fr;
         min-height: 14;
@@ -907,7 +979,8 @@ class LiveCockpitApp(App[None]):
     LiveCockpitApp.narrow #dag-panel,
     LiveCockpitApp.narrow #context-panel,
     LiveCockpitApp.narrow #security-panel,
-    LiveCockpitApp.narrow #time-machine-panel {
+    LiveCockpitApp.narrow #time-machine-panel,
+    LiveCockpitApp.narrow #neural-map-panel {
         width: 1fr;
         min-width: 0;
         margin-right: 0;
@@ -916,11 +989,13 @@ class LiveCockpitApp(App[None]):
     LiveCockpitApp.narrow #detail-panel,
     LiveCockpitApp.narrow #context-detail-panel,
     LiveCockpitApp.narrow #security-detail-panel,
-    LiveCockpitApp.narrow #time-machine-detail-panel {
+    LiveCockpitApp.narrow #time-machine-detail-panel,
+    LiveCockpitApp.narrow #neural-map-detail-panel {
         display: none;
     }
 
-    LiveCockpitApp.narrow #time-machine-inline-detail {
+    LiveCockpitApp.narrow #time-machine-inline-detail,
+    LiveCockpitApp.narrow #neural-map-inline-detail {
         display: block;
     }
 
@@ -1007,6 +1082,10 @@ class LiveCockpitApp(App[None]):
         display: none;
     }
 
+    LiveCockpitApp.short #neural-map-title {
+        display: none;
+    }
+
     LiveCockpitApp.short #context-layers {
         height: 1fr;
         padding: 0 1;
@@ -1033,6 +1112,16 @@ class LiveCockpitApp(App[None]):
         display: block;
         max-height: 5;
         padding: 0 1;
+    }
+
+    LiveCockpitApp.short #neural-map-inline-detail {
+        display: block;
+        max-height: 5;
+        padding: 0 1;
+    }
+
+    LiveCockpitApp.short #neural-map-panel {
+        border-subtitle-align: left;
     }
 
     LiveCockpitApp.output-expanded #workspace {
@@ -1124,6 +1213,9 @@ class LiveCockpitApp(App[None]):
             persistence_enabled=self._time_machine_persistence_enabled,
             persistent_event_count=self._persistent_event_count,
         )
+        self._neural_map_projector = NeuralMapProjector()
+        self._neural_map_selection: str | None = None
+        self._neural_map_snapshot = self._project_neural_map()
         self._context_snapshot = agent.context_tomography()
         self._context_simulation: ContextWhatIf | None = None
         self._monitor_view: MonitorView = "execution"
@@ -1192,6 +1284,10 @@ class LiveCockpitApp(App[None]):
         return self._time_machine_snapshot
 
     @property
+    def neural_map_snapshot(self) -> NeuralMapSnapshot:
+        return self._neural_map_snapshot
+
+    @property
     def _cockpit_screen(self) -> Screen[Any]:
         return self.screen_stack[0]
 
@@ -1255,6 +1351,24 @@ class LiveCockpitApp(App[None]):
                 with Vertical(id="time-machine-detail-panel"):
                     yield Static("HISTORICAL PROJECTION", classes="panel-title")
                     yield Static(id="time-machine-detail")
+            with Horizontal(id="neural-map-view", classes="workspace-view"):
+                with Vertical(id="neural-map-panel"):
+                    yield Static(
+                        "NEURAL MAP  ·  DIRECTORY HEAT  ·  METADATA ONLY",
+                        id="neural-map-title",
+                        classes="panel-title",
+                    )
+                    neural_tree: Tree[str] = Tree(
+                        "DIRECTORIES",
+                        id="neural-map-tree",
+                    )
+                    neural_tree.show_guides = True
+                    neural_tree.guide_depth = 2
+                    yield neural_tree
+                    yield Static(id="neural-map-inline-detail")
+                with Vertical(id="neural-map-detail-panel"):
+                    yield Static("ACTIVITY PROJECTION", classes="panel-title")
+                    yield Static(id="neural-map-detail")
         with Vertical(id="conversation"):
             yield Static(
                 self._stream_title_text(),
@@ -1278,6 +1392,7 @@ class LiveCockpitApp(App[None]):
         self._refresh_context_view()
         self._refresh_security_view()
         self._refresh_time_machine_view()
+        self._refresh_neural_map_view()
         self._metrics_timer = self.set_interval(0.25, self._refresh_metrics)
         self._cockpit_screen.query_one("#prompt", Input).focus()
 
@@ -1310,6 +1425,7 @@ class LiveCockpitApp(App[None]):
             self._refresh_context_view()
             self._refresh_security_view()
             self._refresh_time_machine_view()
+            self._refresh_neural_map_view()
 
     @on(Input.Submitted, "#prompt")
     def submit_prompt(self, event: Input.Submitted) -> None:
@@ -1353,6 +1469,8 @@ class LiveCockpitApp(App[None]):
         self._refresh_projection()
         if self._monitor_view == "time-machine":
             self._refresh_time_machine_snapshot(refresh_history=False)
+        if self._monitor_view == "neural-map":
+            self._refresh_neural_map_snapshot()
 
     def on_assistant_chunk(self, message: AssistantChunk) -> None:
         self._cockpit_screen.query_one("#transcript", Log).write(
@@ -1379,6 +1497,8 @@ class LiveCockpitApp(App[None]):
         self._refresh_context_view()
         if self._monitor_view == "time-machine":
             self._refresh_time_machine_snapshot(refresh_history=True)
+        if self._monitor_view == "neural-map":
+            self._refresh_neural_map_snapshot()
         self._turn_done.set()
         self._refresh_metrics()
 
@@ -1428,6 +1548,17 @@ class LiveCockpitApp(App[None]):
                 tree = self._cockpit_screen.query_one("#time-machine-tree", Tree)
                 tree.root.set_label(self._time_machine_root_label())
         self._refresh_time_machine_detail()
+
+    @on(Tree.NodeHighlighted, "#neural-map-tree")
+    def highlight_neural_map_directory(
+        self,
+        message: Tree.NodeHighlighted[str],
+    ) -> None:
+        directory = message.node.data
+        if directory is None:
+            return
+        self._neural_map_selection = directory
+        self._refresh_neural_map_detail()
 
     def request_tool_approval(self, call: ToolCall, preview: str) -> bool:
         """Block only the Agent worker while the UI obtains a decision."""
@@ -1510,6 +1641,16 @@ class LiveCockpitApp(App[None]):
             self._primary_monitor_view
             if self._monitor_view == "time-machine"
             else "time-machine"
+        )
+        self._set_monitor_view(target)
+
+    def action_toggle_neural_map(self) -> None:
+        if isinstance(self.screen, ModalScreen):
+            return
+        target: MonitorView = (
+            self._primary_monitor_view
+            if self._monitor_view == "neural-map"
+            else "neural-map"
         )
         self._set_monitor_view(target)
 
@@ -1673,6 +1814,8 @@ class LiveCockpitApp(App[None]):
             self._refresh_security_view()
         elif monitor_view == "time-machine":
             self._refresh_time_machine_snapshot(refresh_history=True)
+        elif monitor_view == "neural-map":
+            self._refresh_neural_map_snapshot()
         self._refresh_stream_title()
         self.refresh_bindings()
         self._cockpit_screen.query_one("#prompt", Input).focus()
@@ -1710,6 +1853,7 @@ class LiveCockpitApp(App[None]):
             "context": "上下文",
             "security": "安全盾",
             "time-machine": "时间机器",
+            "neural-map": "神经图谱",
         }[self._monitor_view]
         action = f"F2 返回{monitor_label}" if self.output_expanded else "F2 展开结果"
         return f"AGENT STREAM  ·  {action}  ·  最近 {MAX_LIVE_OUTPUT_LINES} 行"
@@ -2055,6 +2199,70 @@ class LiveCockpitApp(App[None]):
             Static,
         ).update(content)
 
+    def _project_neural_map(self) -> NeuralMapSnapshot:
+        return self._neural_map_projector.project(
+            (*self._historical_events, *self._events),
+        )
+
+    def _refresh_neural_map_snapshot(self) -> None:
+        self._neural_map_snapshot = self._project_neural_map()
+        self._refresh_neural_map_view()
+
+    def _refresh_neural_map_view(self) -> None:
+        snapshot = self._neural_map_snapshot
+        panel = self._cockpit_screen.query_one("#neural-map-panel", Vertical)
+        panel.styles.border = (
+            "round",
+            "#ffb454" if snapshot.truncated else "#2f6f4a",
+        )
+        panel.border_title = (
+            f" NEURAL MAP · A{snapshot.total_activities} · D{len(snapshot.nodes)} "
+            if self.has_class("short")
+            else None
+        )
+        panel.border_subtitle = (
+            " R/W/C WINDOWS · METADATA ONLY "
+            if self.has_class("short")
+            else None
+        )
+        title = format_neural_map_title(snapshot, compact=self.has_class("short"))
+        self._cockpit_screen.query_one("#neural-map-title", Static).update(title)
+        self._refresh_neural_map_tree()
+
+    def _refresh_neural_map_tree(self) -> None:
+        snapshot = self._neural_map_snapshot
+        tree = self._cockpit_screen.query_one("#neural-map-tree", Tree)
+        tree.reset(
+            Text(
+                f"DIRECTORIES  {len(snapshot.nodes)}",
+                style="bold #9ee37d",
+            )
+        )
+        tree.root.expand()
+        for node in snapshot.nodes:
+            label = Text(_NEURAL_MAP_RISK_MARKERS[node.risk] + " ", style="dim")
+            label.append(node.directory, style=_NEURAL_MAP_RISK_STYLES[node.risk])
+            label.append(
+                f"  R{node.read_heat} W{node.write_heat} C{node.check_heat}",
+                style="dim",
+            )
+            tree.root.add_leaf(label, data=node.directory)
+        if snapshot.nodes and self._neural_map_selection is None:
+            self._neural_map_selection = snapshot.nodes[0].directory
+        self._refresh_neural_map_detail()
+
+    def _refresh_neural_map_detail(self) -> None:
+        rendered = render_neural_map_snapshot(
+            self._neural_map_snapshot,
+            selection=self._neural_map_selection,
+        )
+        content = Text(rendered)
+        self._cockpit_screen.query_one("#neural-map-detail", Static).update(content)
+        self._cockpit_screen.query_one(
+            "#neural-map-inline-detail",
+            Static,
+        ).update(content)
+
     def _refresh_projection(self) -> None:
         self._graph = ExecutionGraphProjector().project(self._events)
         self._metrics = MetricsProjector().project(self._graph)
@@ -2238,6 +2446,29 @@ def run_live_cockpit(
     finally:
         if callable(replace_handler):
             replace_handler(previous_handler)
+
+
+def format_neural_map_title(
+    snapshot: NeuralMapSnapshot,
+    *,
+    compact: bool = False,
+) -> Text:
+    """Render directory heat summary without file bodies or secrets."""
+
+    prefix = "NEURAL MAP  ·  " if compact else "NEURAL MAP  ·  DIRECTORY HEAT  ·  "
+    output = Text(prefix, style="bold #9ee37d")
+    output.append(
+        f"A{snapshot.total_activities} D{len(snapshot.nodes)}",
+        style="#c6d4df",
+    )
+    if snapshot.truncated:
+        output.append("  ·  TRUNCATED", style="bold #ffb454")
+    if snapshot.rolled_up_directories:
+        output.append(
+            f"  ·  ROLLUP {snapshot.rolled_up_directories}",
+            style="dim",
+        )
+    return output
 
 
 def format_security_title(

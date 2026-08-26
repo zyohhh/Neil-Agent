@@ -1319,7 +1319,7 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 更新 `docs/architecture.md`：补充 Web Workbench 分层、`host_runtime.py`、五 Provider 配置项与 Phase 2B 状态。
 - 重写 `docs/claude-code-review.md`：纳入 Web、多 Provider、沙箱认证与当前测试规模；列出 Web/CLI 已知差距。
 - 修正 `docs/web-workbench-development.md`：`POST /api/v1/ws-ticket`、实际目录结构、已实现的事件类型。
-- 新增 `docs/host-runtime.md`：三入口能力矩阵、迁移状态与待对齐项。
+- 新增 `docs/host-runtime.md`：三入口能力矩阵与迁移状态（后续条目已全部对齐，见该文档「迁移状态」表）。
 
 ### host_runtime 准备工作
 
@@ -1327,10 +1327,10 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `cli.py`、`noninteractive.py`、`web/controller.py` 改为通过 `build_host_runtime()` 装配工具与指令上下文，消除三处重复代码。
 - 新增 `tests/test_host_runtime.py`：指令目标、各 HostMode 工具矩阵与 Web 已知差距断言。
 
-### 已知待办（未在本批实现）
+### 已知待办（未在本批实现；已于后续批次完成）
 
-- Web 会话 `SessionStore` load/save 与 `select_session` 命令。
-- 共享 `SecurityShield` / cockpit DTO 映射供 Web 快照使用。
+- ~~Web 会话 `SessionStore` load/save 与 `select_session` 命令。~~ → 2026-08-21 P8 / 2026-08-24 会话连续性。
+- ~~共享 `SecurityShield` / cockpit DTO 映射供 Web 快照使用。~~ → 2026-08-21 host parity + 2026-08-25 Security 投影。
 
 ### 验证
 
@@ -1377,8 +1377,7 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 会话标题、预览和消息，以及检查点路径、哈希、原正文与结果正文，在宿主读取
   后立即被不可逆地投影掉；长生命周期 Textual 应用只持有脱敏历史。新增 canary
   回归同时检查快照、渲染输出和应用内部历史表示。
-- Time Machine 只观察既有事实，不调用模型、工具或 hook，不发布新事件，也没有
-  恢复按钮或状态修改回调。Phase 3B 安全恢复继续延后，跨进程主回退仍是 Git。
+- Time Machine 只观察既有事实，不调用模型、工具或 hook，不发布新事件。Phase 3A 不提供恢复；Phase 3B 安全恢复已于 2026-08-25 另条交付（见下），跨进程主回退仍是 Git。
 
 ### 验证与下一阶段
 
@@ -1435,8 +1434,8 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `uv build --wheel` 成功生成 `neil_agent-0.1.0-py3-none-any.whl`，wheel 已确认包含
   新运行时模块、静态资源和 manifest。全部验证未调用真实付费模型 API。
 - 最高优先级仍是在专用 Windows runner 完成三轮强制 workflow、独立 review 与
-  运行时认证；认证后再推进 guest 产物导出和二次批准导入。Time Machine Phase 3B
-  继续保持延后与只读边界。
+  运行时认证，并手测 `run_command(export_paths)` → `import_guest_export` 全流程。
+  Guest 产物导出与二次批准导入的 host 侧实现已于 2026-08-25 合入 `main`。
 
 ## 2026-08-25：Web ContextTomography 快照投影
 
@@ -1518,3 +1517,35 @@ CLI 展示修改预览并等待用户输入 y/yes
 
 - 新增 [`docs/guest-export-import.md`](docs/guest-export-import.md)：端到端流程、工具参数、guest 写入约定、`binding_kind`、限制与手测清单。
 - 更新 `architecture.md`、`host-runtime.md`、`non-interactive.md`、`web-workbench-development.md`、`sandbox-certification-runbook.md`、`sandbox-assessment.md`、`claude-code-review.md`、`README.md` 交叉引用。
+
+## 2026-08-26：文档状态同步
+
+### 可视化路线
+
+- `visualization-development.md`：Phase 3B 由「进行中」更正为「已完成」；Phase 4（Neural Map）仍为唯一明确未开始的可选 Phase。
+- `Phase 3A` 条目与 Phase 3B 交付说明对齐；保留「较旧检查点 / 跨进程仍用 Git」约束。
+
+### Web / 开发记录
+
+- `web-workbench-development.md` §19 由「待确认决策」改为「产品决策记录（历史）」；P0–P9 标为已完成。
+- `web-workbench-basic-acceptance.md`：P9 模型切换纳入常规回归表述。
+- `DevelopmentRecords.md`：2026-08-20 host_runtime 待办、2026-08-23 Phase 3A「3B 延后」、2026-08-24 P9 下一阶段 guest/3B 表述与当前 `main` 对齐。
+
+### 对照审核
+
+- `claude-code-review.md` 后续优先级：guest export host 侧标为已实现；补充 Phase 4 可选与文档链接。
+
+## 2026-08-26：Phase 4 Neural Map
+
+### 交付
+
+- 新增 `neural_map.py`：`NeuralMapProjector`、静态夹具 `build_neural_map_fixture_events()`、纯文本 `render_neural_map_snapshot()`。
+- `tool_call` 运行时元数据扩展 `workspace_path`（脱敏相对路径）与 `activity_kind`（read/write/check/other）。
+- `/cockpit --live` 使用 `F7` 打开 Neural Map 监控视图；目录热度、时间窗口与风险着色只读展示。
+- 单测：`tests/test_neural_map.py`；live cockpit 浏览测试补充 F7 路径。
+
+### 限制
+
+- 仅聚合已记录的工具活动元数据，不扫描工作区或保存文件正文。
+- 目录节点上限 48，事件窗口 512；超限时向父目录 rollup。
+- `git_stage` 多路径以分号拼接进有界 `workspace_path` 字段。

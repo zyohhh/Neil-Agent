@@ -34,7 +34,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 6. 新增 `-p/--print` 一次性入口；默认 v1 只读，`json` 和 `stream-json` 不混入终端装饰或思考内容，默认不保存会话。
 7. 新增类型化生命周期 hooks：前置阶段可拒绝，`before_model` 可提供有界请求上下文，后置阶段只审计；回调异常默认关闭相关操作。
 8. 依据 Provider 文档与字符比例调整 token 软估算，并明确实际请求与费用仍以服务端 `usage` 为准。
-9. 完成 Windows Sandbox 契约、guest runner、认证 bundle 与条件 `run_command` 实现；认证宿主上可选 `export_paths` 与 `import_guest_export` 二次批准导入 guest UTF-8 产物。普通开发机缺少 `wsb.exe` 时按设计跳过，不产生认证。
+9. 完成 Windows Sandbox 契约、guest runner、认证 bundle 与条件 `run_command` 实现；认证宿主上可选 `export_paths` 与 `import_guest_export` 二次批准导入 guest UTF-8 产物（host 侧，2026-08-25）。普通开发机缺少 `wsb.exe` 时按设计跳过，不产生认证。
 10. 接收并累加服务端 `usage`，在 `/context`、会话版本 3+、一次性结构化结果与 Web 快照中保留最近成功回合的实测；会话版本 4 以可选直接父 ID 记录本地分支谱系，版本 5 增加可选 Provider/模型绑定。
 11. 用独立版本化夹具固定 v1/v2 的 `json` / `stream-json` 字段与错误代码；v2 通过 request/approve 两次运行、精确预览绑定和一次性消费开放受限操作，不改变 v1。
 12. 增加可选的元数据 JSONL 审计 sink；它预检真实路径、限制单条与总大小并做单备份轮转，不记录正文或凭据。
@@ -45,7 +45,8 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 17. 引入 `host_runtime.py`，统一 CLI、非交互与 Web 的工具注册与能力矩阵文档。
 18. Web 会话切换受控制租约、revision 与 idle 状态保护；成功 turn 原子保存，失败/取消不写入，保存失败闭锁，跨 Provider/模型私有状态在发网前拒绝。
 19. 完成 Textual Time Machine Phase 3A：按事件游标只读重建历史 DAG/指标，浏览脱敏会话分支、压缩与进程内任务检查点；默认不持久化事件，不重新调用模型或工具，也不混入恢复能力。
-20. Web 可在控制租约、精确 revision、idle 且空会话门禁下选择操作方明确允许的同 Provider 模型；事务失败保持旧 worker，会话绑定阻止通过历史恢复绕过预检。
+20. 完成 Textual Time Machine Phase 3B：在 `/cockpit --live` Time Machine 为**最新**任务检查点提供 `R` 审批恢复，复用 `/rewind-task` 预检与回滚；较旧检查点仍用 Git。
+21. Web 可在控制租约、精确 revision、idle 且空会话门禁下选择操作方明确允许的同 Provider 模型；事务失败保持旧 worker，会话绑定阻止通过历史恢复绕过预检。
 
 本轮实现后的自动化与显式真实验收结果见开发记录；常规测试和离线检查不调用真实付费 API，除非显式开启 smoke 或 eval 验收。
 
@@ -59,13 +60,15 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 
 ## 后续优先级
 
-1. 在专用 Windows runner 完成真实 WSB 端到端手测：`run_command(export_paths)` → `import_guest_export`。
+1. 在专用 Windows runner 完成真实 WSB 端到端手测：`run_command(export_paths)` → `import_guest_export`（host 侧已实现，见 [`guest-export-import.md`](guest-export-import.md)）。
 2. Guest runner（C#）侧强制只允许写入已声明的 `export_paths`（可选纵深防御）。
-3. 维持 Time Machine Phase 3B 的审批与原子性边界；不扩大恢复范围。
+3. 维持 Time Machine Phase 3B 的审批与原子性边界；不扩大恢复范围（较旧检查点与会话 as-of 仍用 Git）。
+4. 可视化 Phase 4 Neural Map（可选）：先用静态夹具验证信息价值，见 [`visualization-development.md`](visualization-development.md)。
 
 ## 相关文档
 
 - [`guest-export-import.md`](guest-export-import.md) — Guest 产物导出与二次批准导入
+- [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 4 可选）
 - [`architecture.md`](architecture.md) — 总体分层（含 Web）
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵与迁移状态
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议

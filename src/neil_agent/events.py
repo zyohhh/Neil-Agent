@@ -54,6 +54,7 @@ PreviewBindingState = Literal[
     "not_checked",
 ]
 RuntimeMetadataName = Literal[
+    "activity_kind",
     "approval_decision",
     "argument_count",
     "cache_creation_input_tokens",
@@ -81,6 +82,7 @@ RuntimeMetadataName = Literal[
     "tool_calls",
     "tool_count",
     "tool_name",
+    "workspace_path",
 ]
 RuntimeMetadataValue: TypeAlias = StrictBool | StrictInt | StrictStr
 RuntimeObserver = Callable[["RuntimeEvent"], None]
@@ -140,6 +142,8 @@ _STAGE_METADATA_FIELDS: dict[
         "requires_approval",
         "approval_decision",
         "preview_binding",
+        "activity_kind",
+        "workspace_path",
         "is_error",
         "result_chars",
         "elapsed_ms",
@@ -161,6 +165,7 @@ _STAGE_METADATA_FIELDS: dict[
     ),
 }
 _ENUM_METADATA_VALUES = {
+    "activity_kind": frozenset({"read", "write", "check", "other"}),
     "approval_decision": frozenset(
         {"pending", "approved", "rejected", "unavailable", "error"}
     ),

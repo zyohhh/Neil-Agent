@@ -93,8 +93,12 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | Web ContextTomography 快照投影 | ✅ |
 | 跨入口 parity 回归测试 | ✅ `tests/test_host_runtime.py` |
 
+当前无已知 host_runtime 迁移缺口；后续新能力应优先经 `build_host_runtime()` 接入三入口。
+
 ## 相关文档
 
 - [`architecture.md`](architecture.md) — 总体分层
+- [`guest-export-import.md`](guest-export-import.md) — Guest 产物导出与二次批准导入
+- [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 4 可选未开始）
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`claude-code-review.md`](claude-code-review.md) — 与 Claude Code 的能力对照

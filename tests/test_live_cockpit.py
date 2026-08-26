@@ -37,6 +37,7 @@ from neil_agent.live_cockpit import (
     format_context_detail,
     format_context_insights,
     format_context_layers,
+    format_neural_map_title,
     format_node_detail,
     format_node_label,
     format_security_boundaries,
@@ -46,6 +47,7 @@ from neil_agent.live_cockpit import (
     run_live_cockpit,
     visible_node_ids,
 )
+from neil_agent.neural_map import build_neural_map_fixture_events
 from neil_agent.projections import ExecutionGraphProjector
 from neil_agent.schemas import TokenUsage, ToolCall
 from neil_agent.session import SessionSummary
@@ -786,6 +788,52 @@ async def test_live_app_browses_time_machine_without_model_or_source_content() -
         assert app.query_one("#transcript", Log).region.height >= 5
 
         await pilot.press("f6")
+        await pilot.pause()
+        assert app.monitor_view == "execution"
+        assert agent.prompts == []
+
+    assert bus.close()
+
+
+@pytest.mark.asyncio
+async def test_live_app_browses_neural_map_without_file_bodies() -> None:
+    bus = EventBus()
+    agent = FakeLiveAgent(bus)
+    app = LiveCockpitApp(
+        agent,
+        bus,
+        model="deepseek-v4-flash",
+        workspace="D:/workspace",
+        initial_events=build_neural_map_fixture_events(),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("f7")
+        await pilot.pause()
+
+        switcher = app.query_one("#workspace", ContentSwitcher)
+        tree = app.query_one("#neural-map-tree", Tree)
+        assert app.monitor_view == "neural-map"
+        assert switcher.current == "neural-map-view"
+        assert agent.prompts == []
+        assert len(tree.root.children) >= 3
+        assert "NEURAL MAP" in app.query_one("#neural-map-title").render().plain
+        assert format_neural_map_title(app.neural_map_snapshot).plain
+
+        tree.select_node(tree.root.children[0])
+        await pilot.pause()
+        detail = app.query_one("#neural-map-detail").render().plain
+        assert "METADATA ONLY" in detail
+        assert "PRIVATE" not in detail
+
+        await pilot.resize_terminal(60, 24)
+        await pilot.pause()
+        assert app.query_one("#neural-map-panel").display
+        assert not app.query_one("#neural-map-detail-panel").display
+        assert app.query_one("#neural-map-inline-detail").display
+        assert app.query_one("#transcript", Log).region.height >= 5
+
+        await pilot.press("f7")
         await pilot.pause()
         assert app.monitor_view == "execution"
         assert agent.prompts == []
