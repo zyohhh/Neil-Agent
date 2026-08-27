@@ -38,6 +38,29 @@ def test_hides_env_and_private_key_files(tmp_path: Path) -> None:
         tools.read_file("private.pem")
 
 
+def test_hides_credential_store_paths_aligned_with_sandbox_snapshot(
+    tmp_path: Path,
+) -> None:
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "id_rsa").write_text("PRIVATE KEY", encoding="utf-8")
+    aws = tmp_path / ".aws"
+    aws.mkdir()
+    (aws / "credentials").write_text("aws_secret=1", encoding="utf-8")
+    (tmp_path / "credentials.json").write_text("{}", encoding="utf-8")
+    tools = FileSystemTools(tmp_path)
+
+    listing = tools.list_directory()
+    assert ".ssh" not in listing
+    assert "credentials.json" not in listing
+    with pytest.raises(ToolError, match="敏感|受保护"):
+        tools.read_file(".ssh/id_rsa")
+    with pytest.raises(ToolError, match="敏感|受保护"):
+        tools.read_file(".aws/credentials")
+    with pytest.raises(ToolError, match="敏感"):
+        tools.read_file("credentials.json")
+
+
 def test_search_skips_blocked_directories(tmp_path: Path) -> None:
     (tmp_path / "visible.txt").write_text("needle", encoding="utf-8")
     blocked = tmp_path / ".venv"

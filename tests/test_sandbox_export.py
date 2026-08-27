@@ -61,5 +61,19 @@ def test_guest_export_rejects_escape_and_sensitive_paths() -> None:
             run_id="run-01",
             request_hash="a" * 64,
             certification_sha256="b" * 64,
+            files=((".ssh/id_rsa", b"x"),),
+        )
+    with pytest.raises(GuestExportError, match="blocked"):
+        build_guest_export_manifest(
+            run_id="run-01",
+            request_hash="a" * 64,
+            certification_sha256="b" * 64,
             files=((".git/config", b"x"),),
         )
+    allowed = build_guest_export_manifest(
+        run_id="run-01",
+        request_hash="a" * 64,
+        certification_sha256="b" * 64,
+        files=((".env.example", b"API_KEY=example"),),
+    )
+    assert allowed.files[0].path == ".env.example"

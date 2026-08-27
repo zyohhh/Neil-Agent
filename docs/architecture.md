@@ -60,6 +60,8 @@ tools/registry.py
     │    工作区受限的读取、搜索和原子写入
     └→ tools/shell.py
          固定质量检查、只读 Git、本地暂存和提交、子进程安全边界
+    sensitive_paths.py
+      共享凭据目录/文件 denylist，供文件工具、Git 暂存、Web 文件树、guest export 与沙箱快照使用
 
 sandbox.py
   平台无关的不可变执行策略、Windows Sandbox 能力探测和 fail-closed 适配层
@@ -71,7 +73,7 @@ web/ (React + TypeScript)
   本地 Workbench UI；生产构建写入 src/neil_agent/web/static/ 并随 wheel 分发
 ```
 
-`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置。沙箱适配层不会注册工具；通用命令是否可见仍必须由宿主在平台安全门禁通过后显式决定。三条入口（CLI、非交互、Web）通过 `host_runtime.py` 共享工具装配；各入口仍独立负责审批、会话、输出与 UI。能力矩阵与已知差距见 [`host-runtime.md`](host-runtime.md)。Web 产品与协议细节见 [`web-workbench-development.md`](web-workbench-development.md)。
+`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置，`sensitive_paths.py` 维护一份凭据目录与文件 denylist。沙箱适配层不会注册工具；通用命令是否可见仍必须由宿主在平台安全门禁通过后显式决定。三条入口（CLI、非交互、Web）通过 `host_runtime.py` 共享工具装配；各入口仍独立负责审批、会话、输出与 UI。能力矩阵与已知差距见 [`host-runtime.md`](host-runtime.md)。对照 Claude Code 后的安全加固批次见 [`security-hardening.md`](security-hardening.md)。Web 产品与协议细节见 [`web-workbench-development.md`](web-workbench-development.md)。
 
 ## 项目指令边界
 
@@ -273,7 +275,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 - 所有路径解析后必须位于 `WORKSPACE_ROOT`。
 - 防止利用 `..`、绝对路径或符号链接逃出工作区。
-- 屏蔽 `.env`、`.git`、`.neil-agent`、`.venv`、缓存目录和常见私钥文件。
+- 屏蔽规则只在 `sensitive_paths.py` 维护：`.env` / `.env.*`（`.env.example` 除外）、`.ssh` / `.aws` 等凭据目录、`id_rsa` / `credentials.json` 等文件名、`.git`、`.neil-agent`、`.venv`、缓存目录和常见私钥后缀。host 文件工具、Git 暂存、Web 文件树、guest export 与 sandbox snapshot 共用该名单。
 - 单文件读取和写入上限为 1 MB。
 - 搜索结果最多返回 100 条。
 - diff 预览最多显示 20,000 字符。
@@ -329,7 +331,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 ## 本地 Git 写入边界
 
 - `git_stage` 只接受最多 50 个明确的工作区相对文件路径，并使用 literal pathspec 阻止 Git pathspec magic。
-- 不允许暂存整个工作区、目录、越界路径、`.neil-agent`、其他受保护目录、`.env` 或常见私钥文件。
+- 不允许暂存整个工作区、目录、越界路径，以及 `sensitive_paths.py` 列出的受保护目录、`.env` 或常见私钥/凭据文件。
 - 暂存预览包含状态、已暂存和未暂存 diff，以及未跟踪文本文件内容；Git clean filter 可能运行外部程序，因此必须审批。
 - 暂存预览的 `Change-ID` 同时覆盖 Git diff 和完整文件内容，预览后发生任何相关变化都会要求重新确认。
 - `git_commit` 只从当前暂存区创建本地提交，消息必须是 1–200 字符的单行文本。

@@ -35,6 +35,7 @@
 | `config.py` | 从环境变量或 `.env` 读取并校验 API Key、模型、提示词、重试和运行限制 |
 | `registry.py` | 注册工具、生成预览、执行审批检查并统一返回结果 |
 | `filesystem.py` | 在工作区内读取、搜索以及原子写入 UTF-8 文件 |
+| `sensitive_paths.py` | 共享凭据目录/文件 denylist，供文件工具、Git、Web、guest export 与沙箱快照使用 |
 | `shell.py` | 执行固定质量检查、只读 Git，以及需审批的明确路径暂存和本地提交 |
 | `__init__.py` | 保存包版本，并把命令行入口转发给 `cli.py` |
 
@@ -1557,3 +1558,17 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `visualization-development.md`：Phase 3 的 Git 回退条目改为**持续约束**；新增「路线收口与跨路线后续项」表，明确编号 Phase 已全部完成。
 - `claude-code-review.md`：Phase 4 移入「已实施优化」；「后续优先级」改为跨路线开放项（WSB 手测、guest runner 可选加固、Web 未立项能力）。
 - `host-runtime.md`、`README.md`：修正 Phase 4 / F7 Neural Map 的过时描述。
+
+## 2026-08-27：共享 secret denylist 与安全加固路线
+
+### 文档
+
+- 新增 `docs/security-hardening.md`：按 Claude Code 对照审查的建议顺序拆成 6 个批次；本提交只完成批次 1。
+- `architecture.md`、`claude-code-review.md`、`host-runtime.md`、`README.md` 交叉引用该路线。
+
+### 批次 1
+
+- 新增 `src/neil_agent/sensitive_paths.py`：目录、文件名、私钥后缀、`.env` / `.env.*`（`.env.example` 除外）。
+- `tools/filesystem.py`、`tools/shell.py`（`git_stage`）、`web/service.py`、`sandbox_export.py`、`sandbox_snapshot.py`、`sandbox.py`、`windows_sandbox.py` 删除私有副本，改为调用共享谓词。
+- host 读/写/搜索、guest export、Git 暂存、Web 文件树现与沙箱快照同等拒绝 `.ssh` / `.aws` / `id_rsa` / `credentials.json`。
+- 本批不解析 `git_diff` 正文（批次 5），不默认打开 OS 沙箱。

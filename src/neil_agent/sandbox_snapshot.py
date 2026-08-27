@@ -15,50 +15,13 @@ from types import TracebackType
 from typing import Literal, Protocol, Self
 
 from .errors import SandboxError
+from .sensitive_paths import is_sensitive_entry_name
 
 SNAPSHOT_MANIFEST_VERSION = 1
 COPY_CHUNK_BYTES = 64 * 1024
 DEFAULT_MAX_ENTRIES = 100_000
 DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024
-
-_BLOCKED_DIRECTORIES = frozenset(
-    {
-        ".agents",
-        ".aws",
-        ".azure",
-        ".codex",
-        ".docker",
-        ".git",
-        ".gnupg",
-        ".kube",
-        ".mypy_cache",
-        ".neil-agent",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".ssh",
-        ".venv",
-        "__pycache__",
-        "appdata",
-        "node_modules",
-    }
-)
-_BLOCKED_FILE_NAMES = frozenset(
-    {
-        ".git-credentials",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        "application_default_credentials.json",
-        "credentials",
-        "credentials.json",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "id_rsa",
-    }
-)
-_BLOCKED_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
 _REPARSE_POINT_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x0001
@@ -553,7 +516,7 @@ def _inspect_snapshot_directory_contents(
         if (
             _metadata_is_reparse(metadata)
             or path.is_symlink()
-            or _is_filtered_name(name, is_directory=is_directory)
+            or _is_filtered_name(name)
         ):
             raise SandboxError("待复核快照包含敏感名称、链接或重解析点。")
         relative_path = (
@@ -719,7 +682,7 @@ def _copy_directory_contents(
         )
         if _metadata_is_reparse(entry_metadata) or source_path.is_symlink():
             raise SandboxError("工作区快照拒绝符号链接、junction 或重解析点。")
-        if _is_filtered_name(name, is_directory=stat.S_ISDIR(entry_metadata.st_mode)):
+        if _is_filtered_name(name):
             continue
 
         relative_path = (
@@ -960,16 +923,8 @@ def _path_has_reparse_component(path: Path) -> bool:
     return False
 
 
-def _is_filtered_name(name: str, *, is_directory: bool) -> bool:
-    lowered = name.casefold()
-    if is_directory and lowered in _BLOCKED_DIRECTORIES:
-        return True
-    return (
-        lowered == ".env"
-        or (lowered.startswith(".env.") and lowered != ".env.example")
-        or lowered in _BLOCKED_FILE_NAMES
-        or Path(lowered).suffix in _BLOCKED_SUFFIXES
-    )
+def _is_filtered_name(name: str) -> bool:
+    return is_sensitive_entry_name(name)
 
 
 def _build_manifest(state: _BuildState) -> SnapshotManifest:

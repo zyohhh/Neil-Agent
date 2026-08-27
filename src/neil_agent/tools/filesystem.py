@@ -27,6 +27,7 @@ from ..sandbox_export import (
     format_guest_export_import_sections,
 )
 from ..schemas import ToolDefinition
+from ..sensitive_paths import is_sensitive_relative_path
 from .registry import ToolRegistry
 
 MAX_FILE_SIZE_BYTES = 1_000_000
@@ -34,22 +35,6 @@ MAX_SEARCH_RESULTS = 100
 MAX_DIFF_PREVIEW_CHARS = 20_000
 MAX_TASK_RESTORE_PREVIEW_CHARS = 100_000
 MAX_GUEST_EXPORT_IMPORT_PREVIEW_CHARS = 100_000
-BLOCKED_DIRECTORIES = frozenset(
-    {
-        ".git",
-        ".neil-agent",
-        ".agents",
-        ".codex",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "__pycache__",
-        "node_modules",
-    }
-)
-BLOCKED_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
-BLOCKED_FILE_NAMES = frozenset({".git-credentials", ".netrc", ".npmrc", ".pypirc"})
 
 
 class FileSystemTools:
@@ -827,20 +812,9 @@ class FileSystemTools:
             relative = path.resolve().relative_to(self.root)
         except (OSError, ValueError):
             return False
-        if any(part.lower() in BLOCKED_DIRECTORIES for part in relative.parts):
+        if is_sensitive_relative_path(relative.parts):
             return False
-        if self._is_sensitive_name(relative.name):
-            return False
-        return path.suffix.lower() not in BLOCKED_SUFFIXES
-
-    @staticmethod
-    def _is_sensitive_name(name: str) -> bool:
-        lowered = name.lower()
-        return (
-            lowered in BLOCKED_FILE_NAMES
-            or lowered == ".env"
-            or (lowered.startswith(".env.") and lowered != ".env.example")
-        )
+        return True
 
     def _is_searchable_file(self, path: Path) -> bool:
         try:

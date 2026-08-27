@@ -61,6 +61,7 @@ from .sandbox_lease import (
 )
 from .sandbox_export import GuestExportError, MAX_EXPORT_TOTAL_BYTES
 from .sandbox_export_collect import collect_declared_guest_exports
+from .sensitive_paths import is_sensitive_entry_name
 
 WSB_GUEST_SNAPSHOT = GUEST_SNAPSHOT_DIRECTORY
 WSB_GUEST_CONTROL = GUEST_CONTROL_DIRECTORY
@@ -91,38 +92,6 @@ PROCESS_TERMINATE_GRACE_SECONDS = 2.0
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _REPARSE_POINT_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
-_BLOCKED_DIRECTORIES = frozenset(
-    {
-        ".agents",
-        ".aws",
-        ".azure",
-        ".codex",
-        ".docker",
-        ".git",
-        ".gnupg",
-        ".kube",
-        ".neil-agent",
-        ".ssh",
-        ".venv",
-        "appdata",
-    }
-)
-_BLOCKED_FILE_NAMES = frozenset(
-    {
-        ".git-credentials",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        "application_default_credentials.json",
-        "credentials",
-        "credentials.json",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "id_rsa",
-    }
-)
-_BLOCKED_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
 _CLI_STAGE_ALLOWED_STATUSES: dict[str, frozenset[str]] = {
     "start": frozenset({"Running", "Started", "Succeeded"}),
     "runner": frozenset({"Running", "Succeeded"}),
@@ -1033,6 +1002,8 @@ def _validate_plan_paths(plan: WsbExecutionPlan) -> _ValidatedPaths:
 
 
 def _validate_snapshot_binding(plan: WsbExecutionPlan, snapshot: Path) -> None:
+    from .sandbox_snapshot import inspect_prepared_snapshot
+
     try:
         manifest = inspect_prepared_snapshot(snapshot)
     except SandboxError as error:
@@ -1170,7 +1141,7 @@ def _validate_snapshot_tree(root: Path) -> None:
                     entries_seen += 1
                     if entries_seen > MAX_TREE_ENTRIES:
                         raise WsbHostExecutionError("snapshot 条目数量超过上限。")
-                    if _is_sensitive_name(entry.name):
+                    if is_sensitive_entry_name(entry.name):
                         raise WsbHostExecutionError("snapshot 包含受保护路径。")
                     metadata = entry.stat(follow_symlinks=False)
                     if entry.is_symlink() or _metadata_is_reparse(metadata):
@@ -1392,17 +1363,6 @@ def _contains_path(parent: Path, child: Path) -> bool:
 
 def _contains_control(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
-
-
-def _is_sensitive_name(name: str) -> bool:
-    lowered = name.casefold()
-    return (
-        lowered in _BLOCKED_DIRECTORIES
-        or lowered in _BLOCKED_FILE_NAMES
-        or lowered == ".env"
-        or (lowered.startswith(".env.") and lowered != ".env.example")
-        or Path(lowered).suffix in _BLOCKED_SUFFIXES
-    )
 
 
 def _metadata_is_reparse(metadata: os.stat_result) -> bool:

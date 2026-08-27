@@ -588,18 +588,23 @@ def test_file_tree_is_bounded_and_rejects_sensitive_or_escaping_paths(
     (tmp_path / "src" / "agent.py").write_text("pass", encoding="utf-8")
     (tmp_path / ".git").mkdir()
     (tmp_path / ".env.local").write_text("key=value", encoding="utf-8")
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "id_rsa").write_text("PRIVATE", encoding="utf-8")
     client = _client(tmp_path)
     _authenticate(client)
 
     tree = client.get("/api/v1/files/tree?depth=2")
     traversal = client.get("/api/v1/files/tree", params={"path": "../"})
     sensitive = client.get("/api/v1/files/tree", params={"path": ".git"})
+    ssh_tree = client.get("/api/v1/files/tree", params={"path": ".ssh"})
 
     assert tree.status_code == 200
     assert [item["name"] for item in tree.json()["items"]] == ["src"]
     assert tree.json()["items"][0]["children"][0]["name"] == "agent.py"
     assert traversal.status_code == 400
     assert sensitive.status_code == 400
+    assert ssh_tree.status_code == 400
 
 
 def test_file_tree_revision_supports_incremental_refresh(tmp_path: Path) -> None:

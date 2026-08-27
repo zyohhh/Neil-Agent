@@ -982,7 +982,7 @@ def _show_permissions(
         f"  工作区：{workspace_root}\n"
         f"  直接执行：{', '.join(direct) or '无'}\n"
         f"  每次需要批准：{', '.join(approval) or '无'}\n"
-        "  文件：拒绝工作区外路径、.env、私钥和受保护目录\n"
+        "  文件：拒绝工作区外路径、.env、.ssh/.aws 等凭据目录、私钥和受保护目录\n"
         "  文件恢复：/rewind-task 恢复本进程内最近一次 Agent 任务的文件编辑\n"
         "  命令：仅固定质量检查和受限 Git 操作，不提供任意 shell\n"
         "  网络：只有模型 API 客户端可用；本地工具不提供网络访问\n"

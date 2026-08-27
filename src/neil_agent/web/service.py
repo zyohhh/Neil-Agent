@@ -18,6 +18,7 @@ from ..errors import SessionError, ToolError
 from ..host_runtime import HostMode, build_host_runtime, observe_host_security
 from ..providers.factory import describe_provider
 from ..runtime_models import runtime_model_catalog
+from ..sensitive_paths import is_sensitive_entry_name, is_sensitive_relative_path
 from ..session import (
     SESSION_DIRECTORY,
     SESSION_STATE_DIRECTORY,
@@ -25,12 +26,7 @@ from ..session import (
     SessionStore,
 )
 from ..tools.registry import ToolRegistry
-from ..tools.shell import (
-    BLOCKED_GIT_DIRECTORIES,
-    BLOCKED_GIT_FILE_NAMES,
-    BLOCKED_GIT_SUFFIXES,
-    ShellTools,
-)
+from ..tools.shell import ShellTools
 from .dto import (
     ContextDto,
     CostEstimateDto,
@@ -59,18 +55,6 @@ MAX_TREE_DEPTH = 4
 MAX_REVIEW_FILES = 100
 MAX_WEB_DIFF_CHARS = 40_000
 ReviewState = Literal["empty", "passed", "failed", "stale", "unavailable"]
-SENSITIVE_NAMES = frozenset(
-    {
-        *BLOCKED_GIT_DIRECTORIES,
-        *BLOCKED_GIT_FILE_NAMES,
-        ".env",
-        ".env.local",
-        ".env.development",
-        ".env.production",
-        ".npm-cache",
-        ".uv-cache",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,7 +462,7 @@ class WorkbenchSnapshotService:
         if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
             if normalized:
                 raise ValueError("file tree path must be workspace-relative")
-        if any(self._is_sensitive_name(part) for part in pure.parts):
+        if any(is_sensitive_entry_name(part) for part in pure.parts):
             raise ValueError("file tree path is not available")
         candidate = self.root.joinpath(*pure.parts)
         try:
@@ -509,7 +493,7 @@ class WorkbenchSnapshotService:
         for entry in entries:
             if budget[0] <= 0:
                 break
-            if self._is_sensitive_name(entry.name):
+            if is_sensitive_entry_name(entry.name):
                 continue
             try:
                 info = entry.stat(follow_symlinks=False)
@@ -541,15 +525,6 @@ class WorkbenchSnapshotService:
                 )
             )
         return tuple(nodes)
-
-    @staticmethod
-    def _is_sensitive_name(name: str) -> bool:
-        lowered = name.casefold()
-        return (
-            lowered in SENSITIVE_NAMES
-            or Path(lowered).suffix in BLOCKED_GIT_SUFFIXES
-            or lowered.startswith(".env.")
-        )
 
     @staticmethod
     def _file_tree_revision(root: Path, items: tuple[FileNodeDto, ...]) -> str:
@@ -731,9 +706,10 @@ class WorkbenchSnapshotService:
 
     def _safe_git_path(self, value: str) -> bool:
         pure = PurePosixPath(value.replace("\\", "/"))
-        return not pure.is_absolute() and all(
-            part not in {"", ".", ".."} and not self._is_sensitive_name(part)
-            for part in pure.parts
+        return (
+            not pure.is_absolute()
+            and all(part not in {"", ".", ".."} for part in pure.parts)
+            and not is_sensitive_relative_path(pure.parts)
         )
 
     @staticmethod

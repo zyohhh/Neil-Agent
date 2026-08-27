@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..errors import ToolError
 from ..schemas import ToolDefinition
+from ..sensitive_paths import is_sensitive_relative_path
 from .registry import ToolRegistry
 
 QUALITY_COMMANDS: dict[str, tuple[str, ...]] = {
@@ -24,23 +25,6 @@ MAX_GIT_PATHS = 50
 MAX_COMMIT_MESSAGE_CHARS = 200
 STATUS_TIMEOUT_SECONDS = 5.0
 MAX_WEB_DIFF_CHARS = 40_000
-BLOCKED_GIT_DIRECTORIES = frozenset(
-    {
-        ".git",
-        ".neil-agent",
-        ".agents",
-        ".codex",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".venv",
-        "__pycache__",
-        "node_modules",
-    }
-)
-BLOCKED_GIT_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
-BLOCKED_GIT_FILE_NAMES = frozenset({".git-credentials", ".netrc", ".npmrc", ".pypirc"})
-
 SAFE_ENVIRONMENT_NAMES = frozenset(
     {
         "COMSPEC",
@@ -513,7 +497,7 @@ class ShellTools:
                 raise ToolError("拒绝暂存工作区之外的路径。") from error
             if not relative.parts:
                 raise ToolError("必须明确列出要暂存的文件，不能暂存整个工作区。")
-            if self._is_sensitive_git_path(relative):
+            if is_sensitive_relative_path(relative.parts):
                 raise ToolError("拒绝暂存受保护目录或敏感文件。")
             if candidate.exists() and not candidate.is_file():
                 raise ToolError(f"只能暂存明确的文件路径：{path}")
@@ -525,18 +509,6 @@ class ShellTools:
     @staticmethod
     def _literal_pathspecs(paths: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(f":(literal){path}" for path in paths)
-
-    @staticmethod
-    def _is_sensitive_git_path(relative: Path) -> bool:
-        lowered_parts = tuple(part.lower() for part in relative.parts)
-        if any(part in BLOCKED_GIT_DIRECTORIES for part in lowered_parts):
-            return True
-        name = relative.name.lower()
-        if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
-            return True
-        if name in BLOCKED_GIT_FILE_NAMES:
-            return True
-        return relative.suffix.lower() in BLOCKED_GIT_SUFFIXES
 
     def _is_tracked(self, path: str) -> bool:
         command = self._git_command(

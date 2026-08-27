@@ -6,10 +6,12 @@ import json
 import re
 from dataclasses import dataclass, field
 from hashlib import sha256
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .sensitive_paths import is_blocked_directory_name, is_sensitive_posix_path
 
 GUEST_EXPORT_MANIFEST_VERSION: Literal[1] = 1
 MAX_EXPORT_FILES = 32
@@ -17,17 +19,6 @@ MAX_EXPORT_FILE_BYTES = 1_000_000
 MAX_EXPORT_PATH_CHARS = 1_000
 MAX_EXPORT_TOTAL_BYTES = 5_000_000
 
-_BLOCKED_DIRECTORIES = frozenset(
-    {
-        ".git",
-        ".neil-agent",
-        ".venv",
-        "__pycache__",
-        "node_modules",
-    }
-)
-_BLOCKED_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
-_BLOCKED_FILE_NAMES = frozenset({".git-credentials", ".netrc", ".npmrc", ".pypirc"})
 _WINDOWS_PATH_SEP = re.compile(r"[\\/]+")
 
 
@@ -225,17 +216,10 @@ def _normalize_relative_path(value: str) -> str:
     if len(str(relative)) > MAX_EXPORT_PATH_CHARS:
         raise GuestExportError("guest export path exceeds its length limit")
     normalized = relative.as_posix()
-    parts = PurePosixPath(normalized).parts
-    if any(part.lower() in _BLOCKED_DIRECTORIES for part in parts):
-        raise GuestExportError("guest export path targets a blocked directory")
-    name = parts[-1] if parts else normalized
-    lowered = name.lower()
-    if (
-        lowered in _BLOCKED_FILE_NAMES
-        or lowered == ".env"
-        or lowered.startswith(".env.")
-        or Path(name).suffix.lower() in _BLOCKED_SUFFIXES
-    ):
+    if is_sensitive_posix_path(normalized):
+        parts = PurePosixPath(normalized).parts
+        if any(is_blocked_directory_name(part) for part in parts):
+            raise GuestExportError("guest export path targets a blocked directory")
         raise GuestExportError("guest export path targets a sensitive file")
     return normalized
 

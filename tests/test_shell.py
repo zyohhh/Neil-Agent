@@ -305,7 +305,14 @@ def test_git_stage_previews_untracked_text_content(
 
 @pytest.mark.parametrize(
     "path",
-    [".", ".env", "../outside.py", "private.pem", ".neil-agent/sessions/a.json"],
+    [
+        ".",
+        ".env",
+        "../outside.py",
+        "private.pem",
+        ".neil-agent/sessions/a.json",
+        ".ssh/id_rsa",
+    ],
 )
 def test_git_stage_rejects_broad_sensitive_or_outside_paths(
     monkeypatch: pytest.MonkeyPatch,

@@ -24,6 +24,7 @@ from uuid import uuid4
 from xml.etree import ElementTree
 
 from .errors import SandboxError
+from .sensitive_paths import is_sensitive_entry_name, is_sensitive_file_name
 
 if TYPE_CHECKING:
     from .sandbox_approval import RunCommandApprovalBinding
@@ -90,38 +91,6 @@ _CERTIFICATION_GATE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _BLOCKED_EXECUTABLE_SUFFIXES = frozenset(
     {".bat", ".cmd", ".js", ".jse", ".ps1", ".vbs", ".vbe", ".wsf", ".wsh"}
 )
-_BLOCKED_SNAPSHOT_DIRECTORIES = frozenset(
-    {
-        ".agents",
-        ".aws",
-        ".azure",
-        ".codex",
-        ".docker",
-        ".git",
-        ".gnupg",
-        ".kube",
-        ".neil-agent",
-        ".ssh",
-        ".venv",
-        "appdata",
-    }
-)
-_BLOCKED_SNAPSHOT_FILE_NAMES = frozenset(
-    {
-        ".git-credentials",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        "application_default_credentials.json",
-        "credentials",
-        "credentials.json",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "id_rsa",
-    }
-)
-_BLOCKED_SNAPSHOT_SUFFIXES = frozenset({".key", ".p12", ".pem", ".pfx"})
 _REPARSE_POINT_ATTRIBUTE = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400))
 _WINDOWS_FILE_ATTRIBUTE_DIRECTORY = 0x0010
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x0080
@@ -348,7 +317,7 @@ class RunSpec:
             raise ValueError("sandbox executable must be an absolute file path")
         if self.executable.suffix.lower() in _BLOCKED_EXECUTABLE_SUFFIXES:
             raise ValueError("scripts requiring a shell or interpreter are forbidden")
-        if _is_sensitive_name(self.executable.name):
+        if is_sensitive_file_name(self.executable.name):
             raise ValueError("sandbox executable path is sensitive")
 
         if not isinstance(self.argv, tuple):
@@ -1192,16 +1161,6 @@ def _normalize_relative_directory(value: str) -> str:
     return "." if compact in {"", "."} else compact
 
 
-def _is_sensitive_name(name: str) -> bool:
-    lowered = name.casefold()
-    return (
-        lowered == ".env"
-        or (lowered.startswith(".env.") and lowered != ".env.example")
-        or lowered in _BLOCKED_SNAPSHOT_FILE_NAMES
-        or Path(lowered).suffix in _BLOCKED_SNAPSHOT_SUFFIXES
-    )
-
-
 def _is_reparse_point(path: Path) -> bool:
     try:
         metadata = path.lstat()
@@ -1238,10 +1197,7 @@ def _validate_snapshot_contents(root: Path) -> None:
                     seen_entries += 1
                     if seen_entries > MAX_SNAPSHOT_ENTRIES:
                         raise SandboxError("工作区快照条目过多，无法安全验证。")
-                    name = entry.name.casefold()
-                    if name in _BLOCKED_SNAPSHOT_DIRECTORIES or _is_sensitive_name(
-                        entry.name
-                    ):
+                    if is_sensitive_entry_name(entry.name):
                         raise SandboxError("工作区快照包含受保护目录或敏感文件。")
                     try:
                         metadata = entry.stat(follow_symlinks=False)

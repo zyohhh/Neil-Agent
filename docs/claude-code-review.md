@@ -1,4 +1,4 @@
-# Claude Code 官方文档对照审核（更新于 2026-08-26）
+# Claude Code 官方文档对照审核（更新于 2026-08-27）
 
 本审核把 Claude Code 当作成熟产品参考，不把 Neil Agent 改造成 Claude Code 的复制品。结论基于 Anthropic 官方的[项目指令](https://code.claude.com/docs/en/memory)、[权限](https://code.claude.com/docs/en/permissions)、[沙箱](https://code.claude.com/docs/en/sandboxing)、[会话](https://code.claude.com/docs/en/sessions)、[检查点](https://code.claude.com/docs/en/checkpointing)、[非交互模式](https://code.claude.com/docs/en/headless)和 [hooks](https://code.claude.com/docs/en/hooks) 文档。
 
@@ -48,6 +48,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 20. 完成 Textual Time Machine Phase 3B：在 `/cockpit --live` Time Machine 为**最新**任务检查点提供 `R` 审批恢复，复用 `/rewind-task` 预检与回滚；较旧检查点仍用 Git。
 21. Web 可在控制租约、精确 revision、idle 且空会话门禁下选择操作方明确允许的同 Provider 模型；事务失败保持旧 worker，会话绑定阻止通过历史恢复绕过预检。
 22. 完成 Textual Neural Map Phase 4：`F7` 打开目录级读/写/检查热度与风险着色；`tool_call` 事件记录脱敏 `workspace_path` 与 `activity_kind`，投影不扫描或保存文件正文（见 [`visualization-development.md`](visualization-development.md)）。
+23. 统一共享 secret denylist（`sensitive_paths.py`）：host 文件工具、Git 暂存、Web 文件树、guest export 与 sandbox snapshot 使用同一份凭据目录/文件名单（见 [`security-hardening.md`](security-hardening.md) 批次 1）。
 
 本轮实现后的自动化与显式真实验收结果见开发记录；常规测试和离线检查不调用真实付费 API，除非显式开启 smoke 或 eval 验收。
 
@@ -61,7 +62,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 
 ## 后续优先级
 
-编号可视化路线（Phase 0A–4）与 Web Workbench P0–P9 均已交付；下列为跨路线仍开放的验证与可选增强，不构成新的编号 Phase。
+编号可视化路线（Phase 0A–4）与 Web Workbench P0–P9 均已交付。对照 Claude Code 的应用层缺口按 [`security-hardening.md`](security-hardening.md) 批次推进（批次 1 共享 denylist 已完成；2–6 为质量检查文案、审批 `consume()`、Web `command_id` / `LLM_BASE_URL`、只读 Git 内容过滤、写路径 `O_NOFOLLOW`）。下列为跨路线仍开放的验证与产品边界，不构成新的编号 Phase。
 
 1. 在专用 Windows runner 完成真实 WSB 端到端手测：`run_command(export_paths)` → `import_guest_export`（host 侧已实现，见 [`guest-export-import.md`](guest-export-import.md)）。
 2. Guest runner（C#）侧强制只允许写入已声明的 `export_paths`（可选纵深防御，见 [`guest-export-import.md`](guest-export-import.md) 与 [`sandbox-certification-runbook.md`](sandbox-certification-runbook.md)）。
@@ -74,5 +75,6 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 - [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 0A–4 已收口）
 - [`architecture.md`](architecture.md) — 总体分层（含 Web）
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵与迁移状态
+- [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`provider-adapter-development.md`](provider-adapter-development.md) — 多 Provider 维护期说明
