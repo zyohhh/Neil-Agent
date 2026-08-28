@@ -1626,3 +1626,12 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `ToolRegistry.unregister`、`LifecycleHooks.register` / `JsonlAuditSink.register` / `TaskTracker.register` 返回 disposer；`HostRuntime.close()` 逆序执行。
 - `AgentTurnWorker`、非交互 `run_noninteractive` 在 turn 结束后 `close()`；`WorkbenchSnapshotService.replace_host_runtime()` 在 `switch_model` 成功后替换共享 runtime；`WorkbenchController.close()` 关闭 service runtime。
 - 测试覆盖 close 清空 registry/hooks、模型切换后旧 registry 不可见。
+
+## 2026-08-28：只读子任务（批次 3）
+
+### 交付
+
+- 新增 `RuntimeProfile.READONLY_SUBTASK` 与 `run_readonly_subtask` 工具（CLI / Web 标准面）；子运行时仅 `list_directory` / `read_file` / `search_text`。
+- `subtask.py`：`SubtaskParentState`、`execute_readonly_subtask()`、独立 `subtask_*` 预算/超时/摘要上限；子 `HostRuntime` 必 `close()`。
+- `RuntimeEvent` 元数据 `parent_run_id`；Web turn 传入 `run_id`；子事件转发带父链接，不含子任务正文。
+- 测试：`tests/test_readonly_subtask.py`（profile 隔离、摘要有界、历史不合并、取消/转发）。

@@ -61,6 +61,7 @@ from .schemas import (
     TokenUsage,
     validate_message_history,
 )
+from .subtask import note_parent_run_id, parent_tool_event_scope
 from .task import TaskTracker
 from .tools.registry import ToolRegistry
 
@@ -485,6 +486,9 @@ class Agent:
             "agent_turn",
             metadata=self._turn_start_metadata(user_message, request_messages),
         )
+        note_parent_run_id(
+            None if turn_span is None else turn_span.correlation_id,
+        )
         model_started_at = monotonic()
         model_span = self._start_runtime_span(
             "model_request",
@@ -562,6 +566,9 @@ class Agent:
         turn_span = self._start_runtime_span(
             "agent_turn",
             metadata=self._turn_start_metadata(user_message, request_messages),
+        )
+        note_parent_run_id(
+            None if turn_span is None else turn_span.correlation_id,
         )
         counters = {"model_requests": 0, "tool_calls": 0}
         checkpoint_task_id = (
@@ -1093,7 +1100,26 @@ class Agent:
             if call.name == "run_quality_check"
             else None
         )
-        activity = describe_tool_call(call)
+        with parent_tool_event_scope(self._span_event_id(tool_span)):
+            return self._execute_tool_call_body(
+                call,
+                activity=describe_tool_call(call),
+                started_at=started_at,
+                requires_approval=requires_approval,
+                tool_span=tool_span,
+                quality_span=quality_span,
+            )
+
+    def _execute_tool_call_body(
+        self,
+        call: ToolCall,
+        *,
+        activity: ToolActivity,
+        started_at: float,
+        requires_approval: bool,
+        tool_span: RuntimeSpan | None,
+        quality_span: RuntimeSpan | None,
+    ) -> ToolResult:
         hook_result = self._before_tool_hook(call)
         if hook_result is not None:
             return self._finish_tool_call(

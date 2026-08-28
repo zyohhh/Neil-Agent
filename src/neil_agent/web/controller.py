@@ -23,6 +23,7 @@ from ..providers.factory import create_provider
 from ..runtime_models import prepare_runtime_model_switch, runtime_model_catalog
 from ..schemas import ActivityEvent, Message, TokenUsage, ToolCall
 from ..session import SessionHandle, SessionSnapshot, UNTITLED_SESSION
+from ..subtask import SubtaskParentState, subtask_parent_scope
 from ..task import QualityCheckRecord, TaskStep
 from .dto import (
     ActiveSessionDto,
@@ -80,6 +81,8 @@ class TurnWorker(Protocol):
         on_activity: ActivitySink,
         on_runtime: RuntimeSink,
         request_approval: ApprovalSink,
+        *,
+        parent_run_id: str | None = None,
     ) -> CompletedTurnState | None: ...
 
 
@@ -101,6 +104,8 @@ class AgentTurnWorker:
         on_activity: ActivitySink,
         on_runtime: RuntimeSink,
         request_approval: ApprovalSink,
+        *,
+        parent_run_id: str | None = None,
     ) -> CompletedTurnState:
         settings = self._settings
         host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
@@ -136,25 +141,34 @@ class AgentTurnWorker:
                 task_tracker.restore(
                     session.restored_steps(), session.restored_quality_check()
                 )
-            stream = agent.stream_chat(prompt)
-            try:
-                for chunk in stream:
-                    if cancel.is_set():
-                        stream.close()
-                        raise TurnCancelled
-                    on_text(chunk)
-                if cancel.is_set():
-                    raise TurnCancelled
-                bus.flush(timeout=0.5)
-                return CompletedTurnState(
-                    messages=agent.messages,
-                    steps=task_tracker.steps,
-                    latest_quality_check=task_tracker.latest_quality_check,
-                    last_usage=agent.last_usage,
+            with subtask_parent_scope(
+                SubtaskParentState(
+                    settings=settings,
+                    model=model,
+                    parent_run_id=parent_run_id,
+                    forward_runtime_event=on_runtime,
+                    cancel=cancel,
                 )
-            finally:
-                subscription.close()
-                bus.close(timeout=0.5)
+            ):
+                stream = agent.stream_chat(prompt)
+                try:
+                    for chunk in stream:
+                        if cancel.is_set():
+                            stream.close()
+                            raise TurnCancelled
+                        on_text(chunk)
+                    if cancel.is_set():
+                        raise TurnCancelled
+                    bus.flush(timeout=0.5)
+                    return CompletedTurnState(
+                        messages=agent.messages,
+                        steps=task_tracker.steps,
+                        latest_quality_check=task_tracker.latest_quality_check,
+                        last_usage=agent.last_usage,
+                    )
+                finally:
+                    subscription.close()
+                    bus.close(timeout=0.5)
         finally:
             host_runtime.close()
 
@@ -691,6 +705,7 @@ class WorkbenchController:
                 lambda call, preview: self._request_approval(
                     run_id, call, preview, cancel
                 ),
+                parent_run_id=run_id,
             )
         except TurnCancelled:
             self._finish_run(run_id, "cancelled")

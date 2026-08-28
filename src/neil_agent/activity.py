@@ -92,6 +92,12 @@ def describe_tool_call(call: ToolCall) -> ToolActivity:
             "更新任务步骤",
             (f"步骤：{step_number}", f"状态：{status}"),
         )
+    if call.name == "run_readonly_subtask":
+        prompt = _safe_text(call.arguments.get("prompt"), "未指定")
+        return ToolActivity(
+            "启动只读子任务",
+            (f"提示规模：{_text_metrics(prompt)}",),
+        )
 
     tool_name = _safe_text(call.name, "未知工具")
     argument_names = ", ".join(sorted(call.arguments)) or "无"
@@ -118,6 +124,8 @@ def describe_tool_result(call: ToolCall, result: ToolResult) -> tuple[str, ...]:
         return (f"结果：{_result_excerpt(result.content)}",)
     if call.name in {"set_task_plan", "update_task_step"}:
         return ()
+    if call.name == "run_readonly_subtask":
+        return (f"摘要：{_result_excerpt(result.content)}",)
     return (f"结果：{_result_excerpt(result.content)}",)
 
 

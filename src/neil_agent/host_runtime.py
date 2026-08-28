@@ -49,6 +49,7 @@ class RuntimeProfile(str, Enum):
     STANDARD = "standard"
     BENCHMARK_MINIMAL = "benchmark-minimal"
     WEB_SAFE = "web-safe"
+    READONLY_SUBTASK = "readonly-subtask"
 
 
 InstructionScope = Literal["cwd", "workspace_root"]
@@ -243,6 +244,12 @@ def build_host_runtime(
             registry,
             allow_replace_text=not readonly_mode,
         )
+    elif runtime_profile is RuntimeProfile.READONLY_SUBTASK:
+        _register_benchmark_minimal_filesystem(
+            filesystem,
+            registry,
+            allow_replace_text=False,
+        )
     elif readonly_mode:
         filesystem.register_read_only(registry)
         shell.register_read_only(registry)
@@ -287,6 +294,15 @@ def build_host_runtime(
     ):
         task_tracker = TaskTracker(change_handler=task_change_handler)
         disposers.append(task_tracker.register(registry))
+
+    if (
+        _uses_standard_tool_surface(runtime_profile)
+        and mode in {HostMode.CLI, HostMode.WEB}
+    ):
+        from .tools.subtask import ReadonlySubtaskTools
+
+        disposers.append(ReadonlySubtaskTools().register(registry))
+        _track_registry_tools(registry, disposers, seen_tools)
 
     host_profile = HostProfile(
         mode=mode,

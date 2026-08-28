@@ -60,6 +60,7 @@ from .session import (
     SessionStore,
     normalize_session_title,
 )
+from .subtask import SubtaskParentState, subtask_parent_scope
 from .task import TaskTracker
 from .time_machine import (
     MAX_TIME_MACHINE_EVENTS,
@@ -610,26 +611,29 @@ def run(console: Console) -> None:
         if not user_input:
             continue
 
-        response_stream = agent.stream_chat(user_input)
-        try:
-            for chunk in response_stream:
-                renderer.show_text(chunk)
-        except KeyboardInterrupt:
-            response_stream.close()
-            renderer.finish_answer()
-            console.print("[yellow]已取消本次回答。[/yellow]")
-        except NeilAgentError as error:
-            renderer.finish_answer()
-            console.print(f"[bold red]请求失败：[/bold red]{error}")
-        else:
-            renderer.finish_answer()
-            current_session = _save_current_session(
-                console,
-                session_store,
-                current_session,
-                agent,
-                task_tracker,
-            )
+        with subtask_parent_scope(
+            SubtaskParentState(settings=settings, model=llm),
+        ):
+            response_stream = agent.stream_chat(user_input)
+            try:
+                for chunk in response_stream:
+                    renderer.show_text(chunk)
+            except KeyboardInterrupt:
+                response_stream.close()
+                renderer.finish_answer()
+                console.print("[yellow]已取消本次回答。[/yellow]")
+            except NeilAgentError as error:
+                renderer.finish_answer()
+                console.print(f"[bold red]请求失败：[/bold red]{error}")
+            else:
+                renderer.finish_answer()
+                current_session = _save_current_session(
+                    console,
+                    session_store,
+                    current_session,
+                    agent,
+                    task_tracker,
+                )
 
 
 def _show_welcome(

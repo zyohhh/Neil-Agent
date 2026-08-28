@@ -159,6 +159,32 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum tool-use cycles allowed for one user request.",
     )
+    subtask_max_tool_rounds: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum tool-use cycles allowed for one read-only subtask.",
+    )
+    subtask_max_context_chars: int = Field(
+        default=40_000,
+        ge=1_000,
+        description="Character budget for one read-only subtask conversation.",
+    )
+    subtask_max_result_chars: int = Field(
+        default=8_000,
+        ge=500,
+        description="Maximum summary characters returned from one read-only subtask.",
+    )
+    subtask_max_prompt_chars: int = Field(
+        default=4_000,
+        ge=100,
+        description="Maximum prompt characters accepted by run_readonly_subtask.",
+    )
+    subtask_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description="Wall-clock timeout in seconds for one read-only subtask.",
+    )
     workspace_root: Path = Field(
         default=Path("."),
         description="Directory boundary for local project tools.",

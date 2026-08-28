@@ -56,7 +56,7 @@
 | --- | --- | --- | --- |
 | 1 | 已完成 | `RuntimeProfile` 与 `benchmark-minimal` | `build_host_runtime(..., profile=)`；eval 默认 minimal；`HostProfile` 可断言工具集；文档与 CLI 声明 harness |
 | 2 | 已完成 | 可逆注册与 runtime teardown | 工具 / hook / 审批 / sandbox 注册返回 disposer；`switch_model` 与关闭路径逆序清理，无残留注册 |
-| 3 | 未开始 | 只读子任务 | 并行只读探索；独立预算；无写 / 无 shell；`await` + 必 `dispose`；事件带 parent |
+| 3 | 已完成 | 只读子任务 | 并行只读探索；独立预算；无写 / 无 shell；`await` + 必 `dispose`；事件带 parent |
 | 4 | 未开始（可选） | Session goals | 会话日志中的可 pause/resume 目标；CAS；压缩与分支后仍在 |
 | 5 | 未开始（可选） | Skills 目录 | 仅加载工作区内已声明 `SKILL.md`；与 `sensitive_paths` 共用 denylist |
 | 6 | 未开始（可选） | 受限 Plan DSL | 串行步骤由 runtime 解释；步骤仍走审批；禁止任意脚本 |
@@ -102,6 +102,13 @@
 
 **本批不做：** 可继续子对话、后台常驻、跨 Provider 子任务、子任务写文件。
 
+**已实现（批次 3）：**
+
+- `RuntimeProfile.READONLY_SUBTASK`：只读子运行时，工具面为 `list_directory` / `read_file` / `search_text`，无 `replace_text`。
+- 主 Agent 工具 `run_readonly_subtask`（仅 CLI / Web `standard` / `web-safe`）；独立 `subtask_*` 预算与超时；有界摘要返回，子会话不并入主历史。
+- `SubtaskParentState` + `subtask_parent_scope`；Web 传入 `parent_run_id=run_id`；子事件经 `parent_run_id` 与 `parent_event_id` 折叠。
+- `HostRuntime.close()` 在子任务结束路径必调用；取消与超时均 settle。
+
 ## 批次 4–6（可选，不提前开工）
 
 - **Goals：** 用户级持久目标写入会话事件，与 `set_task_plan` 分工（plan = 当前回合步骤，goal = 跨回合目标）。创建/暂停需与当前审批主体一致。
@@ -119,6 +126,8 @@
 ## 相关代码（落地后维护此表）
 
 - `src/neil_agent/host_runtime.py` — `HostMode`、`HostProfile`、`build_host_runtime()`
+- `src/neil_agent/subtask.py` — 只读子任务上下文、预算与 `execute_readonly_subtask()`
+- `src/neil_agent/tools/subtask.py` — `run_readonly_subtask` 工具注册
 - `src/neil_agent/evals.py` — 离线与真实验收入口
 - `src/neil_agent/web/controller.py` — 模型切换与 worker 生命周期
 - `src/neil_agent/hooks.py` / `audit.py` — 注册与卸除

@@ -71,6 +71,7 @@ RuntimeMetadataName = Literal[
     "model_requests",
     "omitted_rounds",
     "output_tokens",
+    "parent_run_id",
     "preview_chars",
     "preview_binding",
     "requires_approval",
@@ -121,6 +122,7 @@ _STAGE_METADATA_FIELDS: dict[
         "response_chars",
         "elapsed_ms",
         "error_type",
+        "parent_run_id",
     ),
     "model_request": (
         "model_round",
@@ -148,6 +150,7 @@ _STAGE_METADATA_FIELDS: dict[
         "result_chars",
         "elapsed_ms",
         "error_type",
+        "parent_run_id",
     ),
     "approval": (
         "tool_name",
