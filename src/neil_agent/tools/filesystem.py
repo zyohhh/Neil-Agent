@@ -749,10 +749,11 @@ class FileSystemTools:
         change_id = sha256(
             before.encode("utf-8") + b"\0" + new_content.encode("utf-8")
         ).hexdigest()[:16]
-        if len(diff) > MAX_DIFF_PREVIEW_CHARS:
+        full_len = len(diff)
+        if full_len > MAX_DIFF_PREVIEW_CHARS:
             diff = (
                 diff[:MAX_DIFF_PREVIEW_CHARS]
-                + f"\n... diff 预览已截断（上限 {MAX_DIFF_PREVIEW_CHARS} 字符）。"
+                + f"\n... diff 预览已截断（完整 {full_len} 字符，上限 {MAX_DIFF_PREVIEW_CHARS}）。"
             )
         return f"{diff}\nChange-ID: {change_id}"
 
@@ -770,10 +771,11 @@ class FileSystemTools:
         change_id = sha256(
             current_content.encode("utf-8") + b"\0<deleted>"
         ).hexdigest()[:16]
-        if len(diff) > MAX_DIFF_PREVIEW_CHARS:
+        full_len = len(diff)
+        if full_len > MAX_DIFF_PREVIEW_CHARS:
             diff = (
                 diff[:MAX_DIFF_PREVIEW_CHARS]
-                + f"\n... diff 预览已截断（上限 {MAX_DIFF_PREVIEW_CHARS} 字符）。"
+                + f"\n... diff 预览已截断（完整 {full_len} 字符，上限 {MAX_DIFF_PREVIEW_CHARS}）。"
             )
         return f"{diff}\nChange-ID: {change_id}"
 

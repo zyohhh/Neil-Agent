@@ -277,15 +277,15 @@ class ShellTools:
             sections.append("未跟踪文件：\n" + "\n".join(untracked_diffs))
 
         command = self._git_command("add", "--", *pathspecs)
-        preview = (
+        preview_body = (
             "将只暂存下面列出的明确路径，不会暂存整个工作区。\n"
             "Git clean filter 可能运行仓库配置的外部程序。\n"
             f"工作目录：{self.root}\n"
             f"命令：{subprocess.list2cmdline(command)}\n\n"
             + "\n\n".join(sections)
-            + f"\n\nChange-ID: {change_id}"
         )
-        return self._truncate(preview)
+        footer = f"\n\nChange-ID: {change_id}"
+        return self._truncate_with_bound_footer(preview_body, footer)
 
     def git_stage(self, paths: list[str]) -> str:
         """Stage only validated, explicit workspace file paths."""
@@ -335,16 +335,16 @@ class ShellTools:
         )
         command = self._git_commit_command(commit_message)
         change_id = sha256(staged_diff.encode("utf-8")).hexdigest()[:16]
-        preview = (
+        preview_body = (
             "将创建本地 Git 提交；不会推送到远端。\n"
             f"工作目录：{self.root}\n"
             f"提交消息：{commit_message}\n"
             f"命令：{subprocess.list2cmdline(command)}\n\n"
             f"暂存区统计：\n{staged_stat or '(no stat output)'}\n\n"
-            f"暂存区 diff：\n{self._truncate(staged_diff)}\n\n"
-            f"Change-ID: {change_id}"
+            f"暂存区 diff：\n{self._truncate(staged_diff)}"
         )
-        return self._truncate(preview)
+        footer = f"\n\nChange-ID: {change_id}"
+        return self._truncate_with_bound_footer(preview_body, footer)
 
     def git_commit(self, message: str) -> str:
         """Create one local commit from the current staged changes."""
@@ -613,6 +613,23 @@ class ShellTools:
         half = self.max_output_chars // 2
         omitted = len(output) - self.max_output_chars
         return output[:half] + f"\n... 已省略 {omitted} 个字符 ...\n" + output[-half:]
+
+    def _truncate_with_bound_footer(self, body: str, footer: str) -> str:
+        """Truncate a preview body while keeping Change-ID and scale metadata visible."""
+
+        if len(body) + len(footer) <= self.max_output_chars:
+            return body + footer
+        budget = self.max_output_chars - len(footer)
+        if budget < 200:
+            return body[: self.max_output_chars]
+        omitted = len(body) - budget
+        half = budget // 2
+        marker = f"\n... 已省略 {omitted} 个字符（完整规模 {len(body)} 字符）...\n"
+        keep_tail = budget - half - len(marker)
+        if keep_tail < 0:
+            return body[:budget] + footer
+        truncated = body[:half] + marker + body[-keep_tail:]
+        return truncated + footer
 
     def _timeout_output(self, error: subprocess.TimeoutExpired) -> str:
         stdout = self._decode_timeout_stream(error.stdout)

@@ -36,6 +36,7 @@ from .context import (
     select_recent_rounds,
     split_rounds,
 )
+from .approval import approval_context_digest
 from .errors import AgentError, HookError, NeilAgentError
 from .events import (
     ApprovalDecision,
@@ -1198,6 +1199,7 @@ class Agent:
             f"等待批准：{activity.title}",
             (*activity.details, "已生成操作预览，确认后才会执行"),
         )
+        instructions_at_preview = self._project_instructions
         try:
             approved = self._approval_handler(call, preview.content)
         except BaseException as error:
@@ -1263,6 +1265,25 @@ class Agent:
             f"执行：{activity.title}",
             activity.details,
         )
+        if (
+            approval_context_digest(self._project_instructions)
+            != approval_context_digest(instructions_at_preview)
+        ):
+            result = ToolResult(
+                tool_call_id=call.id,
+                content="项目指令在批准后已变化，请重新预览并确认。",
+                is_error=True,
+            )
+            return self._finish_tool_call(
+                call,
+                result,
+                activity,
+                started_at,
+                tool_span=tool_span,
+                quality_span=quality_span,
+                approval_decision="approved",
+                preview_binding="changed",
+            )
         approved_execution = self._registry.execute_approved(
             call,
             approved_preview=preview.content,

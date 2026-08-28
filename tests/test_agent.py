@@ -859,6 +859,46 @@ def test_agent_emits_changed_binding_when_preview_invalidates_after_approval() -
     assert bus.close()
 
 
+def test_agent_rejects_execution_when_instructions_change_after_approval() -> None:
+    call = ToolCall(id="call-write", name="write_file", arguments={"path": "a.txt", "content": "x"})
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(call,))],
+        ["blocked", ModelResponse(content="blocked")],
+    ]
+    registry = ToolRegistry()
+    writes: list[str] = []
+    registry.register(
+        ToolDefinition(
+            name="write_file",
+            description="Write a file.",
+            input_schema={"type": "object"},
+        ),
+        lambda path, content: writes.append(path) or f"written {path}",
+        requires_approval=True,
+        preview_handler=lambda path, content: f"preview {path}",
+    )
+    instructions = ["initial rules"]
+
+    def approve(_call: ToolCall, _preview: str) -> bool:
+        instructions[0] = "changed rules after approval"
+        agent.set_project_instructions(instructions[0])
+        return True
+
+    agent = Agent(
+        model,
+        registry=registry,
+        project_instructions=instructions[0],
+        approval_handler=approve,
+    )
+
+    assert "".join(agent.stream_chat("write")) == "blocked"
+    assert writes == []
+    result = model.requests[1][-1].tool_results[0]
+    assert result.is_error is True
+    assert "项目指令在批准后已变化" in result.content
+
+
 def test_agent_returns_denied_write_to_model_without_execution() -> None:
     call = ToolCall(
         id="call-write",

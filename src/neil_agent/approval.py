@@ -588,7 +588,9 @@ class NoninteractiveApprovalBroker:
         self._request_handler = request_handler
         self._binding_resolver = binding_resolver
         self._expected = (
-            store.claim(approval_id, prompt=prompt) if approval_id is not None else None
+            store.preflight(approval_id, prompt=prompt)
+            if approval_id is not None
+            else None
         )
         self._requests: dict[str, ApprovalRequest] = {}
         self._consumed_request_id: str | None = None
@@ -622,9 +624,36 @@ class NoninteractiveApprovalBroker:
                 instructions=instructions,
                 binding=binding,
             ):
+                self._store.consume(
+                    expected,
+                    call,
+                    preview,
+                    prompt=self._prompt,
+                    instructions=instructions,
+                    binding=binding,
+                )
                 self._consumed_request_id = expected.approval_id
                 return True
-            self._expected = None
+            fingerprint = self._store.fingerprint(
+                call,
+                preview,
+                instructions=instructions,
+                binding=binding,
+            )
+            if fingerprint not in self._requests:
+                request = self._store.create(
+                    call,
+                    preview,
+                    prompt=self._prompt,
+                    instructions=instructions,
+                    binding=binding,
+                )
+                self._requests[fingerprint] = request
+                self._request_handler(request)
+            return False
+
+        if self._mode == "approve":
+            return False
 
         fingerprint = self._store.fingerprint(
             call,
@@ -643,6 +672,12 @@ class NoninteractiveApprovalBroker:
             self._requests[fingerprint] = request
             self._request_handler(request)
         return False
+
+
+def approval_context_digest(value: str) -> str:
+    """Return a stable SHA-256 digest for approval-bound prompt or instruction text."""
+
+    return _text_digest(value)
 
 
 def _normalize_approval_id(value: str) -> tuple[str, str]:

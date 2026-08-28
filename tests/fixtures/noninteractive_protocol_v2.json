@@ -29,6 +29,7 @@
   "approval_request": [
     "approval_id",
     "tool_name",
+    "binding_kind",
     "preview",
     "expires_at"
   ],
@@ -65,6 +66,7 @@
       "protocol_version",
       "approval_id",
       "tool_name",
+      "binding_kind",
       "preview",
       "expires_at"
     ],

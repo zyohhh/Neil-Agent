@@ -50,6 +50,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 22. 完成 Textual Neural Map Phase 4：`F7` 打开目录级读/写/检查热度与风险着色；`tool_call` 事件记录脱敏 `workspace_path` 与 `activity_kind`，投影不扫描或保存文件正文（见 [`visualization-development.md`](visualization-development.md)）。
 23. 统一共享 secret denylist（`sensitive_paths.py`）：host 文件工具、Git 暂存、Web 文件树、guest export 与 sandbox snapshot 使用同一份凭据目录/文件名单（见 [`security-hardening.md`](security-hardening.md) 批次 1）。
 24. 质量检查预览与 `/permissions` 明确宿主执行且无 OS 隔离；去掉写入成功后自动催促 `run_quality_check` 的系统提示（见 [`security-hardening.md`](security-hardening.md) 批次 2）。
+25. 审批绑定对齐 v2：非交互 approve 在工具匹配时 `consume()` 后再执行；CLI/Web 在批准后、执行前复核项目指令摘要；截断预览保留 Change-ID 与完整规模（见 [`security-hardening.md`](security-hardening.md) 批次 3）。
 
 本轮实现后的自动化与显式真实验收结果见开发记录；常规测试和离线检查不调用真实付费 API，除非显式开启 smoke 或 eval 验收。
 
@@ -63,7 +64,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 
 ## 后续优先级
 
-编号可视化路线（Phase 0A–4）与 Web Workbench P0–P9 均已交付。对照 Claude Code 的应用层缺口按 [`security-hardening.md`](security-hardening.md) 批次推进（批次 1–2 已完成；3–6 为审批 `consume()`、Web `command_id` / `LLM_BASE_URL`、只读 Git 内容过滤、写路径 `O_NOFOLLOW`）。下列为跨路线仍开放的验证与产品边界，不构成新的编号 Phase。
+编号可视化路线（Phase 0A–4）与 Web Workbench P0–P9 均已交付。对照 Claude Code 的应用层缺口按 [`security-hardening.md`](security-hardening.md) 批次推进（批次 1–3 已完成；4–6 为 Web `command_id` / `LLM_BASE_URL`、只读 Git 内容过滤、写路径 `O_NOFOLLOW`）。下列为跨路线仍开放的验证与产品边界，不构成新的编号 Phase。
 
 1. 在专用 Windows runner 完成真实 WSB 端到端手测：`run_command(export_paths)` → `import_guest_export`（host 侧已实现，见 [`guest-export-import.md`](guest-export-import.md)）。
 2. Guest runner（C#）侧强制只允许写入已声明的 `export_paths`（可选纵深防御，见 [`guest-export-import.md`](guest-export-import.md) 与 [`sandbox-certification-runbook.md`](sandbox-certification-runbook.md)）。

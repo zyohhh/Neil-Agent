@@ -158,7 +158,7 @@ def test_binding_mismatch_burns_approval_permanently(tmp_path: Path) -> None:
         store.load(request.approval_id)
 
 
-def test_approve_broker_claims_before_call_and_mismatch_cannot_be_restored(
+def test_approve_broker_consumes_on_match_and_rejects_mismatch_without_burning(
     tmp_path: Path,
 ) -> None:
     store = ApprovalStore(tmp_path)
@@ -178,17 +178,19 @@ def test_approve_broker_claims_before_call_and_mismatch_cannot_be_restored(
         approval_id=request.approval_id,
     )
 
-    with pytest.raises(ApprovalError, match="已经使用"):
-        store.load(request.approval_id)
+    assert store.load(request.approval_id) == request
     assert broker(_call(content="different"), "different preview") is False
     assert len(generated) == 1
     assert generated[0].approval_id != request.approval_id
-
-    assert broker(_call(), "preview") is False
     assert broker.consumed_request_id is None
 
+    assert broker(_call(), "preview") is True
+    assert broker.consumed_request_id == request.approval_id
+    with pytest.raises(ApprovalError, match="已经使用"):
+        store.load(request.approval_id)
 
-def test_approve_prompt_mismatch_is_claimed_and_permanently_invalid(
+
+def test_approve_prompt_mismatch_is_rejected_without_consuming_approval(
     tmp_path: Path,
 ) -> None:
     store = ApprovalStore(tmp_path)
@@ -199,7 +201,7 @@ def test_approve_prompt_mismatch_is_claimed_and_permanently_invalid(
         instructions="root rules",
     )
 
-    with pytest.raises(ApprovalError, match="prompt.*永久失效"):
+    with pytest.raises(ApprovalError, match="prompt"):
         NoninteractiveApprovalBroker(
             store,
             mode="approve",
@@ -208,8 +210,7 @@ def test_approve_prompt_mismatch_is_claimed_and_permanently_invalid(
             request_handler=lambda _request: None,
             approval_id=request.approval_id,
         )
-    with pytest.raises(ApprovalError, match="已经使用"):
-        store.load(request.approval_id)
+    assert store.load(request.approval_id) == request
 
 
 def test_two_process_like_claims_allow_only_one_winner(
