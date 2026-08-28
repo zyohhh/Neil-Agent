@@ -1485,6 +1485,7 @@ def test_idle_runtime_model_switch_is_allowlisted_bound_and_reversible(
     )
     assert unlisted["code"] == "model_not_allowlisted"
 
+    registry_before_switch = service.registry
     switched = controller.handle_command(
         "owner",
         ClientCommand.model_validate(
@@ -1497,6 +1498,9 @@ def test_idle_runtime_model_switch_is_allowlisted_bound_and_reversible(
         ),
     )
     assert switched["status"] == "accepted"
+    assert registry_before_switch.definitions == ()
+    assert service.registry is not registry_before_switch
+    assert service.registry.definitions
     selected = controller.snapshot()
     assert selected.provider.model == "deepseek-fast"
     assert selected.provider.available_models == (

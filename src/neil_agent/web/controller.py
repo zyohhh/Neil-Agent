@@ -104,56 +104,59 @@ class AgentTurnWorker:
     ) -> CompletedTurnState:
         settings = self._settings
         host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
-        registry = host_runtime.registry
-        instruction_manager = host_runtime.instruction_manager
-        hooks = host_runtime.hooks
-        task_tracker = host_runtime.task_tracker
-        if task_tracker is None:
-            raise RuntimeError("Web host runtime must include a task tracker.")
-        bus = EventBus(queue_size=256, max_observers=1)
-        subscription = bus.subscribe(on_runtime)
-        model = create_provider(settings, retry_handler=on_activity)
-        agent = Agent(
-            model,
-            system_prompt=settings.system_prompt,
-            project_instructions=instruction_manager.current.prompt_section(),
-            max_rounds=settings.max_rounds,
-            max_context_chars=settings.max_context_chars,
-            max_context_tokens=settings.max_context_tokens,
-            registry=registry,
-            max_tool_rounds=settings.max_tool_rounds,
-            activity_handler=on_activity,
-            instruction_scope_handler=instruction_manager.resolve_tool_call,
-            task_tracker=task_tracker,
-            event_bus=bus,
-            file_checkpoints=host_runtime.filesystem.checkpoints,
-            approval_handler=request_approval,
-            hooks=hooks,
-        )
-        if session is not None:
-            agent.restore_messages(session.messages, session.last_usage)
-            task_tracker.restore(
-                session.restored_steps(), session.restored_quality_check()
-            )
-        stream = agent.stream_chat(prompt)
         try:
-            for chunk in stream:
-                if cancel.is_set():
-                    stream.close()
-                    raise TurnCancelled
-                on_text(chunk)
-            if cancel.is_set():
-                raise TurnCancelled
-            bus.flush(timeout=0.5)
-            return CompletedTurnState(
-                messages=agent.messages,
-                steps=task_tracker.steps,
-                latest_quality_check=task_tracker.latest_quality_check,
-                last_usage=agent.last_usage,
+            registry = host_runtime.registry
+            instruction_manager = host_runtime.instruction_manager
+            hooks = host_runtime.hooks
+            task_tracker = host_runtime.task_tracker
+            if task_tracker is None:
+                raise RuntimeError("Web host runtime must include a task tracker.")
+            bus = EventBus(queue_size=256, max_observers=1)
+            subscription = bus.subscribe(on_runtime)
+            model = create_provider(settings, retry_handler=on_activity)
+            agent = Agent(
+                model,
+                system_prompt=settings.system_prompt,
+                project_instructions=instruction_manager.current.prompt_section(),
+                max_rounds=settings.max_rounds,
+                max_context_chars=settings.max_context_chars,
+                max_context_tokens=settings.max_context_tokens,
+                registry=registry,
+                max_tool_rounds=settings.max_tool_rounds,
+                activity_handler=on_activity,
+                instruction_scope_handler=instruction_manager.resolve_tool_call,
+                task_tracker=task_tracker,
+                event_bus=bus,
+                file_checkpoints=host_runtime.filesystem.checkpoints,
+                approval_handler=request_approval,
+                hooks=hooks,
             )
+            if session is not None:
+                agent.restore_messages(session.messages, session.last_usage)
+                task_tracker.restore(
+                    session.restored_steps(), session.restored_quality_check()
+                )
+            stream = agent.stream_chat(prompt)
+            try:
+                for chunk in stream:
+                    if cancel.is_set():
+                        stream.close()
+                        raise TurnCancelled
+                    on_text(chunk)
+                if cancel.is_set():
+                    raise TurnCancelled
+                bus.flush(timeout=0.5)
+                return CompletedTurnState(
+                    messages=agent.messages,
+                    steps=task_tracker.steps,
+                    latest_quality_check=task_tracker.latest_quality_check,
+                    last_usage=agent.last_usage,
+                )
+            finally:
+                subscription.close()
+                bus.close(timeout=0.5)
         finally:
-            subscription.close()
-            bus.close(timeout=0.5)
+            host_runtime.close()
 
 
 CommandName = Literal[
@@ -457,6 +460,7 @@ class WorkbenchController:
             self._reject_pending_locked("Workbench is shutting down")
         if cancel is not None:
             cancel.set()
+        self._service.close()
         self._publish("service_closing", {})
 
     def _acquire_control(
@@ -562,6 +566,7 @@ class WorkbenchController:
             self._runtime_settings = prepared.settings
             self._worker = candidate_worker
             self._runtime_has_switched = True
+            self._service.replace_host_runtime(prepared.settings)
             self._publish(
                 "model_changed",
                 self._model_changed_payload_locked(candidate_projection),

@@ -205,3 +205,51 @@ def test_benchmark_minimal_profile_exposes_only_bounded_file_tools(
 def test_resolve_runtime_profile_uses_web_safe_for_web_mode() -> None:
     assert resolve_runtime_profile(HostMode.WEB) is RuntimeProfile.WEB_SAFE
     assert resolve_runtime_profile(HostMode.CLI) is RuntimeProfile.STANDARD
+
+
+def test_host_runtime_close_unregisters_tools_and_hooks(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, audit_log_enabled=True)
+    runtime = build_host_runtime(settings, mode=HostMode.CLI)
+    assert runtime.registry.definitions
+    assert any(runtime.hooks._callbacks[stage] for stage in runtime.hooks._callbacks)
+
+    runtime.close()
+
+    assert runtime.closed
+    assert runtime.registry.definitions == ()
+    assert all(not callbacks for callbacks in runtime.hooks._callbacks.values())
+    runtime.close()
+
+
+def test_host_runtime_close_runs_disposers_in_reverse_order(tmp_path: Path) -> None:
+    runtime = build_host_runtime(_settings(tmp_path), mode=HostMode.CLI)
+    order: list[str] = []
+    runtime._disposers.clear()
+    runtime._disposers.extend(
+        [
+            lambda: order.append("first"),
+            lambda: order.append("second"),
+        ]
+    )
+
+    runtime.close()
+
+    assert order == ["second", "first"]
+
+
+def test_workbench_service_close_marks_host_runtime_closed(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from neil_agent.web.service import WorkbenchSnapshotService
+
+    service = WorkbenchSnapshotService(
+        _settings(tmp_path),
+        clock=lambda: datetime.now(timezone.utc),
+    )
+    assert not service.host_runtime_closed
+    assert service.registry.definitions
+
+    service.close()
+
+    assert service.host_runtime_closed
+    assert service.registry.definitions == ()

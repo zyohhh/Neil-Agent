@@ -1618,3 +1618,11 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `benchmark-minimal`：只读为 `list_directory` / `read_file` / `search_text`；写入模式再加 `replace_text`；无 Git、质量检查、`run_command`、guest import、`set_task_plan`。
 - Web 默认 `web-safe`；快照 `security.runtime_profile` 与 CLI `/permissions` 展示预设名。
 - `neil-agent-eval` 与 `-p --runtime-profile` 默认/声明 harness；真实 v1 用 `benchmark-minimal`，v2 审批写仍用 `standard`。
+
+## 2026-08-28：可逆注册与 runtime teardown（批次 2）
+
+### 交付
+
+- `ToolRegistry.unregister`、`LifecycleHooks.register` / `JsonlAuditSink.register` / `TaskTracker.register` 返回 disposer；`HostRuntime.close()` 逆序执行。
+- `AgentTurnWorker`、非交互 `run_noninteractive` 在 turn 结束后 `close()`；`WorkbenchSnapshotService.replace_host_runtime()` 在 `switch_model` 成功后替换共享 runtime；`WorkbenchController.close()` 关闭 service runtime。
+- 测试覆盖 close 清空 registry/hooks、模型切换后旧 registry 不可见。

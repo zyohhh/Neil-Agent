@@ -49,6 +49,7 @@ class HookOutcome:
 
 
 HookCallback = Callable[[HookEvent], HookResponse | None]
+RuntimeDisposer = Callable[[], None]
 
 
 class LifecycleHooks:
@@ -62,7 +63,7 @@ class LifecycleHooks:
             "after_tool": [],
         }
 
-    def register(self, stage: HookStage, callback: HookCallback) -> None:
+    def register(self, stage: HookStage, callback: HookCallback) -> RuntimeDisposer:
         """Register one callable for an exact stage with a small fan-out limit."""
 
         callbacks = self._callbacks.get(stage)
@@ -75,6 +76,14 @@ class LifecycleHooks:
         if not callable(callback):
             raise HookError("生命周期 hook 必须是可调用的 Python 对象。")
         callbacks.append(callback)
+
+        def dispose() -> None:
+            try:
+                callbacks.remove(callback)
+            except ValueError:
+                return
+
+        return dispose
 
     def copy(self) -> LifecycleHooks:
         """Copy registrations so one run can attach private built-in hooks."""

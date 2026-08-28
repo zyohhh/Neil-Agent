@@ -14,6 +14,7 @@ from ..schemas import ToolCall, ToolDefinition, ToolResult
 ToolHandler = Callable[..., str]
 ToolPreviewHandler = Callable[..., str]
 ApprovedPreviewBinding = Literal["valid", "changed", "unavailable"]
+RuntimeDisposer = Callable[[], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +48,7 @@ class ToolRegistry:
         requires_approval: bool = False,
         preview_handler: ToolPreviewHandler | None = None,
         binding_resolver: ApprovalBindingResolver | None = None,
-    ) -> None:
+    ) -> RuntimeDisposer:
         """Register one tool, rejecting ambiguous duplicate names."""
 
         if definition.name in self._tools:
@@ -61,6 +62,17 @@ class ToolRegistry:
             preview_handler=preview_handler,
             binding_resolver=binding_resolver,
         )
+        name = definition.name
+
+        def dispose() -> None:
+            self.unregister(name)
+
+        return dispose
+
+    def unregister(self, tool_name: str) -> None:
+        """Remove one tool registration when its host runtime is torn down."""
+
+        self._tools.pop(tool_name, None)
 
     @property
     def definitions(self) -> tuple[ToolDefinition, ...]:

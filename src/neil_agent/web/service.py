@@ -95,6 +95,22 @@ class WorkbenchSnapshotService:
         )
         self._host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
 
+    def replace_host_runtime(self, settings: Settings) -> None:
+        """Close the current runtime and rebuild it for a prepared model switch."""
+
+        self._host_runtime.close()
+        self.settings = settings
+        self._host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
+
+    def close(self) -> None:
+        """Release the shared host runtime when the workbench shuts down."""
+
+        self._host_runtime.close()
+
+    @property
+    def host_runtime_closed(self) -> bool:
+        return self._host_runtime.closed
+
     @property
     def session_store(self) -> SessionStore:
         """Return the validated workspace-local store shared by the controller."""

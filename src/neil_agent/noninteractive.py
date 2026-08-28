@@ -317,86 +317,89 @@ def run_noninteractive(
             profile=runtime_profile,
             base_hooks=hooks,
         )
-        filesystem = host_runtime.filesystem
-        registry = host_runtime.registry
-        instruction_manager = host_runtime.instruction_manager
-        active_hooks = host_runtime.hooks
-        approval_broker: NoninteractiveApprovalBroker | None = None
-        if permission_mode != "read-only":
-            approval_broker = NoninteractiveApprovalBroker(
-                ApprovalStore(filesystem.root),
-                mode=permission_mode,
-                prompt=prompt,
-                instructions=lambda: instruction_manager.current.prompt_section(),
-                request_handler=writer.approval_request,
-                approval_id=approval_id,
-                binding_resolver=registry.resolve_approval_binding,
+        try:
+            filesystem = host_runtime.filesystem
+            registry = host_runtime.registry
+            instruction_manager = host_runtime.instruction_manager
+            active_hooks = host_runtime.hooks
+            approval_broker: NoninteractiveApprovalBroker | None = None
+            if permission_mode != "read-only":
+                approval_broker = NoninteractiveApprovalBroker(
+                    ApprovalStore(filesystem.root),
+                    mode=permission_mode,
+                    prompt=prompt,
+                    instructions=lambda: instruction_manager.current.prompt_section(),
+                    request_handler=writer.approval_request,
+                    approval_id=approval_id,
+                    binding_resolver=registry.resolve_approval_binding,
+                )
+            session_store = SessionStore(filesystem.root)
+            session = session_store.new_session()
+            model = llm or create_provider(settings, retry_handler=writer.activity)
+            agent = Agent(
+                model,
+                system_prompt=settings.system_prompt,
+                project_instructions=instruction_manager.current.prompt_section(),
+                max_rounds=settings.max_rounds,
+                max_context_chars=settings.max_context_chars,
+                max_context_tokens=settings.max_context_tokens,
+                registry=registry,
+                max_tool_rounds=settings.max_tool_rounds,
+                activity_handler=writer.activity,
+                instruction_scope_handler=instruction_manager.resolve_tool_call,
+                hooks=active_hooks,
+                approval_handler=approval_broker,
+                file_checkpoints=filesystem.checkpoints,
             )
-        session_store = SessionStore(filesystem.root)
-        session = session_store.new_session()
-        model = llm or create_provider(settings, retry_handler=writer.activity)
-        agent = Agent(
-            model,
-            system_prompt=settings.system_prompt,
-            project_instructions=instruction_manager.current.prompt_section(),
-            max_rounds=settings.max_rounds,
-            max_context_chars=settings.max_context_chars,
-            max_context_tokens=settings.max_context_tokens,
-            registry=registry,
-            max_tool_rounds=settings.max_tool_rounds,
-            activity_handler=writer.activity,
-            instruction_scope_handler=instruction_manager.resolve_tool_call,
-            hooks=active_hooks,
-            approval_handler=approval_broker,
-            file_checkpoints=filesystem.checkpoints,
-        )
-        writer.start(
-            session_id=session.session_id,
-            model=settings.selected_model,
-            workspace=filesystem.root,
-            tools=tuple(definition.name for definition in registry.definitions),
-            runtime_profile=host_runtime.profile.runtime_profile,
-        )
-        for chunk in agent.stream_chat(prompt):
-            writer.text_delta(chunk)
-        result = agent.messages[-1].content
-        if approval_broker is not None and approval_broker.requests:
-            writer.approval_required(
+            writer.start(
+                session_id=session.session_id,
+                model=settings.selected_model,
+                workspace=filesystem.root,
+                tools=tuple(definition.name for definition in registry.definitions),
+                runtime_profile=host_runtime.profile.runtime_profile,
+            )
+            for chunk in agent.stream_chat(prompt):
+                writer.text_delta(chunk)
+            result = agent.messages[-1].content
+            if approval_broker is not None and approval_broker.requests:
+                writer.approval_required(
+                    session_id=session.session_id,
+                    result=result,
+                    usage=agent.last_usage,
+                    approved_request_id=approval_broker.consumed_request_id,
+                )
+                return APPROVAL_REQUIRED_EXIT_CODE
+            if (
+                permission_mode == "approve"
+                and approval_broker is not None
+                and approval_broker.consumed_request_id is None
+            ):
+                raise ApprovalError("模型未请求与 approval ID 匹配的操作，未执行写入。")
+            saved = False
+            if save_session:
+                session_store.save(
+                    session,
+                    agent.messages,
+                    (),
+                    None,
+                    last_usage=agent.last_usage,
+                    create_only=True,
+                )
+                saved = True
+            writer.success(
                 session_id=session.session_id,
                 result=result,
+                saved=saved,
                 usage=agent.last_usage,
-                approved_request_id=approval_broker.consumed_request_id,
+                approved_request_id=(
+                    approval_broker.consumed_request_id
+                    if approval_broker is not None
+                    else None
+                ),
             )
-            return APPROVAL_REQUIRED_EXIT_CODE
-        if (
-            permission_mode == "approve"
-            and approval_broker is not None
-            and approval_broker.consumed_request_id is None
-        ):
-            raise ApprovalError("模型未请求与 approval ID 匹配的操作，未执行写入。")
-        saved = False
-        if save_session:
-            session_store.save(
-                session,
-                agent.messages,
-                (),
-                None,
-                last_usage=agent.last_usage,
-                create_only=True,
-            )
-            saved = True
-        writer.success(
-            session_id=session.session_id,
-            result=result,
-            saved=saved,
-            usage=agent.last_usage,
-            approved_request_id=(
-                approval_broker.consumed_request_id
-                if approval_broker is not None
-                else None
-            ),
-        )
-        return 0
+            return 0
+        finally:
+            host_runtime.close()
     except KeyboardInterrupt:
         writer.error(
             message="用户中断。",

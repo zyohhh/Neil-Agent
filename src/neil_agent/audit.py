@@ -74,12 +74,20 @@ class JsonlAuditSink:
     def path(self) -> Path:
         return self._audit_root / AUDIT_FILENAME
 
-    def register(self, hooks: LifecycleHooks) -> None:
+    def register(self, hooks: LifecycleHooks) -> Callable[[], None]:
         """Attach the same metadata recorder to every supported hook stage."""
 
         self.validate()
-        for stage in ("before_model", "after_model", "before_tool", "after_tool"):
+        disposers = [
             hooks.register(stage, self.record)
+            for stage in ("before_model", "after_model", "before_tool", "after_tool")
+        ]
+
+        def dispose() -> None:
+            for disposer in disposers:
+                disposer()
+
+        return dispose
 
     def validate(self) -> None:
         """Create the audit directory and reject unsafe existing log paths."""

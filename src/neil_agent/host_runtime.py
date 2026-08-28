@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Literal
@@ -30,6 +30,8 @@ BENCHMARK_MINIMAL_READONLY_TOOLS = (
     "search_text",
 )
 BENCHMARK_MINIMAL_WRITE_TOOLS = BENCHMARK_MINIMAL_READONLY_TOOLS + ("replace_text",)
+
+RuntimeDisposer = Callable[[], None]
 
 
 class HostMode(str, Enum):
@@ -65,7 +67,7 @@ class HostProfile:
     audit_enabled: bool
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class HostRuntime:
     """Shared filesystem, registry, and instruction state for one host session."""
 
@@ -78,6 +80,21 @@ class HostRuntime:
     task_tracker: TaskTracker | None
     guest_import: GuestExportImportTools | None
     profile: HostProfile
+    _disposers: list[RuntimeDisposer] = field(default_factory=list, repr=False)
+    _closed: bool = field(default=False, repr=False)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        """Run registered teardown callbacks in reverse registration order."""
+
+        if self._closed:
+            return
+        self._closed = True
+        while self._disposers:
+            self._disposers.pop()()
 
 
 def resolve_runtime_profile(
@@ -142,6 +159,19 @@ def observe_host_security(
     )
 
 
+def _track_registry_tools(
+    registry: ToolRegistry,
+    disposers: list[RuntimeDisposer],
+    seen: set[str],
+) -> None:
+    for definition in registry.definitions:
+        if definition.name in seen:
+            continue
+        seen.add(definition.name)
+        name = definition.name
+        disposers.append(lambda registry=registry, name=name: registry.unregister(name))
+
+
 def _register_benchmark_minimal_filesystem(
     filesystem: FileSystemTools,
     registry: ToolRegistry,
@@ -204,6 +234,8 @@ def build_host_runtime(
     )
     guest_import: GuestExportImportTools | None = None
     readonly_mode = mode is HostMode.NONINTERACTIVE_READONLY
+    disposers: list[RuntimeDisposer] = []
+    seen_tools: set[str] = set()
 
     if runtime_profile is RuntimeProfile.BENCHMARK_MINIMAL:
         _register_benchmark_minimal_filesystem(
@@ -220,6 +252,8 @@ def build_host_runtime(
         guest_import = GuestExportImportTools(filesystem)
         guest_import.register(registry)
 
+    _track_registry_tools(registry, disposers, seen_tools)
+
     sandbox_tools_enabled = False
     if (
         _uses_standard_tool_surface(runtime_profile)
@@ -231,6 +265,7 @@ def build_host_runtime(
             registry,
             guest_import=guest_import,
         )
+        _track_registry_tools(registry, disposers, seen_tools)
 
     instruction_manager, instruction_scope = _instruction_scope_for_mode(
         filesystem.root,
@@ -243,7 +278,7 @@ def build_host_runtime(
             filesystem.root,
             max_bytes=settings.audit_log_max_bytes,
         )
-        audit_sink.register(hooks)
+        disposers.append(audit_sink.register(hooks))
 
     task_tracker: TaskTracker | None = None
     if (
@@ -251,7 +286,7 @@ def build_host_runtime(
         and mode in {HostMode.CLI, HostMode.WEB}
     ):
         task_tracker = TaskTracker(change_handler=task_change_handler)
-        task_tracker.register(registry)
+        disposers.append(task_tracker.register(registry))
 
     host_profile = HostProfile(
         mode=mode,
@@ -272,4 +307,5 @@ def build_host_runtime(
         task_tracker=task_tracker,
         guest_import=guest_import,
         profile=host_profile,
+        _disposers=disposers,
     )

@@ -13,6 +13,7 @@ from .tools.registry import ToolRegistry
 PlanStepStatus = Literal["pending", "in_progress", "completed"]
 QualityCheckStatus = Literal["passed", "failed", "not_run"]
 PlanChangeHandler = Callable[[str], None]
+RuntimeDisposer = Callable[[], None]
 
 MAX_TASK_STEPS = 5
 MAX_TASK_STEP_CHARS = 200
@@ -58,11 +59,17 @@ class TaskTracker:
 
         return self._latest_quality_check
 
-    def register(self, registry: ToolRegistry) -> None:
+    def register(self, registry: ToolRegistry) -> RuntimeDisposer:
         """Register model-facing plan creation and update tools."""
 
         registry.register(SET_TASK_PLAN, self.set_task_plan)
         registry.register(UPDATE_TASK_STEP, self.update_task_step)
+
+        def dispose() -> None:
+            registry.unregister(SET_TASK_PLAN.name)
+            registry.unregister(UPDATE_TASK_STEP.name)
+
+        return dispose
 
     def replace_change_handler(
         self,
