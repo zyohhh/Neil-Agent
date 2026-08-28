@@ -41,6 +41,12 @@ from .schemas import (
     ToolDefinition,
 )
 from .session import SessionStore
+from .host_runtime import (
+    BENCHMARK_MINIMAL_READONLY_TOOLS,
+    HostMode,
+    RuntimeProfile,
+    build_host_runtime,
+)
 from .tools import FileSystemTools, ToolRegistry
 from .tools.filesystem import READ_FILE
 
@@ -59,13 +65,7 @@ REAL_SYSTEM_PROMPT = (
     "You are running a bounded acceptance check. Follow the exact user request, "
     "use only the requested tool, and do not perform unrelated work."
 )
-REAL_V1_TOOLS = (
-    "list_directory",
-    "read_file",
-    "search_text",
-    "git_status",
-    "git_diff",
-)
+REAL_V1_TOOLS = BENCHMARK_MINIMAL_READONLY_TOOLS
 RealModelFactory = Callable[
     [str, Settings, Callable[[ActivityEvent], None]],
     ChatModel,
@@ -161,6 +161,7 @@ def run_offline_evals(
     tasks_path: Path = DEFAULT_TASKS_PATH,
     *,
     task_ids: Sequence[str] | None = None,
+    runtime_profile: RuntimeProfile = RuntimeProfile.BENCHMARK_MINIMAL,
     clock: Callable[[], float] = perf_counter,
 ) -> tuple[EvalResult, ...]:
     """Run every declared task using fake models and temporary workspaces."""
@@ -215,6 +216,7 @@ def run_offline_evals(
 def run_real_deepseek_acceptance(
     settings: Settings,
     *,
+    runtime_profile: RuntimeProfile = RuntimeProfile.BENCHMARK_MINIMAL,
     model_factory: RealModelFactory | None = None,
 ) -> tuple[EvalResult, ...]:
     """Run bounded real-model checks after the CLI's explicit cost opt-in."""
@@ -249,6 +251,7 @@ def run_real_deepseek_acceptance(
                 root,
                 factory,
                 retry_events.append,
+                runtime_profile=runtime_profile,
             )
             if v1.instruction_result.passed and v1.protocol_result.passed:
                 compaction = _run_real_compaction_acceptance(
@@ -308,6 +311,8 @@ def _run_real_v1_acceptance(
     root: Path,
     model_factory: RealModelFactory,
     retry_handler: Callable[[ActivityEvent], None],
+    *,
+    runtime_profile: RuntimeProfile,
 ) -> _RealV1Outcome:
     try:
         stdout = StringIO()
@@ -318,6 +323,7 @@ def _run_real_v1_acceptance(
             stdout=stdout,
             stderr=StringIO(),
             save_session=True,
+            runtime_profile=runtime_profile,
             llm=model_factory("v1", settings, retry_handler),
         )
         events = _parse_json_lines(stdout.getvalue())
@@ -330,6 +336,7 @@ def _run_real_v1_acceptance(
             started.get("type") != "session_start"
             or started.get("protocol_version") != 1
             or started.get("read_only") is not True
+            or started.get("runtime_profile") != runtime_profile.value
             or not isinstance(tools, list)
             or tuple(tools) != REAL_V1_TOOLS
             or result.get("type") != "result"
@@ -498,6 +505,7 @@ def _run_real_v2_acceptance(
             stderr=StringIO(),
             protocol_version=2,
             permission_mode="request",
+            runtime_profile=RuntimeProfile.STANDARD,
             llm=model_factory("v2-request", settings, retry_handler),
         )
         request = _parse_json_object(request_stdout.getvalue())
@@ -534,6 +542,7 @@ def _run_real_v2_acceptance(
             protocol_version=2,
             permission_mode="approve",
             approval_id=approval_id,
+            runtime_profile=RuntimeProfile.STANDARD,
             llm=model_factory("v2-approve", settings, retry_handler),
         )
         approved = _parse_json_object(approve_stdout.getvalue())
@@ -566,6 +575,7 @@ def _run_real_v2_acceptance(
             protocol_version=2,
             permission_mode="approve",
             approval_id=approval_id,
+            runtime_profile=RuntimeProfile.STANDARD,
             llm=replay_model,
         )
         replay = _parse_json_object(replay_stdout.getvalue())
@@ -847,7 +857,6 @@ def _eval_workflow_consistency() -> str:
 def _eval_guest_export_import_approval() -> str:
     from io import StringIO
 
-    from neil_agent.host_runtime import HostMode, build_host_runtime
     from neil_agent.noninteractive import run_noninteractive
     from neil_agent.sandbox_export import build_guest_export_manifest
     from neil_agent.schemas import ModelResponse, ToolCall
@@ -860,7 +869,11 @@ def _eval_guest_export_import_approval() -> str:
                 "workspace_root": root,
             }
         )
-        runtime = build_host_runtime(settings, mode=HostMode.NONINTERACTIVE_WRITE)
+        runtime = build_host_runtime(
+            settings,
+            mode=HostMode.NONINTERACTIVE_WRITE,
+            profile=RuntimeProfile.STANDARD,
+        )
         assert runtime.guest_import is not None
         manifest = build_guest_export_manifest(
             run_id="run-eval",
@@ -1003,12 +1016,18 @@ def _show_results(console: Console, title: str, results: Sequence[EvalResult]) -
     return 0 if passed == len(results) else 1
 
 
-def _show_json_results(title: str, results: Sequence[EvalResult]) -> int:
+def _show_json_results(
+    title: str,
+    results: Sequence[EvalResult],
+    *,
+    runtime_profile: RuntimeProfile,
+) -> int:
     passed = sum(result.passed for result in results)
     print(
         json.dumps(
             {
                 "title": title,
+                "runtime_profile": runtime_profile.value,
                 "passed": passed,
                 "total": len(results),
                 "success": passed == len(results),
@@ -1038,7 +1057,14 @@ def main() -> None:
     parser.add_argument("--confirm-api-cost", action="store_true")
     parser.add_argument("--task", action="append", dest="task_ids")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument(
+        "--runtime-profile",
+        choices=tuple(profile.value for profile in RuntimeProfile),
+        default=RuntimeProfile.BENCHMARK_MINIMAL.value,
+        help="Harness preset used for this evaluation run.",
+    )
     arguments = parser.parse_args()
+    runtime_profile = RuntimeProfile(arguments.runtime_profile)
     console = Console()
 
     if arguments.real_deepseek:
@@ -1052,19 +1078,38 @@ def main() -> None:
             )
             raise SystemExit(2)
         try:
-            results = run_real_deepseek_acceptance(get_settings())
+            results = run_real_deepseek_acceptance(
+                get_settings(),
+                runtime_profile=runtime_profile,
+            )
         except (NeilAgentError, ValueError) as error:
             console.print(f"真实验收失败：{error}", style="red", markup=False)
             raise SystemExit(1) from None
         if arguments.format == "json":
-            raise SystemExit(_show_json_results("真实 DeepSeek 验收", results))
+            raise SystemExit(
+                _show_json_results(
+                    "真实 DeepSeek 验收",
+                    results,
+                    runtime_profile=runtime_profile,
+                )
+            )
         raise SystemExit(_show_results(console, "真实 DeepSeek 验收", results))
 
     try:
-        results = run_offline_evals(arguments.tasks, task_ids=arguments.task_ids)
+        results = run_offline_evals(
+            arguments.tasks,
+            task_ids=arguments.task_ids,
+            runtime_profile=runtime_profile,
+        )
     except ValueError as error:
         console.print(str(error), style="red", markup=False)
         raise SystemExit(2) from None
     if arguments.format == "json":
-        raise SystemExit(_show_json_results("Neil Agent 离线评测", results))
+        raise SystemExit(
+            _show_json_results(
+                "Neil Agent 离线评测",
+                results,
+                runtime_profile=runtime_profile,
+            )
+        )
     raise SystemExit(_show_results(console, "Neil Agent 离线评测", results))

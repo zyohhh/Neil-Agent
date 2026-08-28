@@ -8,10 +8,14 @@ import pytest
 
 from neil_agent.config import Settings
 from neil_agent.host_runtime import (
+    BENCHMARK_MINIMAL_READONLY_TOOLS,
+    BENCHMARK_MINIMAL_WRITE_TOOLS,
     HostMode,
+    RuntimeProfile,
     build_host_runtime,
     instruction_target,
     observe_host_security,
+    resolve_runtime_profile,
     windows_sandbox_backend,
 )
 
@@ -56,6 +60,7 @@ def test_build_host_runtime_cli_registers_write_and_task_tools(
     monkeypatch.chdir(tmp_path)
     settings = _settings(tmp_path)
     runtime = build_host_runtime(settings, mode=HostMode.CLI)
+    assert runtime.profile.runtime_profile is RuntimeProfile.STANDARD
     assert "write_file" in runtime.profile.tool_names
     assert "set_task_plan" in runtime.profile.tool_names
     assert runtime.profile.instruction_scope == "cwd"
@@ -75,6 +80,18 @@ def test_build_host_runtime_noninteractive_readonly_is_read_only(
     assert "read_file" in runtime.profile.tool_names
     assert runtime.profile.task_tools_enabled is False
     assert runtime.task_tracker is None
+
+
+def test_build_host_runtime_web_defaults_to_web_safe_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    settings = _settings(tmp_path)
+    runtime = build_host_runtime(settings, mode=HostMode.WEB)
+    assert runtime.profile.runtime_profile is RuntimeProfile.WEB_SAFE
 
 
 def test_build_host_runtime_web_matches_cli_instruction_and_sandbox_policy(
@@ -157,3 +174,34 @@ def test_host_mode_write_tool_matrix(
     runtime = build_host_runtime(settings, mode=mode)
     has_write = "write_file" in runtime.profile.tool_names
     assert has_write is expected_write_tools
+
+
+def test_benchmark_minimal_profile_exposes_only_bounded_file_tools(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    readonly = build_host_runtime(
+        settings,
+        mode=HostMode.NONINTERACTIVE_READONLY,
+        profile=RuntimeProfile.BENCHMARK_MINIMAL,
+    )
+    assert readonly.profile.runtime_profile is RuntimeProfile.BENCHMARK_MINIMAL
+    assert readonly.profile.tool_names == BENCHMARK_MINIMAL_READONLY_TOOLS
+    assert "git_status" not in readonly.profile.tool_names
+    assert "run_quality_check" not in readonly.profile.tool_names
+
+    write_mode = build_host_runtime(
+        settings,
+        mode=HostMode.NONINTERACTIVE_WRITE,
+        profile=RuntimeProfile.BENCHMARK_MINIMAL,
+    )
+    assert write_mode.profile.tool_names == BENCHMARK_MINIMAL_WRITE_TOOLS
+    assert "write_file" not in write_mode.profile.tool_names
+    assert "import_guest_export" not in write_mode.profile.tool_names
+    assert "set_task_plan" not in write_mode.profile.tool_names
+    assert write_mode.guest_import is None
+
+
+def test_resolve_runtime_profile_uses_web_safe_for_web_mode() -> None:
+    assert resolve_runtime_profile(HostMode.WEB) is RuntimeProfile.WEB_SAFE
+    assert resolve_runtime_profile(HostMode.CLI) is RuntimeProfile.STANDARD

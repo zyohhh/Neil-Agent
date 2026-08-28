@@ -237,7 +237,7 @@ def test_both_cost_flags_enter_real_acceptance(
     monkeypatch.setattr(
         eval_module,
         "run_real_deepseek_acceptance",
-        lambda value: (
+        lambda value, **kwargs: (
             observed.append(value)
             or (eval_module.EvalResult("real-gated", True, "accepted"),)
         ),

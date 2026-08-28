@@ -377,6 +377,7 @@ class SecurityDto(WorkbenchDto):
     write_routes: Literal[0] = 0
     agent_connected: Literal[True] = True
     shield_schema_version: Literal[2] = 2
+    runtime_profile: Literal["standard", "benchmark-minimal", "web-safe"]
     sandbox_backend: Literal["disabled", "windows-sandbox"]
     audit_enabled: bool
     audit_status: Literal["recording", "busy", "disabled", "degraded", "unavailable"]
@@ -397,6 +398,7 @@ class SecurityDto(WorkbenchDto):
         shield: SecurityShield,
         *,
         sandbox_backend: Literal["disabled", "windows-sandbox"],
+        runtime_profile: str,
     ) -> SecurityDto:
         """Map one observed Security Shield into the Web Workbench security DTO."""
 
@@ -408,6 +410,7 @@ class SecurityDto(WorkbenchDto):
         projection = project_security_shield_basic(shield)
         watch = projection.boundary_watch
         return cls(
+            runtime_profile=runtime_profile,  # type: ignore[arg-type]
             sandbox_backend=sandbox_backend,
             audit_enabled=shield.audit_enabled,
             audit_status=shield.audit_status,

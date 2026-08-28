@@ -54,7 +54,7 @@
 
 | 批次 | 状态 | 范围 | 完成标准 |
 | --- | --- | --- | --- |
-| 1 | 未开始 | `RuntimeProfile` 与 `benchmark-minimal` | `build_host_runtime(..., profile=)`；eval 默认 minimal；`HostProfile` 可断言工具集；文档与 CLI 声明 harness |
+| 1 | 已完成 | `RuntimeProfile` 与 `benchmark-minimal` | `build_host_runtime(..., profile=)`；eval 默认 minimal；`HostProfile` 可断言工具集；文档与 CLI 声明 harness |
 | 2 | 未开始 | 可逆注册与 runtime teardown | 工具 / hook / 审批 / sandbox 注册返回 disposer；`switch_model` 与关闭路径逆序清理，无残留注册 |
 | 3 | 未开始 | 只读子任务 | 并行只读探索；独立预算；无写 / 无 shell；`await` + 必 `dispose`；事件带 parent |
 | 4 | 未开始（可选） | Session goals | 会话日志中的可 pause/resume 目标；CAS；压缩与分支后仍在 |

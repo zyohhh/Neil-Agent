@@ -204,6 +204,7 @@ def test_stream_json_emits_json_lines_in_protocol_order(tmp_path: Path) -> None:
     assert event_types[-1] == "result"
     assert event_types.count("text_delta") == 2
     assert events[0]["read_only"] is True
+    assert events[0]["runtime_profile"] == "standard"
     assert events[-1]["success"] is True
     assert events[-1]["usage"]["total_tokens"] == 10
 

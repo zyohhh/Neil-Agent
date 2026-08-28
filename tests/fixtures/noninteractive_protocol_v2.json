@@ -49,7 +49,8 @@
       "workspace",
       "tools",
       "read_only",
-      "permission_mode"
+      "permission_mode",
+      "runtime_profile"
     ],
     "activity": [
       "type",

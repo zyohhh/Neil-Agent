@@ -25,7 +25,7 @@ from .errors import (
     SessionError,
     ToolError,
 )
-from .host_runtime import HostMode, build_host_runtime
+from .host_runtime import HostMode, RuntimeProfile, build_host_runtime
 from .hooks import LifecycleHooks
 from .providers.factory import create_provider
 from .schemas import ActivityEvent, TokenUsage
@@ -110,6 +110,7 @@ class ProtocolWriter:
         model: str,
         workspace: Path,
         tools: tuple[str, ...],
+        runtime_profile: RuntimeProfile,
     ) -> None:
         if self.output_format == "stream-json":
             payload: dict[str, object] = {
@@ -120,6 +121,7 @@ class ProtocolWriter:
                 "workspace": str(workspace),
                 "tools": list(tools),
                 "read_only": self.permission_mode == "read-only",
+                "runtime_profile": runtime_profile.value,
             }
             if self.protocol_version >= 2:
                 payload["permission_mode"] = self.permission_mode
@@ -269,6 +271,7 @@ def run_noninteractive(
     save_session: bool = False,
     protocol_version: ProtocolVersion = PROTOCOL_VERSION,
     permission_mode: PermissionMode = "read-only",
+    runtime_profile: RuntimeProfile | None = None,
     approval_id: str | None = None,
     llm: ChatModel | None = None,
     hooks: LifecycleHooks | None = None,
@@ -311,6 +314,7 @@ def run_noninteractive(
         host_runtime = build_host_runtime(
             settings,
             mode=host_mode,
+            profile=runtime_profile,
             base_hooks=hooks,
         )
         filesystem = host_runtime.filesystem
@@ -351,6 +355,7 @@ def run_noninteractive(
             model=settings.selected_model,
             workspace=filesystem.root,
             tools=tuple(definition.name for definition in registry.definitions),
+            runtime_profile=host_runtime.profile.runtime_profile,
         )
         for chunk in agent.stream_chat(prompt):
             writer.text_delta(chunk)

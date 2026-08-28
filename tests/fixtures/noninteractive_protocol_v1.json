@@ -30,7 +30,8 @@
       "model",
       "workspace",
       "tools",
-      "read_only"
+      "read_only",
+      "runtime_profile"
     ],
     "activity": [
       "type",

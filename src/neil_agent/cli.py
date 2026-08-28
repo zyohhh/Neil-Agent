@@ -29,6 +29,7 @@ from .event_store import JsonlEventStore
 from .events import EventBus, EventSubscription, RuntimeEvent
 from .host_runtime import (
     HostMode,
+    RuntimeProfile,
     build_host_runtime,
     observe_host_security,
     windows_sandbox_backend,
@@ -246,6 +247,15 @@ def main(argv: list[str] | None = None) -> None:
         "--approval-id",
         help="One pending approval ID to consume in protocol v2 approve mode.",
     )
+    parser.add_argument(
+        "--runtime-profile",
+        choices=tuple(profile.value for profile in RuntimeProfile),
+        default=RuntimeProfile.STANDARD.value,
+        help=(
+            "Capability preset layered on the selected permission mode. "
+            "benchmark-minimal keeps only bounded file tools."
+        ),
+    )
     arguments = parser.parse_args(argv)
     if arguments.prompt is None:
         if (
@@ -262,6 +272,7 @@ def main(argv: list[str] | None = None) -> None:
     output_format = cast(OutputFormat, arguments.output_format)
     protocol_version = cast(ProtocolVersion, arguments.protocol_version)
     permission_mode = cast(PermissionMode, arguments.permission_mode)
+    runtime_profile = RuntimeProfile(arguments.runtime_profile)
     option_error = validate_noninteractive_options(
         output_format=output_format,
         protocol_version=protocol_version,
@@ -292,6 +303,7 @@ def main(argv: list[str] | None = None) -> None:
         protocol_version=protocol_version,
         permission_mode=permission_mode,
         approval_id=arguments.approval_id,
+        runtime_profile=runtime_profile,
     )
     raise SystemExit(exit_code)
 
@@ -459,6 +471,7 @@ def run(console: Console) -> None:
                     console,
                     registry,
                     filesystem_tools.root,
+                    runtime_profile=host_runtime.profile.runtime_profile,
                     audit_log_enabled=settings.audit_log_enabled,
                     sandbox_backend=settings.sandbox_backend,
                     sandbox_probe=(
@@ -949,6 +962,7 @@ def _show_permissions(
     registry: ToolRegistry,
     workspace_root: Path,
     *,
+    runtime_profile: RuntimeProfile,
     audit_log_enabled: bool = False,
     sandbox_backend: str = "disabled",
     sandbox_probe: Callable[[], SandboxCapabilities] | None = None,
@@ -979,6 +993,7 @@ def _show_permissions(
     ]
     console.print("[bold]权限与安全边界[/bold]")
     console.print(
+        f"  运行时预设：{runtime_profile.value}\n"
         f"  工作区：{workspace_root}\n"
         f"  直接执行：{', '.join(direct) or '无'}\n"
         f"  每次需要批准：{', '.join(approval) or '无'}\n"

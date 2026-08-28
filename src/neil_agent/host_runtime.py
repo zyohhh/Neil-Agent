@@ -13,13 +13,23 @@ from .config import Settings
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
 from .task import PlanChangeHandler, TaskTracker
-from .tools.filesystem import FileSystemTools
+from .tools.filesystem import (
+    REPLACE_TEXT,
+    FileSystemTools,
+)
 from .tools.guest_import import GuestExportImportTools
 from .tools.registry import ToolRegistry
 from .tools.sandbox import SandboxCommandTools
 from .tools.shell import ShellTools
 from .sandbox import WindowsSandboxBackend
 from .security import SecurityShield, observe_security_shield
+
+BENCHMARK_MINIMAL_READONLY_TOOLS = (
+    "list_directory",
+    "read_file",
+    "search_text",
+)
+BENCHMARK_MINIMAL_WRITE_TOOLS = BENCHMARK_MINIMAL_READONLY_TOOLS + ("replace_text",)
 
 
 class HostMode(str, Enum):
@@ -31,6 +41,14 @@ class HostMode(str, Enum):
     WEB = "web"
 
 
+class RuntimeProfile(str, Enum):
+    """Orthogonal capability preset layered on top of ``HostMode``."""
+
+    STANDARD = "standard"
+    BENCHMARK_MINIMAL = "benchmark-minimal"
+    WEB_SAFE = "web-safe"
+
+
 InstructionScope = Literal["cwd", "workspace_root"]
 
 
@@ -39,6 +57,7 @@ class HostProfile:
     """Documented capabilities for one assembled host runtime."""
 
     mode: HostMode
+    runtime_profile: RuntimeProfile
     tool_names: tuple[str, ...]
     sandbox_tools_enabled: bool
     instruction_scope: InstructionScope
@@ -59,6 +78,23 @@ class HostRuntime:
     task_tracker: TaskTracker | None
     guest_import: GuestExportImportTools | None
     profile: HostProfile
+
+
+def resolve_runtime_profile(
+    mode: HostMode,
+    profile: RuntimeProfile | None = None,
+) -> RuntimeProfile:
+    """Pick the effective preset when callers do not override it explicitly."""
+
+    if profile is not None:
+        return profile
+    if mode is HostMode.WEB:
+        return RuntimeProfile.WEB_SAFE
+    return RuntimeProfile.STANDARD
+
+
+def _uses_standard_tool_surface(profile: RuntimeProfile) -> bool:
+    return profile in {RuntimeProfile.STANDARD, RuntimeProfile.WEB_SAFE}
 
 
 def instruction_target(workspace_root: Path) -> Path:
@@ -106,6 +142,22 @@ def observe_host_security(
     )
 
 
+def _register_benchmark_minimal_filesystem(
+    filesystem: FileSystemTools,
+    registry: ToolRegistry,
+    *,
+    allow_replace_text: bool,
+) -> None:
+    filesystem.register_read_only(registry)
+    if allow_replace_text:
+        registry.register(
+            REPLACE_TEXT,
+            filesystem.replace_text,
+            requires_approval=True,
+            preview_handler=filesystem.preview_replace_text,
+        )
+
+
 def _register_sandbox_tools(
     settings: Settings,
     filesystem: FileSystemTools,
@@ -136,11 +188,13 @@ def build_host_runtime(
     settings: Settings,
     *,
     mode: HostMode,
+    profile: RuntimeProfile | None = None,
     task_change_handler: PlanChangeHandler | None = None,
     base_hooks: LifecycleHooks | None = None,
 ) -> HostRuntime:
     """Assemble the shared tool registry and instruction context for one host."""
 
+    runtime_profile = resolve_runtime_profile(mode, profile)
     filesystem = FileSystemTools(settings.workspace_root)
     registry = ToolRegistry()
     shell = ShellTools(
@@ -149,7 +203,15 @@ def build_host_runtime(
         max_output_chars=settings.max_command_output_chars,
     )
     guest_import: GuestExportImportTools | None = None
-    if mode is HostMode.NONINTERACTIVE_READONLY:
+    readonly_mode = mode is HostMode.NONINTERACTIVE_READONLY
+
+    if runtime_profile is RuntimeProfile.BENCHMARK_MINIMAL:
+        _register_benchmark_minimal_filesystem(
+            filesystem,
+            registry,
+            allow_replace_text=not readonly_mode,
+        )
+    elif readonly_mode:
         filesystem.register_read_only(registry)
         shell.register_read_only(registry)
     else:
@@ -159,7 +221,10 @@ def build_host_runtime(
         guest_import.register(registry)
 
     sandbox_tools_enabled = False
-    if mode in {HostMode.CLI, HostMode.NONINTERACTIVE_WRITE, HostMode.WEB}:
+    if (
+        _uses_standard_tool_surface(runtime_profile)
+        and mode in {HostMode.CLI, HostMode.NONINTERACTIVE_WRITE, HostMode.WEB}
+    ):
         sandbox_tools_enabled = _register_sandbox_tools(
             settings,
             filesystem,
@@ -181,12 +246,16 @@ def build_host_runtime(
         audit_sink.register(hooks)
 
     task_tracker: TaskTracker | None = None
-    if mode in {HostMode.CLI, HostMode.WEB}:
+    if (
+        _uses_standard_tool_surface(runtime_profile)
+        and mode in {HostMode.CLI, HostMode.WEB}
+    ):
         task_tracker = TaskTracker(change_handler=task_change_handler)
         task_tracker.register(registry)
 
-    profile = HostProfile(
+    host_profile = HostProfile(
         mode=mode,
+        runtime_profile=runtime_profile,
         tool_names=tuple(definition.name for definition in registry.definitions),
         sandbox_tools_enabled=sandbox_tools_enabled,
         instruction_scope=instruction_scope,
@@ -202,5 +271,5 @@ def build_host_runtime(
         audit_sink=audit_sink,
         task_tracker=task_tracker,
         guest_import=guest_import,
-        profile=profile,
+        profile=host_profile,
     )

@@ -1609,3 +1609,12 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 新增 `docs/runtime-profile.md`：吸收「可组合预设 + 可逆注册 + 明确接缝」，不引入 Cordis、插件市场或任意 Bash。
 - 批次 1–3 为提交范围（`RuntimeProfile` / `benchmark-minimal`、可逆 teardown、只读子任务）；4–6 为 goals / skills / 受限 Plan DSL，不提前开工。
 - `architecture.md`、`host-runtime.md`、`claude-code-review.md`、`README.md` 交叉引用该路线。
+
+## 2026-08-28：RuntimeProfile 与 benchmark-minimal（批次 1）
+
+### 交付
+
+- 新增 `RuntimeProfile`（`standard` / `benchmark-minimal` / `web-safe`）；`build_host_runtime(..., profile=)` 与 `HostProfile.runtime_profile`。
+- `benchmark-minimal`：只读为 `list_directory` / `read_file` / `search_text`；写入模式再加 `replace_text`；无 Git、质量检查、`run_command`、guest import、`set_task_plan`。
+- Web 默认 `web-safe`；快照 `security.runtime_profile` 与 CLI `/permissions` 展示预设名。
+- `neil-agent-eval` 与 `-p --runtime-profile` 默认/声明 harness；真实 v1 用 `benchmark-minimal`，v2 审批写仍用 `standard`。

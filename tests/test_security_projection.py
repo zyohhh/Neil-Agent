@@ -44,7 +44,11 @@ def test_security_dto_from_shield_matches_basic_projection() -> None:
         audit_status="recording",
     )
     projection = project_security_shield_basic(shield)
-    dto = SecurityDto.from_security_shield(shield, sandbox_backend="disabled")
+    dto = SecurityDto.from_security_shield(
+        shield,
+        sandbox_backend="disabled",
+        runtime_profile="standard",
+    )
 
     assert dto.shield_schema_version == 2
     assert dto.tool_count == shield.tool_count

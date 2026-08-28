@@ -328,6 +328,7 @@ class WorkbenchSnapshotService:
             security=SecurityDto.from_security_shield(
                 security,
                 sandbox_backend=settings.sandbox_backend,
+                runtime_profile=self._host_runtime.profile.runtime_profile.value,
             ),
         )
 
