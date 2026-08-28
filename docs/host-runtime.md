@@ -95,6 +95,8 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 
 当前无已知 host_runtime 迁移缺口；后续新能力应优先经 `build_host_runtime()` 接入三入口。
 
+`HostMode` 只描述入口差异。与入口正交的能力预设（`standard` / `benchmark-minimal` / `web-safe`）、可逆注册与只读子任务见 [`runtime-profile.md`](runtime-profile.md)；该路线未完成前，装配行为与本表一致。
+
 ## 相关文档
 
 - [`architecture.md`](architecture.md) — 总体分层
@@ -103,3 +105,4 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`claude-code-review.md`](claude-code-review.md) — 与 Claude Code 的能力对照
 - [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次（批次 1–4 已完成）
+- [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设（尚未开工）

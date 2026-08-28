@@ -100,3 +100,4 @@ Loopback + `SameSite=strict` 保持不变。
 - [`claude-code-review.md`](claude-code-review.md) — 对照审核与保留差异
 - [`architecture.md`](architecture.md) — 分层与文件安全边界
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵
+- [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设（并行路线，不替代本清单）

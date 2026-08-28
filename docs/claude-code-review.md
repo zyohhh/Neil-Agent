@@ -71,6 +71,7 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 2. Guest runner（C#）侧强制只允许写入已声明的 `export_paths`（可选纵深防御，见 [`guest-export-import.md`](guest-export-import.md) 与 [`sandbox-certification-runbook.md`](sandbox-certification-runbook.md)）。
 3. 维持 Time Machine Phase 3B 的审批与原子性边界；不扩大恢复范围（较旧检查点与会话 as-of 仍用 Git）。
 4. Web Terminal/PTY、Focus/Build 真实权限、跨 Provider 切换与自动 fallback 等仍未立项，见 [`web-workbench-development.md`](web-workbench-development.md) §19。
+5. 对照 DeepSeek Harness 的运行时预设（`RuntimeProfile`、可逆注册、只读子任务）见 [`runtime-profile.md`](runtime-profile.md)；不引入插件市场或任意 Bash。
 
 ## 相关文档
 
@@ -79,5 +80,6 @@ Neil Agent 的最小闭环已经具备清晰分层：模型层不直接执行工
 - [`architecture.md`](architecture.md) — 总体分层（含 Web）
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵与迁移状态
 - [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次
+- [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`provider-adapter-development.md`](provider-adapter-development.md) — 多 Provider 维护期说明

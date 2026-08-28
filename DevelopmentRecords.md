@@ -1601,3 +1601,11 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 浏览器 `protocol.ts`：`command_id` 改为 `crypto.randomUUID()`。
 - `Settings.llm_allow_custom_base_url`：默认拒绝非 loopback 的 `LLM_BASE_URL`；须显式 `LLM_ALLOW_CUSTOM_BASE_URL=true`。
 - `create_app()` 默认 `PRODUCTION_TRUSTED_HOSTS`（`127.0.0.1`、`localhost`）；测试注入 `TEST_TRUSTED_HOSTS`（含 `testserver`）。
+
+## 2026-08-28：DeepSeek Harness 对照与运行时预设路线
+
+### 文档
+
+- 新增 `docs/runtime-profile.md`：吸收「可组合预设 + 可逆注册 + 明确接缝」，不引入 Cordis、插件市场或任意 Bash。
+- 批次 1–3 为提交范围（`RuntimeProfile` / `benchmark-minimal`、可逆 teardown、只读子任务）；4–6 为 goals / skills / 受限 Plan DSL，不提前开工。
+- `architecture.md`、`host-runtime.md`、`claude-code-review.md`、`README.md` 交叉引用该路线。
