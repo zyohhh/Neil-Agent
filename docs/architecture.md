@@ -171,7 +171,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 ### Web Workbench（P9 已完成）
 
 - `neil-agent-web` 只绑定 `127.0.0.1`；启动器校验 wheel 内静态资源 SHA-256 清单后才打开浏览器，端口冲突或资源损坏时 fail-closed。
-- HTTP 提供健康检查、一次性 bootstrap、完整快照、只读会话/文件树/Git review；WebSocket 使用短时单次 ticket，命令带 `expected_revision` 与 `command_id` 去重。
+- HTTP 提供健康检查、一次性 bootstrap、完整快照、只读会话/文件树/Git review；WebSocket 使用短时单次 ticket，命令带 `expected_revision` 与 `command_id` 去重（缓存按 `client_id` 隔离，浏览器 ID 为 `crypto.randomUUID()`）。
 - `WorkbenchController` 在后台线程运行 `Agent.stream_chat()`，通过 `EventBus` 与 `asyncio` 队列向浏览器推送有界元数据事件；审批仍逐工具、预览重校验，默认拒绝。
 - 浏览器可开始/取消单个 Agent turn、接收流式回答与活动、审批高风险工具；Review 使用固定只读 Git 命令，不向浏览器开放任意 shell 或 thinking 正文。
 - Web 每轮构造隔离的 `Agent`，随后恢复当前选中的严格 `SessionSnapshot`；成功 turn 原子保存，失败/取消不落盘，保存失败会闭锁后续 turn 直到显式新建或重选会话。

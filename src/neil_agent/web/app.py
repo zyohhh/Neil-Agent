@@ -52,7 +52,9 @@ DEFAULT_ALLOWED_ORIGINS = frozenset(
         "http://localhost:8765",
     }
 )
-TRUSTED_HOSTS = frozenset({"127.0.0.1", "localhost", "testserver"})
+PRODUCTION_TRUSTED_HOSTS = frozenset({"127.0.0.1", "localhost"})
+TEST_TRUSTED_HOSTS = frozenset({"127.0.0.1", "localhost", "testserver"})
+TRUSTED_HOSTS = TEST_TRUSTED_HOSTS
 MAX_WEBSOCKET_MESSAGE_BYTES = 64 * 1024
 CONTENT_SECURITY_POLICY = (
     "default-src 'none'; base-uri 'none'; connect-src 'self'; "
@@ -106,6 +108,7 @@ def create_app(
     service: WorkbenchSnapshotService | None = None,
     controller: WorkbenchController | None = None,
     allowed_origins: Collection[str] = DEFAULT_ALLOWED_ORIGINS,
+    trusted_hosts: Collection[str] = PRODUCTION_TRUSTED_HOSTS,
 ) -> FastAPI:
     """Create an authenticated loopback API and one realtime Agent controller."""
 
@@ -114,6 +117,9 @@ def create_app(
             "Web Workbench bootstrap token must contain at least 32 characters"
         )
     accepted_origins = _validated_origins(allowed_origins)
+    accepted_hosts = frozenset(trusted_hosts)
+    if not accepted_hosts:
+        raise ValueError("Web Workbench must trust at least one host")
     static_bundle = (
         verify_static_bundle(static_root) if static_root is not None else None
     )
@@ -142,7 +148,7 @@ def create_app(
     app.state.static_bundle = static_bundle
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=sorted(TRUSTED_HOSTS),
+        allowed_hosts=sorted(accepted_hosts),
     )
     app.add_middleware(
         CORSMiddleware,
@@ -288,7 +294,7 @@ def create_app(
         host = websocket.headers.get("host", "").split(":", 1)[0]
         if (
             origin not in accepted_origins
-            or host not in TRUSTED_HOSTS
+            or host not in accepted_hosts
             or not session_store.consume_ws_ticket(ticket)
         ):
             await websocket.close(code=4401, reason="Local authentication required")

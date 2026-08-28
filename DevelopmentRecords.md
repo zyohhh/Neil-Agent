@@ -1592,3 +1592,12 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 非交互 approve：`NoninteractiveApprovalBroker` 改为 `preflight` + 匹配时 `consume()`，执行点才消费审批；预览漂移时签发新 request 且不提前烧毁原 pending 记录。
 - CLI/Web/Agent：批准后、执行前比较当前 `AGENTS.md` 摘要与预览时摘要，变化则拒绝执行并标记 `preview_binding=changed`。
 - Git/文件预览截断保留 `Change-ID` 与完整规模；v2 协议 fixture 补齐 `binding_kind` 字段。
+
+## 2026-08-28：Web command_id 与 LLM_BASE_URL（批次 4）
+
+### 交付
+
+- `WorkbenchController`：命令结果缓存绑定 `client_id`；跨客户端 `command_id` 冲突返回 `command_id_conflict`；`unsubscribe` 清理该客户端缓存。
+- 浏览器 `protocol.ts`：`command_id` 改为 `crypto.randomUUID()`。
+- `Settings.llm_allow_custom_base_url`：默认拒绝非 loopback 的 `LLM_BASE_URL`；须显式 `LLM_ALLOW_CUSTOM_BASE_URL=true`。
+- `create_app()` 默认 `PRODUCTION_TRUSTED_HOSTS`（`127.0.0.1`、`localhost`）；测试注入 `TEST_TRUSTED_HOSTS`（含 `testserver`）。

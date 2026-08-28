@@ -512,7 +512,7 @@ export class WorkbenchRealtimeClient {
       return false
     }
     this.commandCounter += 1
-    const commandId = `web-${Date.now().toString(36)}-${this.commandCounter.toString(36)}`
+    const commandId = crypto.randomUUID()
     this.pendingCommands.set(commandId, { command, payload })
     this.socket.send(JSON.stringify({
       protocol_version: 1,

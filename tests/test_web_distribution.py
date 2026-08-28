@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from websockets.sync.client import connect
 
 from neil_agent.config import Settings
-from neil_agent.web.app import MAX_WEBSOCKET_MESSAGE_BYTES, create_app
+from neil_agent.web.app import MAX_WEBSOCKET_MESSAGE_BYTES, TEST_TRUSTED_HOSTS, create_app
 from neil_agent.web.assets import (
     ASSET_MANIFEST,
     StaticBundleError,
@@ -144,6 +144,7 @@ def test_verified_static_responses_are_csp_hardened_and_upgrade_safe(
         _settings(tmp_path),
         bootstrap_token=BOOTSTRAP,
         static_root=packaged_static_root(),
+        trusted_hosts=TEST_TRUSTED_HOSTS,
     )
     with TestClient(app, base_url="http://testserver") as client:
         index = client.get("/")

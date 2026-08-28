@@ -37,7 +37,7 @@ Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护
 - `/rewind-task`：预览并恢复本进程最近一次 Agent 回合的全部有效文件编辑；`/rewind-file` 保留为兼容别名。
 - `/permissions`：显示真正由代码执行的工具审批和工作区边界。
 
-Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。对照后的安全加固批次（批次 1–2 已完成）见 [`docs/security-hardening.md`](docs/security-hardening.md)。
+Claude Code 官方文档对照结论与保留差异见 [`docs/claude-code-review.md`](docs/claude-code-review.md)。对照后的安全加固批次（批次 1–4 已完成）见 [`docs/security-hardening.md`](docs/security-hardening.md)。
 TUI 可视化编号路线（上下文断层图、安全盾、时间机器、Neural Map）已全部交付，见
 [`docs/visualization-development.md`](docs/visualization-development.md)。
 

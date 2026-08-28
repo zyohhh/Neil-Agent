@@ -91,7 +91,12 @@ def test_claude_explicit_endpoint_override_is_forwarded_without_trailing_slash(
     factory = MagicMock(return_value=MagicMock(spec=Anthropic))
     monkeypatch.setattr(anthropic_runtime, "Anthropic", factory)
 
-    ClaudeProvider(claude_settings(llm_base_url="https://gateway.example.test/v1/"))
+    ClaudeProvider(
+        claude_settings(
+            llm_base_url="https://gateway.example.test/v1/",
+            llm_allow_custom_base_url=True,
+        )
+    )
 
     assert factory.call_args.kwargs["base_url"] == "https://gateway.example.test/v1"
 

@@ -203,6 +203,12 @@ class PendingApproval:
     decision: bool | None = None
 
 
+@dataclass(slots=True)
+class _CachedCommandResult:
+    client_id: str
+    result: dict[str, Any]
+
+
 class WorkbenchController:
     """Own one active turn, one control lease, and one replayable event log."""
 
@@ -241,7 +247,7 @@ class WorkbenchController:
         self._approval_condition = Condition(self._lock)
         self._approval: PendingApproval | None = None
         self._closed = False
-        self._command_results: dict[str, dict[str, Any]] = {}
+        self._command_results: dict[str, _CachedCommandResult] = {}
         self._session_store = service.session_store
         self._active_handle = self._session_store.new_session()
         self._active_snapshot: SessionSnapshot | None = None
@@ -374,6 +380,11 @@ class WorkbenchController:
         released = False
         with self._lock:
             self._subscribers.pop(client_id, None)
+            self._command_results = {
+                command_id: cached
+                for command_id, cached in self._command_results.items()
+                if cached.client_id != client_id
+            }
             if self._control_client_id == client_id:
                 self._control_client_id = None
                 self._reject_pending_locked("Control client disconnected")
@@ -396,7 +407,14 @@ class WorkbenchController:
         with self._lock:
             cached = self._command_results.get(command.command_id)
             if cached is not None:
-                return cached
+                if cached.client_id != client_id:
+                    return self._result(
+                        command,
+                        "rejected",
+                        "Command ID belongs to another client",
+                        "command_id_conflict",
+                    )
+                return cached.result
         try:
             if command.command == "ping":
                 result = self._result(command, "accepted", "pong")
@@ -425,7 +443,10 @@ class WorkbenchController:
         with self._lock:
             if len(self._command_results) >= 128:
                 self._command_results.pop(next(iter(self._command_results)))
-            self._command_results[command.command_id] = result
+            self._command_results[command.command_id] = _CachedCommandResult(
+                client_id=client_id,
+                result=result,
+            )
         return result
 
     def close(self) -> None:

@@ -28,6 +28,7 @@ from neil_agent.security import project_security_shield
 from neil_agent.session import SessionStore
 from neil_agent.task import QualityCheckRecord, TaskStep
 from neil_agent.web import WorkbenchController, WorkbenchSnapshotService, create_app
+from neil_agent.web.app import TEST_TRUSTED_HOSTS
 from neil_agent.web.controller import (
     ClientCommand,
     CompletedTurnState,
@@ -331,6 +332,7 @@ def _client(
         bootstrap_token=BOOTSTRAP,
         service=service,
         controller=controller,
+        trusted_hosts=TEST_TRUSTED_HOSTS,
     )
     return TestClient(app, base_url="http://testserver")
 
@@ -976,6 +978,50 @@ def test_websocket_rejects_oversized_commands(tmp_path: Path) -> None:
             raise AssertionError("oversized WebSocket command remained connected")
         except WebSocketDisconnect as disconnect:
             assert disconnect.code == 4409
+
+
+def test_command_result_cache_isolated_per_client(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    controller = WorkbenchController(service, EchoWorker(), clock=lambda: NOW)
+    command = ClientCommand.model_validate(_command("sharedcmd01", "ping", 0))
+
+    first = controller.handle_command("client-a", command)
+    assert first["status"] == "accepted"
+
+    replay = controller.handle_command("client-a", command)
+    assert replay == first
+
+    conflict = controller.handle_command("client-b", command)
+    assert conflict["status"] == "rejected"
+    assert conflict["code"] == "command_id_conflict"
+
+
+def test_unsubscribe_clears_client_command_cache(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    service = WorkbenchSnapshotService(settings, clock=lambda: NOW)
+    controller = WorkbenchController(service, EchoWorker(), clock=lambda: NOW)
+    command = ClientCommand.model_validate(_command("releasecmd1", "ping", 0))
+
+    controller.handle_command("client-a", command)
+    controller.unsubscribe("client-a")
+
+    reused = controller.handle_command("client-b", command)
+    assert reused["status"] == "accepted"
+
+
+def test_create_app_defaults_to_production_trusted_hosts(tmp_path: Path) -> None:
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    from neil_agent.web.app import PRODUCTION_TRUSTED_HOSTS
+
+    app = create_app(_settings(tmp_path), bootstrap_token=BOOTSTRAP)
+    trusted_hosts: list[str] | None = None
+    for middleware in app.user_middleware:
+        if middleware.cls is TrustedHostMiddleware:
+            trusted_hosts = middleware.kwargs["allowed_hosts"]
+            break
+    assert trusted_hosts == sorted(PRODUCTION_TRUSTED_HOSTS)
 
 
 def test_realtime_start_stream_completion_and_idempotency(tmp_path: Path) -> None:

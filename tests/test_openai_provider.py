@@ -131,6 +131,7 @@ def test_explicit_endpoint_and_reasoning_effort_are_forwarded() -> None:
     model = OpenAIProvider(
         openai_settings(
             llm_base_url="https://gateway.example.test/openai/v1/",
+            llm_allow_custom_base_url=True,
             thinking_enabled=True,
             openai_reasoning_effort="high",
         ),

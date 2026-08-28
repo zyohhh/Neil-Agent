@@ -150,10 +150,27 @@ def test_generic_model_and_endpoint_override_deepseek_compatibility_fields() -> 
         deepseek_api_key="test-key",
         llm_model="override-model",
         llm_base_url="https://gateway.example/v1",
+        llm_allow_custom_base_url=True,
     )
 
     assert settings.selected_model == "override-model"
     assert str(settings.selected_base_url) == "https://gateway.example/v1"
+
+
+def test_custom_llm_base_url_requires_explicit_opt_in_for_remote_hosts() -> None:
+    with pytest.raises(ValidationError, match="LLM_ALLOW_CUSTOM_BASE_URL"):
+        Settings(
+            _env_file=None,
+            deepseek_api_key="test-key",
+            llm_base_url="https://gateway.example/v1",
+        )
+
+    settings = Settings(
+        _env_file=None,
+        deepseek_api_key="test-key",
+        llm_base_url="http://127.0.0.1:9000/v1",
+    )
+    assert str(settings.selected_base_url) == "http://127.0.0.1:9000/v1"
 
 
 def test_system_prompt_rejects_whitespace_only_value() -> None:

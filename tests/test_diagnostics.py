@@ -323,6 +323,7 @@ def test_doctor_warns_for_remote_plaintext_local_endpoint(tmp_path: Path) -> Non
         llm_provider=ProviderId.VLLM,
         llm_model="served-model",
         llm_base_url="http://models.example.test/v1",
+        llm_allow_custom_base_url=True,
         workspace_root=tmp_path,
     )
 
@@ -355,6 +356,7 @@ def test_doctor_redacts_endpoint_credentials_query_fragment_and_api_key(
             f"https://user:{endpoint_secret}@gateway.example.test/v1"
             f"?tenant={query_secret}#private-fragment"
         ),
+        llm_allow_custom_base_url=True,
         openai_api_key=api_secret,
         workspace_root=tmp_path,
     )

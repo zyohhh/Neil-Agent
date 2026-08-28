@@ -19,7 +19,7 @@
 | 1 | 已完成 | 共享 secret denylist | 所有列出的调用点引用 `sensitive_paths`；`.ssh` / `.aws` / `id_rsa` / `credentials.json` 与 `.env` 同等拒绝；`.env.example` 仍可读 |
 | 2 | 已完成 | 质量检查预警与去掉自动催促 | `run_quality_check` 预览明确写「无 OS 隔离的宿主执行」；去掉写入成功后必须跑检查的系统提示 |
 | 3 | 已完成 | 审批绑定对齐 v2 | 非交互 `ApprovalStore.consume()` 在执行前再校验；CLI/Web 批准后在应用前复核当前 `AGENTS.md`（及可选 prompt）摘要 |
-| 4 | 未开始 | Web `command_id` 与 `LLM_BASE_URL` | 命令结果缓存按 `client_id` 隔离，ID 不可猜测；`LLM_BASE_URL` 有 host 策略或显式危险开关；生产 `TRUSTED_HOSTS` 去掉 `testserver` |
+| 4 | 已完成 | Web `command_id` 与 `LLM_BASE_URL` | 命令结果缓存按 `client_id` 隔离，ID 不可猜测；`LLM_BASE_URL` 有 host 策略或显式危险开关；生产 `TRUSTED_HOSTS` 去掉 `testserver` |
 | 5 | 未开始 | `git_diff` / `git_status` 内容过滤 | 只读 Git 输出不包含 denylist 路径的 diff hunk；与批次 1 的路径拒绝互补 |
 | 6 | 未开始 | 写路径 `O_NOFOLLOW` | 普通 `write_file` / guest staging 与检查点恢复一样拒绝 symlink 写穿 |
 
@@ -62,7 +62,14 @@
 - `LLM_BASE_URL` 为任意 `AnyHttpUrl`，选中的 API Key 会发往该 origin。
 - `TRUSTED_HOSTS` 含 `testserver` 属于生产多余面。
 
-交付见上表。Loopback + `SameSite=strict` 保持不变。
+**交付：**
+
+- `_command_results` 绑定 `client_id`；跨客户端复用同一 `command_id` 返回 `command_id_conflict`；客户端断开时清理其缓存条目。
+- 浏览器侧 `command_id` 使用 `crypto.randomUUID()`。
+- `LLM_ALLOW_CUSTOM_BASE_URL` 默认 `false`；非 loopback 的 `LLM_BASE_URL` 须显式开启。
+- `create_app()` 默认 `PRODUCTION_TRUSTED_HOSTS`（不含 `testserver`）；测试通过 `TEST_TRUSTED_HOSTS` 注入。
+
+Loopback + `SameSite=strict` 保持不变。
 
 ## 批次 5：只读 Git 内容
 

@@ -1,5 +1,6 @@
 """Application configuration loaded from environment variables."""
 
+from ipaddress import ip_address
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
@@ -20,6 +21,18 @@ DEFAULT_OLLAMA_BASE_URL = AnyHttpUrl("http://localhost:11434/v1")
 DEFAULT_VLLM_BASE_URL = AnyHttpUrl("http://localhost:8000/v1")
 MAX_RUNTIME_MODEL_ID_CHARS = 256
 MAX_WEB_RUNTIME_MODELS = 16
+
+
+def _is_loopback_endpoint_host(host: str | None) -> bool:
+    if host is None:
+        return False
+    normalized = host.strip("[]").lower()
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
@@ -48,6 +61,13 @@ class Settings(BaseSettings):
     llm_base_url: AnyHttpUrl | None = Field(
         default=None,
         description="Optional endpoint override for the selected provider.",
+    )
+    llm_allow_custom_base_url: bool = Field(
+        default=False,
+        description=(
+            "Allow LLM_BASE_URL to target non-loopback hosts. API keys for the "
+            "selected provider are sent to that origin."
+        ),
     )
     deepseek_api_key: SecretStr | None = Field(
         default=None,
@@ -315,7 +335,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "local OpenAI-compatible endpoint cannot use query or fragment"
                 )
+        if self.llm_base_url is not None and not self._llm_base_url_override_is_allowed():
+            raise ValueError(
+                "LLM_BASE_URL must target loopback unless LLM_ALLOW_CUSTOM_BASE_URL=true"
+            )
         return self
+
+    def _llm_base_url_override_is_allowed(self) -> bool:
+        if self.llm_allow_custom_base_url:
+            return True
+        return _is_loopback_endpoint_host(self.llm_base_url.host if self.llm_base_url else None)
 
     @property
     def selected_model(self) -> str:
