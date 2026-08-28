@@ -574,7 +574,7 @@ def test_agent_adds_quality_workflow_when_write_and_check_tools_exist() -> None:
 
     prompt = model.system_prompts[0]
     assert prompt.startswith("Custom role.")
-    assert "After a successful write_file or replace_text" in prompt
+    assert "no OS sandbox" in prompt
     assert "Command" in prompt
     assert "Exit code" in prompt
     assert "set_task_plan" in prompt
@@ -783,7 +783,7 @@ def test_agent_previews_and_executes_approved_write_tool() -> None:
     assert previews == ["preview notes.txt:new"]
     assert writes == ["notes.txt:new"]
     assert model.requests[1][-1].tool_results[0].is_error is False
-    assert "run_quality_check" in model.requests[1][-1].tool_results[0].content
+    assert "run_quality_check" not in model.requests[1][-1].tool_results[0].content
     write_events = [
         event
         for event in activities

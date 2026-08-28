@@ -1572,3 +1572,15 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `tools/filesystem.py`、`tools/shell.py`（`git_stage`）、`web/service.py`、`sandbox_export.py`、`sandbox_snapshot.py`、`sandbox.py`、`windows_sandbox.py` 删除私有副本，改为调用共享谓词。
 - host 读/写/搜索、guest export、Git 暂存、Web 文件树现与沙箱快照同等拒绝 `.ssh` / `.aws` / `id_rsa` / `credentials.json`。
 - 本批不解析 `git_diff` 正文（批次 5），不默认打开 OS 沙箱。
+
+## 2026-08-28：质量检查宿主执行预警（批次 2）
+
+### 交付
+
+- `run_quality_check` 预览与工具描述明确「宿主机执行、无 OS 沙箱或网络隔离」；`/permissions` 同步说明。
+- `TOOL_WORKFLOW_INSTRUCTIONS` 去掉写入成功后必须跑检查的句；`_with_post_tool_guidance` 不再在 `write_file` / `replace_text` 后催促质量检查。
+- 仍保留：用户明确要求或确有必要时才调用检查；若已运行则在最终回答汇总 Command / Exit code / Output。
+
+### 限制
+
+- 质量检查仍在宿主进程以 `shell=False` 执行；未立项 WSB 内跑检查。

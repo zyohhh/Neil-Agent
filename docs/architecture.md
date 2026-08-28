@@ -111,7 +111,7 @@ web/ (React + TypeScript)
 
 `ExecutionGraphProjector` 与 `TimelineProjector` 是不修改输入的纯投影。它们先按事件 ID 去重，并以规范 JSON 的字典序稳定裁决同 ID 冲突，再按 UTC 时间和事件 ID 排序，因此输入到达顺序不影响结果。缺失开始事件仍生成孤立节点并标记异常；多个开始、重复状态、缺失或无效父事件、结束早于开始都会保留固定异常。冲突终态使用 `failed > skipped > succeeded` 的固定优先级；父级环反复移除环中字典序最大的关联 ID 的父边，直到得到 DAG。`MetricsProjector` 再从图中汇总节点状态、模型/工具数量、服务端 token 和已报告阶段耗时。纯文本回放只消费这些不可变投影，并限制展示条目，不依赖 Rich、Textual 或 Agent 执行。
 
-当注册表同时提供文件写入和质量检查工具时，Agent 会在用户系统提示词后追加不可配置的本地工具工作流。文件修改结果会提醒模型选择合适的质量检查；命令结果固定返回 `Command`、`Working directory`、`Exit code` 和 `Output`，最终回答据此汇总验证结果。
+当注册表同时提供文件写入和质量检查工具时，Agent 会在用户系统提示词后追加不可配置的本地工具工作流：质量检查仅在用户明确要求或确有必要时调用，且预览与 `/permissions` 明确其为无 OS 隔离的宿主执行；命令结果固定返回 `Command`、`Working directory`、`Exit code` 和 `Output`，最终回答据此汇总验证结果。写入成功后不再自动催促模型跑检查。
 
 当注册表提供计划工具时，多步骤开发任务会先调用 `set_task_plan`，再用 `update_task_step` 按顺序推进。计划变化通过注入式回调立即显示在 CLI，不需要等待模型最终回答。
 
@@ -269,7 +269,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 参数校验 → 生成操作预览 → 用户确认 → 执行 → ToolResult
 ```
 
-没有明确批准时，注册表拒绝执行高风险工具。CLI 只接受 `y` 或 `yes`，其他输入均视为拒绝。文件 diff 包含基于修改前后内容生成的 `Change-ID`；执行前注册表会重新生成预览，如果与用户批准的版本不一致，则要求重新确认。质量检查预览则显示精确命令、工作目录和超时时间。
+没有明确批准时，注册表拒绝执行高风险工具。CLI 只接受 `y` 或 `yes`，其他输入均视为拒绝。文件 diff 包含基于修改前后内容生成的 `Change-ID`；执行前注册表会重新生成预览，如果与用户批准的版本不一致，则要求重新确认。质量检查预览显示精确命令、工作目录、超时时间，并说明为无 OS 隔离的宿主执行。
 
 ## 文件安全边界
 
@@ -290,7 +290,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 ## 命令安全边界
 
-- `run_quality_check` 只允许离线 `eval`、`pytest`、`ruff`、`mypy`，调用参数由程序固定拼装。
+- `run_quality_check` 只允许离线 `eval`、`pytest`、`ruff`、`mypy`，调用参数由程序固定拼装；在宿主机以 `shell=False` 执行，无 OS 沙箱或网络隔离，预览与 `/permissions` 会明确告知。
 - `git_status` 固定读取简洁状态；`git_diff` 只允许切换是否查看暂存区，并禁用 external diff 与 textconv。
 - Git 命令禁用 fsmonitor、分页器和可选锁，避免执行扩展程序或产生非必要写入。
 - 不接收任意可执行文件、命令参数或 Shell 字符串，子进程始终使用 `shell=False`。

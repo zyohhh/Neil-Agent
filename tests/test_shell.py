@@ -45,6 +45,7 @@ def test_quality_check_requires_preview_and_approval(
     )
 
     assert str(tmp_path) in preview.content
+    assert "无 OS 沙箱" in preview.content
     assert "pytest -q" in preview.content
     assert "15 秒" in preview.content
     assert denied.is_error is True

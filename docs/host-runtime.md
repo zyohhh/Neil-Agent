@@ -102,4 +102,4 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 - [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 0A–4 已收口）
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`claude-code-review.md`](claude-code-review.md) — 与 Claude Code 的能力对照
-- [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次（共享 denylist 已完成）
+- [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次（批次 1–2 已完成）

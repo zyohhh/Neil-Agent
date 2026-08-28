@@ -17,7 +17,7 @@
 | 批次 | 状态 | 范围 | 完成标准 |
 | --- | --- | --- | --- |
 | 1 | 已完成 | 共享 secret denylist | 所有列出的调用点引用 `sensitive_paths`；`.ssh` / `.aws` / `id_rsa` / `credentials.json` 与 `.env` 同等拒绝；`.env.example` 仍可读 |
-| 2 | 未开始 | 质量检查预警与去掉自动催促 | `run_quality_check` 预览明确写「无 OS 隔离的宿主执行」；去掉写入成功后必须跑检查的系统提示 |
+| 2 | 已完成 | 质量检查预警与去掉自动催促 | `run_quality_check` 预览明确写「无 OS 隔离的宿主执行」；去掉写入成功后必须跑检查的系统提示 |
 | 3 | 未开始 | 审批绑定对齐 v2 | 非交互 `ApprovalStore.consume()` 在执行前再校验；CLI/Web 批准后在应用前复核当前 `AGENTS.md`（及可选 prompt）摘要 |
 | 4 | 未开始 | Web `command_id` 与 `LLM_BASE_URL` | 命令结果缓存按 `client_id` 隔离，ID 不可猜测；`LLM_BASE_URL` 有 host 策略或显式危险开关；生产 `TRUSTED_HOSTS` 去掉 `testserver` |
 | 5 | 未开始 | `git_diff` / `git_status` 内容过滤 | 只读 Git 输出不包含 denylist 路径的 diff hunk；与批次 1 的路径拒绝互补 |

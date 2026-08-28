@@ -108,7 +108,8 @@ class ShellTools:
 
         command = self._quality_command(check)
         return (
-            "将执行项目代码检查；检查器配置或插件可能运行项目代码。\n"
+            "将在宿主机执行项目代码检查，无 OS 沙箱或网络隔离；"
+            "检查器配置或插件可能运行项目代码。\n"
             f"工作目录：{self.root}\n"
             f"命令：{subprocess.list2cmdline(command)}\n"
             f"超时：{self.timeout:g} 秒"
@@ -654,9 +655,10 @@ class ShellTools:
 RUN_QUALITY_CHECK = ToolDefinition(
     name="run_quality_check",
     description=(
-        "Run one fixed project quality check. Allowed checks are eval, pytest, "
-        "ruff, and mypy. The command runs in the workspace with a timeout, no "
-        "shell, and requires explicit user approval."
+        "Run one fixed project quality check on the host without OS sandbox or "
+        "network isolation. Allowed checks are eval, pytest, ruff, and mypy. "
+        "The command runs in the workspace with a timeout, no shell, and "
+        "requires explicit user approval."
     ),
     input_schema={
         "type": "object",

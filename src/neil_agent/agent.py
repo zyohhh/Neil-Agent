@@ -68,10 +68,10 @@ ActivityHandler = Callable[[ActivityEvent], None]
 InstructionScopeHandler = Callable[[ToolCall], InstructionScopeUpdate | None]
 
 TOOL_WORKFLOW_INSTRUCTIONS = """Local tool workflow requirements:
-- After a successful write_file or replace_text call, choose an appropriate
-  run_quality_check for the changed code. Do not run every check without reason.
-- In the final answer, summarize each attempted check using its exact Command,
-  Exit code, and the key Output. If approval was denied, say that it was not run.
+- run_quality_check runs on the host with no OS sandbox or network isolation;
+  only call it when the user requests verification or the change clearly needs it.
+- When you do run a check, summarize each attempted check in the final answer using
+  its exact Command, Exit code, and the key Output. If approval was denied, say that it was not run.
 - Before creating a local commit, inspect Git changes, stage only explicit paths,
   and never claim that a commit was pushed unless a separate push actually occurred."""
 
@@ -1596,12 +1596,7 @@ class Agent:
         if result.is_error:
             return result
         guidance = ""
-        if call.name in WRITE_TOOL_NAMES and "没有变化" not in result.content:
-            guidance = (
-                "下一步：根据本次修改选择合适的 run_quality_check；"
-                "最终回答需汇总命令、退出码和关键结果。"
-            )
-        elif call.name == "git_stage":
+        if call.name == "git_stage":
             guidance = (
                 "下一步：使用 git_diff(staged=true) 检查暂存内容；"
                 "只有用户要求时才调用 git_commit。"
