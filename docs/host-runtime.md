@@ -34,6 +34,7 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | 文件写工具 | ✅ | ❌ | ✅ | ✅ |
 | Git 写工具 | ✅ | ❌ | ✅ | ✅ |
 | 计划工具 `set_task_plan` | ✅ | ❌ | ❌ | ✅ |
+| 只读子任务 `run_readonly_subtask` | ✅ | ❌ | ❌ | ✅ |
 | Windows `run_command` | 认证后 | 认证后 | 认证后 | 认证后（与 CLI 同路径） |
 | `import_guest_export` | 认证后需暂存 | 写入模式 | 写入模式 | 写入模式 |
 | 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
@@ -95,7 +96,7 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 
 当前无已知 host_runtime 迁移缺口；后续新能力应优先经 `build_host_runtime()` 接入三入口。
 
-`HostMode` 只描述入口差异。与入口正交的能力预设（`standard` / `benchmark-minimal` / `web-safe`）、可逆注册与只读子任务见 [`runtime-profile.md`](runtime-profile.md)。Web 默认 `web-safe`（与 `standard` 工具面一致）；`neil-agent-eval` 默认 `benchmark-minimal`。`HostRuntime.close()` 在 turn 结束、模型切换与 Workbench 关闭时逆序卸载工具与 hooks。
+`HostMode` 只描述入口差异。与入口正交的能力预设（`standard` / `benchmark-minimal` / `web-safe` / `readonly-subtask`）、可逆注册与只读子任务见 [`runtime-profile.md`](runtime-profile.md)（批次 1–3 已完成）。Web 默认 `web-safe`（与 `standard` 工具面一致）；`neil-agent-eval` 默认 `benchmark-minimal`。`run_readonly_subtask` 仅在 CLI/Web 的 `standard` / `web-safe` 面注册；子运行时使用 `readonly-subtask` profile。`HostRuntime.close()` 在 turn 结束、模型切换与 Workbench 关闭时逆序卸载工具与 hooks。已知缺口见 [`project-status.md`](project-status.md)。
 
 ## 相关文档
 
@@ -105,4 +106,5 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`claude-code-review.md`](claude-code-review.md) — 与 Claude Code 的能力对照
 - [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次（批次 1–4 已完成）
-- [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设（批次 1–2 已完成）
+- [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设（批次 1–3 已完成）
+- [`project-status.md`](project-status.md) — 项目状态、缺口与必做后续

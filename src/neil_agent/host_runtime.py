@@ -301,7 +301,12 @@ def build_host_runtime(
     ):
         from .tools.subtask import ReadonlySubtaskTools
 
-        disposers.append(ReadonlySubtaskTools().register(registry))
+        disposers.append(
+            ReadonlySubtaskTools().register(
+                registry,
+                max_prompt_chars=settings.subtask_max_prompt_chars,
+            )
+        )
         _track_registry_tools(registry, disposers, seen_tools)
 
     host_profile = HostProfile(

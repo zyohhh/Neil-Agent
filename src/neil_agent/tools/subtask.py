@@ -7,31 +7,33 @@ from ..schemas import ToolDefinition
 from ..subtask import execute_readonly_subtask
 from .registry import RuntimeDisposer, ToolRegistry
 
-MAX_SUBTASK_PROMPT_CHARS = 4_000
 
-RUN_READONLY_SUBTASK = ToolDefinition(
-    name="run_readonly_subtask",
-    description=(
-        "Spawn a one-shot read-only sub-agent to explore the repository in parallel. "
-        "The sub-agent may only use read-only filesystem tools and returns a bounded "
-        "summary without merging its full conversation into the main history."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": MAX_SUBTASK_PROMPT_CHARS,
-                "description": (
-                    "Focused read-only exploration instructions for the sub-agent."
-                ),
-            }
+def run_readonly_subtask_definition(max_prompt_chars: int) -> ToolDefinition:
+    """Build the model-facing schema bound to the configured prompt limit."""
+
+    return ToolDefinition(
+        name="run_readonly_subtask",
+        description=(
+            "Spawn a one-shot read-only sub-agent to explore the repository in parallel. "
+            "The sub-agent may only use read-only filesystem tools and returns a bounded "
+            "summary without merging its full conversation into the main history."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": max_prompt_chars,
+                    "description": (
+                        "Focused read-only exploration instructions for the sub-agent."
+                    ),
+                }
+            },
+            "required": ["prompt"],
+            "additionalProperties": False,
         },
-        "required": ["prompt"],
-        "additionalProperties": False,
-    },
-)
+    )
 
 
 class ReadonlySubtaskTools:
@@ -45,5 +47,13 @@ class ReadonlySubtaskTools:
         except Exception as error:  # noqa: BLE001 - tool boundary
             raise ToolError(f"只读子任务失败：{type(error).__name__}") from error
 
-    def register(self, registry: ToolRegistry) -> RuntimeDisposer:
-        return registry.register(RUN_READONLY_SUBTASK, self.run_readonly_subtask)
+    def register(
+        self,
+        registry: ToolRegistry,
+        *,
+        max_prompt_chars: int,
+    ) -> RuntimeDisposer:
+        return registry.register(
+            run_readonly_subtask_definition(max_prompt_chars),
+            self.run_readonly_subtask,
+        )

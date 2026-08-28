@@ -195,6 +195,8 @@ def execute_readonly_subtask(prompt: str) -> str:
         raise
     except NeilAgentError as error:
         raise ToolError(str(error)) from error
+    except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        raise
     except BaseException as error:
         raise ToolError(f"只读子任务失败：{type(error).__name__}") from error
     finally:

@@ -178,7 +178,7 @@ def test_parent_agent_keeps_only_summary_in_history(tmp_path: Path) -> None:
     child_model = SubtaskChildModel(response="found two config files")
     parent_model = ParentToolCallModel(child_model)
     registry = ToolRegistry()
-    ReadonlySubtaskTools().register(registry)
+    ReadonlySubtaskTools().register(registry, max_prompt_chars=settings.subtask_max_prompt_chars)
     agent = Agent(parent_model, registry=registry, max_tool_rounds=2)
     with subtask_parent_scope(
         SubtaskParentState(
@@ -214,6 +214,40 @@ def test_forwarded_subtask_events_include_parent_run_id() -> None:
 def test_execute_readonly_subtask_requires_parent_scope(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match="仅在 CLI 或 Web"):
         execute_readonly_subtask("missing parent")
+
+
+def test_execute_readonly_subtask_reraises_keyboard_interrupt(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    class InterruptModel(SubtaskChildModel):
+        def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            system_prompt: str,
+            tools: Sequence[ToolDefinition] = (),
+        ) -> Iterator[str | ModelResponse]:
+            raise KeyboardInterrupt
+
+    with subtask_parent_scope(
+        SubtaskParentState(
+            settings=settings,
+            model=InterruptModel(),
+            parent_run_id="run-interrupt",
+        )
+    ):
+        with pytest.raises(KeyboardInterrupt):
+            execute_readonly_subtask("interrupt me")
+
+
+def test_subtask_tool_schema_matches_settings(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    ReadonlySubtaskTools().register(registry, max_prompt_chars=2_500)
+    definition = next(
+        item for item in registry.definitions if item.name == "run_readonly_subtask"
+    )
+    prompt_schema = definition.input_schema["properties"]["prompt"]
+    assert prompt_schema["maxLength"] == 2_500
 
 
 def test_execute_readonly_subtask_honours_cancel(tmp_path: Path) -> None:
@@ -255,7 +289,7 @@ def test_subtask_runtime_events_forward_with_parent_link(tmp_path: Path) -> None
     bus = EventBus(queue_size=16, max_observers=1)
     subscription = bus.subscribe(capture)
     registry = ToolRegistry()
-    ReadonlySubtaskTools().register(registry)
+    ReadonlySubtaskTools().register(registry, max_prompt_chars=settings.subtask_max_prompt_chars)
     parent = Agent(
         ParentToolCallModel(child_model),
         registry=registry,

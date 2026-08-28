@@ -1,5 +1,7 @@
 # Web Workbench 基本验收记录
 
+> **历史记录**：基线提交 `eba82fd`、分支 `feature/web-workbench`、复验 2026-08-19。当前主线见 [`project-status.md`](project-status.md) 与 `main` 最新提交；本文保留合并前验收证据，不作为当前行为规格。
+>
 > 验收结论：**GO（发布阻塞项已关闭）**
 >
 > 基线提交：`eba82fd84885827406a8e3bd8c3810d51f8a3fc7`

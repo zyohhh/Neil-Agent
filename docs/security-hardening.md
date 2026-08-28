@@ -23,7 +23,7 @@
 | 5 | 未开始 | `git_diff` / `git_status` 内容过滤 | 只读 Git 输出不包含 denylist 路径的 diff hunk；与批次 1 的路径拒绝互补 |
 | 6 | 未开始 | 写路径 `O_NOFOLLOW` | 普通 `write_file` / guest staging 与检查点恢复一样拒绝 symlink 写穿 |
 
-批次 1 完成后，编号可视化 / Web P0–P9 仍保持已收口；本文件是后续安全工作的唯一检查清单。
+批次 1 完成后，编号可视化 / Web P0–P9 仍保持已收口；本文件是后续安全工作的唯一检查清单。批次 1–4 完成后的**交叉缺口与优先级**见 [`project-status.md`](project-status.md)。
 
 ## 批次 1：共享 denylist
 
@@ -101,3 +101,4 @@ Loopback + `SameSite=strict` 保持不变。
 - [`architecture.md`](architecture.md) — 分层与文件安全边界
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵
 - [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设（并行路线，不替代本清单）
+- [`project-status.md`](project-status.md) — 汇总安全批次 5–6 与运行时缺口的优先级

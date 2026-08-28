@@ -21,6 +21,9 @@ cli.py                          neil-agent-web (web/runtime.py)
 host_runtime.py
   CLI / 非交互 / Web 共享的工具注册、指令作用域、审计 hooks 与 HostProfile 能力矩阵
     ↓
+subtask.py
+  只读子任务父上下文、预算执行与事件转发（`run_readonly_subtask` 子运行时）
+    ↓
 agent.py
   对话历史、工具循环、活动事件、生命周期 hooks、审批协调、修改后验证工作流
     ↘ events.py
@@ -58,8 +61,10 @@ tools/registry.py
   工具注册、参数绑定、预览和执行分发
     ├→ tools/filesystem.py
     │    工作区受限的读取、搜索和原子写入
-    └→ tools/shell.py
-         固定质量检查、只读 Git、本地暂存和提交、子进程安全边界
+    ├→ tools/shell.py
+    │    固定质量检查、只读 Git、本地暂存和提交、子进程安全边界
+    └→ tools/subtask.py
+         只读子任务工具 `run_readonly_subtask`（CLI/Web standard 面）
     sensitive_paths.py
       共享凭据目录/文件 denylist，供文件工具、Git 暂存、Web 文件树、guest export 与沙箱快照使用
 
@@ -73,7 +78,7 @@ web/ (React + TypeScript)
   本地 Workbench UI；生产构建写入 src/neil_agent/web/static/ 并随 wheel 分发
 ```
 
-`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置，`sensitive_paths.py` 维护一份凭据目录与文件 denylist。沙箱适配层不会注册工具；通用命令是否可见仍必须由宿主在平台安全门禁通过后显式决定。三条入口（CLI、非交互、Web）通过 `host_runtime.py` 共享工具装配；各入口仍独立负责审批、会话、输出与 UI。能力矩阵与已知差距见 [`host-runtime.md`](host-runtime.md)。对照 Claude Code 后的安全加固批次见 [`security-hardening.md`](security-hardening.md)。对照 DeepSeek Harness 的运行时预设与能力接缝见 [`runtime-profile.md`](runtime-profile.md)。Web 产品与协议细节见 [`web-workbench-development.md`](web-workbench-development.md)。
+`schemas.py` 为各层提供消息、工具和用户可见活动事件数据结构，`events.py` 提供独立的可视化观察事件层，`errors.py` 提供统一但分层的用户可见异常，`config.py` 负责从环境变量和 `.env` 加载配置，`sensitive_paths.py` 维护一份凭据目录与文件 denylist。沙箱适配层不会注册工具；通用命令是否可见仍必须由宿主在平台安全门禁通过后显式决定。三条入口（CLI、非交互、Web）通过 `host_runtime.py` 共享工具装配；各入口仍独立负责审批、会话、输出与 UI。能力矩阵与已知差距见 [`host-runtime.md`](host-runtime.md)。对照 Claude Code 后的安全加固批次见 [`security-hardening.md`](security-hardening.md)。对照 DeepSeek Harness 的运行时预设与能力接缝见 [`runtime-profile.md`](runtime-profile.md)。**当前缺口与必做后续** 见 [`project-status.md`](project-status.md)。Web 产品与协议细节见 [`web-workbench-development.md`](web-workbench-development.md)。
 
 ## 项目指令边界
 

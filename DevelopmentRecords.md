@@ -1635,3 +1635,12 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `subtask.py`：`SubtaskParentState`、`execute_readonly_subtask()`、独立 `subtask_*` 预算/超时/摘要上限；子 `HostRuntime` 必 `close()`。
 - `RuntimeEvent` 元数据 `parent_run_id`；Web turn 传入 `run_id`；子事件转发带父链接，不含子任务正文。
 - 测试：`tests/test_readonly_subtask.py`（profile 隔离、摘要有界、历史不合并、取消/转发）。
+
+## 2026-08-28：项目审视与文档同步
+
+### 交付
+
+- 新增 [`docs/project-status.md`](docs/project-status.md)：当前快照、已知缺口（严重度）、必做/可选后续、文档维护规则。
+- 同步 `README.md`、`architecture.md`、`host-runtime.md`、`security-hardening.md`、`runtime-profile.md`、`AGENTS.md`、`web-workbench-basic-acceptance.md`（历史标注）。
+- 修复 `subtask.py`：`KeyboardInterrupt` / `SystemExit` / `GeneratorExit` 不再包装为 `ToolError`。
+- `tools/subtask.py`：工具 schema `maxLength` 与 `Settings.subtask_max_prompt_chars` 注册时绑定。

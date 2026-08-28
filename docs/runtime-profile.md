@@ -109,6 +109,12 @@
 - `SubtaskParentState` + `subtask_parent_scope`；Web 传入 `parent_run_id=run_id`；子事件经 `parent_run_id` 与 `parent_event_id` 折叠。
 - `HostRuntime.close()` 在子任务结束路径必调用；取消与超时均 settle。
 
+**已知缺口（审视 2026-08-28，见 [`project-status.md`](project-status.md)）：**
+
+- 超时/取消仅在子 Agent 流式 chunk 之间检查；阻塞中的只读工具 I/O 无法被强制打断（P1 补强）。
+- CLI 未绑定 `cancel`；`parent_run_id` 在 CLI 为 `turn-…`、Web 为 `run-…`（观测一致性问题）。
+- 子任务转发事件仍含 `workspace_path` 元数据，不含 prompt/正文。
+
 ## 批次 4–6（可选，不提前开工）
 
 - **Goals：** 用户级持久目标写入会话事件，与 `set_task_plan` 分工（plan = 当前回合步骤，goal = 跨回合目标）。创建/暂停需与当前审批主体一致。
@@ -138,4 +144,5 @@
 - [`security-hardening.md`](security-hardening.md) — 应用层安全批次（并行，不替代）
 - [`architecture.md`](architecture.md) — 分层与工具循环
 - [`claude-code-review.md`](claude-code-review.md) — 与 Claude Code 的对照；本文件是与 DeepSeek Harness 的对照
+- [`project-status.md`](project-status.md) — 批次完成度、缺口与必做后续
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — 上游仓库（developer preview，API 仍会变）
