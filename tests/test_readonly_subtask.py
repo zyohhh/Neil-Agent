@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from threading import Event
@@ -12,6 +14,7 @@ from neil_agent.agent import Agent
 from neil_agent.config import Settings
 from neil_agent.errors import ToolError
 from neil_agent.events import EventBus, RuntimeEvent, redact_runtime_metadata
+from neil_agent.execution_budget import check_execution_budget, execution_budget_scope
 from neil_agent.host_runtime import (
     BENCHMARK_MINIMAL_READONLY_TOOLS,
     HostMode,
@@ -19,7 +22,13 @@ from neil_agent.host_runtime import (
     build_host_runtime,
 )
 from neil_agent.schemas import Message, ModelResponse, ToolCall, ToolDefinition, ToolResult
-from neil_agent.subtask import SubtaskParentState, execute_readonly_subtask, subtask_parent_scope
+from neil_agent.subtask import (
+    SubtaskParentState,
+    execute_readonly_subtask,
+    new_parent_run_id,
+    subtask_parent_scope,
+)
+from neil_agent.tools.filesystem import FileSystemTools
 from neil_agent.tools.registry import ToolRegistry
 from neil_agent.tools.subtask import ReadonlySubtaskTools
 
@@ -324,3 +333,74 @@ def test_subtask_runtime_events_forward_with_parent_link(tmp_path: Path) -> None
         )
         for event in child_turns
     )
+
+
+def test_new_parent_run_id_uses_run_prefix() -> None:
+    run_id = new_parent_run_id()
+    assert re.fullmatch(r"run-[0-9a-f]{32}", run_id)
+
+
+def test_execution_budget_scope_enforces_deadline() -> None:
+    with pytest.raises(ToolError, match="超时"):
+        with execution_budget_scope(deadline=time.monotonic() - 1):
+            check_execution_budget()
+
+
+def test_execute_readonly_subtask_times_out_during_tool_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path, subtask_timeout_seconds=0.05)
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+
+    class ReadFileModel:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def complete(
+            self,
+            messages: Sequence[Message],
+            *,
+            system_prompt: str,
+        ) -> str:
+            return "done"
+
+        def stream(
+            self,
+            messages: Sequence[Message],
+            *,
+            system_prompt: str,
+            tools: Sequence[ToolDefinition] = (),
+        ) -> Iterator[str | ModelResponse]:
+            self._calls += 1
+            if self._calls == 1:
+                yield ModelResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="read-1",
+                            name="read_file",
+                            arguments={"path": "note.txt"},
+                        )
+                    ],
+                )
+                return
+            yield ModelResponse(content="done")
+
+    original_read = FileSystemTools.read_file
+
+    def slow_read(self: FileSystemTools, path: str) -> str:
+        time.sleep(0.1)
+        return original_read(self, path)
+
+    monkeypatch.setattr(FileSystemTools, "read_file", slow_read)
+    with subtask_parent_scope(
+        SubtaskParentState(
+            settings=settings,
+            model=ReadFileModel(),
+            parent_run_id="run-timeout-tool",
+        )
+    ):
+        with pytest.raises(ToolError, match="超时"):
+            execute_readonly_subtask("read note")
+

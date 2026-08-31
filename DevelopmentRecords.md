@@ -1653,3 +1653,11 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `FileSystemTools`：lexical 写入路径校验、符号链接拒绝、`O_NOFOLLOW` 突变写；guest staging 复用 `_write_bytes_no_follow`。
 - 测试：`test_git_output_filter.py`、扩展 `test_shell.py` / `test_permissions.py`。
 - 文档：`security-hardening.md` 批次 5–6 已完成；`project-status.md` / `README.md` / `AGENTS.md` 同步。
+
+## 2026-08-31：子任务 P1 补强（budget / CLI cancel / parent_run_id）
+
+### 交付
+
+- 新增 `execution_budget.py`：子 Agent 与只读工具在模型轮次、流式 chunk、工具调用前后协作检查 cancel/deadline。
+- CLI 每轮绑定 `cancel` Event 与 `new_parent_run_id()`（`run-…` 格式，与 Web 一致）；Ctrl+C 时设置 cancel。
+- Security Shield 增加 `READONLY SUBTASK` 能力带；扩展 `test_readonly_subtask.py`（超时、run id 格式）。

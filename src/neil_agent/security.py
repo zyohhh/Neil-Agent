@@ -109,6 +109,13 @@ _CAPABILITY_GROUPS = (
         "in-memory plan state only",
     ),
     _CapabilityGroup(
+        "readonly-subtask",
+        "READONLY SUBTASK",
+        "application",
+        ("run_readonly_subtask",),
+        "one-shot read-only child runtime",
+    ),
+    _CapabilityGroup(
         "git-inspect",
         "GIT INSPECT",
         "application",

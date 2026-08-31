@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 import shlex
 import sys
+from threading import Event
 from typing import cast
 from time import monotonic
 
@@ -60,7 +61,7 @@ from .session import (
     SessionStore,
     normalize_session_title,
 )
-from .subtask import SubtaskParentState, subtask_parent_scope
+from .subtask import SubtaskParentState, new_parent_run_id, subtask_parent_scope
 from .task import TaskTracker
 from .time_machine import (
     MAX_TIME_MACHINE_EVENTS,
@@ -611,14 +612,21 @@ def run(console: Console) -> None:
         if not user_input:
             continue
 
+        turn_cancel = Event()
         with subtask_parent_scope(
-            SubtaskParentState(settings=settings, model=llm),
+            SubtaskParentState(
+                settings=settings,
+                model=llm,
+                parent_run_id=new_parent_run_id(),
+                cancel=turn_cancel,
+            ),
         ):
             response_stream = agent.stream_chat(user_input)
             try:
                 for chunk in response_stream:
                     renderer.show_text(chunk)
             except KeyboardInterrupt:
+                turn_cancel.set()
                 response_stream.close()
                 renderer.finish_answer()
                 console.print("[yellow]已取消本次回答。[/yellow]")

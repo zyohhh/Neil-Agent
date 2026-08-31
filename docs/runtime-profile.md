@@ -111,9 +111,8 @@
 
 **已知缺口（审视 2026-08-28，见 [`project-status.md`](project-status.md)）：**
 
-- 超时/取消仅在子 Agent 流式 chunk 之间检查；阻塞中的只读工具 I/O 无法被强制打断（P1 补强）。
-- CLI 未绑定 `cancel`；`parent_run_id` 在 CLI 为 `turn-…`、Web 为 `run-…`（观测一致性问题）。
-- 子任务转发事件仍含 `workspace_path` 元数据，不含 prompt/正文。
+- 子任务转发事件仍含 `workspace_path` 元数据，不含 prompt/正文（低优先级观测项）。
+- 单回合可多次调用子任务，无显式调用次数上限（成本设计取舍）。
 
 ## 批次 4–6（可选，不提前开工）
 
@@ -133,6 +132,7 @@
 
 - `src/neil_agent/host_runtime.py` — `HostMode`、`HostProfile`、`build_host_runtime()`
 - `src/neil_agent/subtask.py` — 只读子任务上下文、预算与 `execute_readonly_subtask()`
+- `src/neil_agent/execution_budget.py` — 子任务协作式 cancel/deadline 检查
 - `src/neil_agent/tools/subtask.py` — `run_readonly_subtask` 工具注册
 - `src/neil_agent/evals.py` — 离线与真实验收入口
 - `src/neil_agent/web/controller.py` — 模型切换与 worker 生命周期

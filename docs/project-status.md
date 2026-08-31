@@ -40,12 +40,9 @@
 | 严重度 | 领域 | 问题 | 位置 / 说明 |
 | --- | --- | --- | --- |
 | **高** | 子任务 | `KeyboardInterrupt` / `SystemExit` 曾被 `BaseException` 包装为 `ToolError` | `subtask.py`（已修复） |
-| **中** | 子任务 | 超时/取消仅在流式 chunk 间检查，阻塞中的 `read_file` 等无法被强制打断 | `subtask.py` + `agent.py` 工具循环 |
-| **中** | 子任务 | CLI 未向 `SubtaskParentState` 传入 `cancel`；`parent_run_id` CLI 用 `turn-…`、Web 用 `run-…` | `cli.py` / `controller.py` |
-| **中** | 子任务 | 工具 JSON schema `maxLength` 与 `Settings.subtask_max_prompt_chars` 可能漂移 | `tools/subtask.py`（已改为注册时绑定 settings） |
-| **中** | 安全（批次 6） | 普通 `write_file` / guest staging 无 `O_NOFOLLOW`，存在 symlink TOCTOU | `tools/filesystem.py`（已修复） |
+| **中** | 子任务 | 超时/取消仅在流式 chunk 间检查，阻塞中的 `read_file` 等无法被强制打断 | `execution_budget.py` + `agent.py` + `filesystem.py`（已修复：协作式 budget 检查） |
 | **低** | 观测 | 子任务转发事件仍含 `workspace_path` 元数据（无正文） | `events.py` 白名单 + Web `runtime_step` |
-| **低** | 安全投影 | `run_readonly_subtask` 未单独列入 Security Shield 分组 | `security.py` |
+| **低** | 安全投影 | `run_readonly_subtask` 未单独列入 Security Shield 分组 | `security.py`（已修复） |
 | **低** | 成本 | 单回合可多次调用子任务，无显式调用次数上限 | 设计取舍，可按需加 `subtask_max_invocations` |
 
 **非缺陷说明：** `test_web_workbench.py` 体量大（46 项、~2200 行），全量跑测耗时长，但无已知 flaky 标记；慢消费者行为有专门测试。在线 Provider smoke 与 `windows_sandbox_security` 为条件跳过。
@@ -58,10 +55,10 @@
 | --- | --- | --- | --- |
 | P0 | **安全批次 5**：Git 输出内容过滤 | `security-hardening.md` | ✅ 已完成 |
 | P0 | **安全批次 6**：突变写 `O_NOFOLLOW` | `security-hardening.md` | ✅ 已完成 |
-| P1 | **子任务超时/取消可中断** | `runtime-profile.md` 批次 3 补强 | 工具 I/O 期间可感知 deadline/cancel；Web turn 取消不长时间挂起 |
-| P1 | **子任务 CLI 取消与统一 `parent_run_id`** | 观测一致性 | CLI 绑定 cancel；驾驶舱折叠语义 CLI/Web 一致 |
-| P2 | **子任务测试补强** | `tests/test_readonly_subtask.py` | 超时、KeyboardInterrupt、schema 与 settings 一致 |
-| P2 | **Security Shield 子任务面** | `security.py` | 投影中显式列出 `run_readonly_subtask` |
+| P1 | **子任务超时/取消可中断** | `runtime-profile.md` 批次 3 补强 | ✅ 已完成 |
+| P1 | **子任务 CLI 取消与统一 `parent_run_id`** | 观测一致性 | ✅ 已完成 |
+| P2 | **子任务测试补强** | `tests/test_readonly_subtask.py` | ✅ 已完成（超时/中断/ schema） |
+| P2 | **Security Shield 子任务面** | `security.py` | ✅ 已完成 |
 | P3 | **文档与验收记录** | 本文 + 各专项 doc | 架构图、能力矩阵、README 状态与代码同步（审视批次） |
 
 ## 可选后续（不阻塞发版）

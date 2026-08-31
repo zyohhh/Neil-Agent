@@ -41,6 +41,7 @@ def _tool_permissions() -> dict[str, bool]:
         "run_quality_check": True,
         "git_stage": True,
         "git_commit": True,
+        "run_readonly_subtask": False,
     }
 
 
@@ -113,10 +114,10 @@ def test_projection_builds_four_bands_and_keeps_enforcement_layers_distinct() ->
     )
 
     assert shield.schema_version == SECURITY_SHIELD_SCHEMA_VERSION
-    assert shield.tool_count == 12
-    assert shield.direct_tool_count == 7
+    assert shield.tool_count == 13
+    assert shield.direct_tool_count == 8
     assert shield.approval_tool_count == 5
-    assert shield.capability_count("direct") == 3
+    assert shield.capability_count("direct") == 4
     assert shield.capability_count("approval") == 3
     assert shield.capability_count("forbidden") == 1
     assert shield.capability_count("unavailable") == 1

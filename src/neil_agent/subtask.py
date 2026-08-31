@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 from .config import Settings
 from .errors import NeilAgentError, ToolError
 from .events import EventBus, RuntimeEvent, redact_runtime_metadata
+from .execution_budget import check_execution_budget, execution_budget_scope
 from .host_runtime import HostMode, RuntimeProfile, build_host_runtime
 
 if TYPE_CHECKING:
@@ -68,6 +70,12 @@ def note_parent_run_id(parent_run_id: str | None) -> None:
         state.parent_run_id = parent_run_id
 
 
+def new_parent_run_id() -> str:
+    """Return a stable parent run id shared by CLI and Web turns."""
+
+    return f"run-{secrets.token_hex(16)}"
+
+
 @contextmanager
 def parent_tool_event_scope(parent_tool_event_id: str | None):
     """Expose the active parent tool span while a tool handler runs."""
@@ -115,18 +123,10 @@ def _forward_subtask_event(
     )
 
 
-def _collect_stream_text(
-    stream: Iterator[str],
-    *,
-    deadline: float,
-    cancel: Event | None,
-) -> str:
+def _collect_stream_text(stream: Iterator[str]) -> str:
     chunks: list[str] = []
     for chunk in stream:
-        if cancel is not None and cancel.is_set():
-            raise ToolError("只读子任务已取消。")
-        if monotonic() > deadline:
-            raise ToolError("只读子任务超时。")
+        check_execution_budget()
         chunks.append(chunk)
     return "".join(chunks)
 
@@ -184,11 +184,8 @@ def execute_readonly_subtask(prompt: str) -> str:
             registry=child_runtime.registry,
             event_bus=child_bus,
         )
-        summary = _collect_stream_text(
-            child_agent.stream_chat(prompt_text),
-            deadline=deadline,
-            cancel=parent.cancel,
-        )
+        with execution_budget_scope(deadline=deadline, cancel=parent.cancel):
+            summary = _collect_stream_text(child_agent.stream_chat(prompt_text))
         child_bus.flush(timeout=0.25)
         return _bound_text(summary, settings.subtask_max_result_chars)
     except ToolError:

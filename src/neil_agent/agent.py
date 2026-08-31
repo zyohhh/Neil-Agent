@@ -62,6 +62,7 @@ from .schemas import (
     validate_message_history,
 )
 from .subtask import note_parent_run_id, parent_tool_event_scope
+from .execution_budget import check_execution_budget
 from .task import TaskTracker
 from .tools.registry import ToolRegistry
 
@@ -626,6 +627,7 @@ class Agent:
         turn_usage: TokenUsage | None = None
 
         while True:
+            check_execution_budget()
             try:
                 hook_context = self._before_model_hook(
                     model_round=tool_rounds + 1,
@@ -679,6 +681,7 @@ class Agent:
                     system_prompt=request_system_prompt,
                     tools=tool_definitions,
                 ):
+                    check_execution_budget()
                     if isinstance(event, str):
                         yield event
                     else:
@@ -1120,6 +1123,7 @@ class Agent:
         tool_span: RuntimeSpan | None,
         quality_span: RuntimeSpan | None,
     ) -> ToolResult:
+        check_execution_budget()
         hook_result = self._before_tool_hook(call)
         if hook_result is not None:
             return self._finish_tool_call(

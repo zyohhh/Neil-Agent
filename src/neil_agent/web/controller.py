@@ -23,7 +23,7 @@ from ..providers.factory import create_provider
 from ..runtime_models import prepare_runtime_model_switch, runtime_model_catalog
 from ..schemas import ActivityEvent, Message, TokenUsage, ToolCall
 from ..session import SessionHandle, SessionSnapshot, UNTITLED_SESSION
-from ..subtask import SubtaskParentState, subtask_parent_scope
+from ..subtask import SubtaskParentState, new_parent_run_id, subtask_parent_scope
 from ..task import QualityCheckRecord, TaskStep
 from .dto import (
     ActiveSessionDto,
@@ -635,7 +635,7 @@ class WorkbenchController:
                     "Select or create a session before starting another turn",
                 )
             now = self._now()
-            run_id = f"run-{secrets.token_hex(16)}"
+            run_id = new_parent_run_id()
             cancel = Event()
             self._cancel = cancel
             self._steps.clear()

@@ -18,6 +18,7 @@ from ..checkpoint import (
     content_hash,
 )
 from ..errors import ToolError
+from ..execution_budget import check_execution_budget
 from ..sandbox_approval import GuestExportImportBinding
 from ..sandbox_export import (
     GuestExportError,
@@ -79,6 +80,7 @@ class FileSystemTools:
     def list_directory(self, path: str = ".") -> str:
         """List direct children of a workspace directory."""
 
+        check_execution_budget()
         directory = self._resolve(path)
         if not directory.is_dir():
             raise ToolError(f"不是目录：{path}")
@@ -98,6 +100,7 @@ class FileSystemTools:
     def read_file(self, path: str) -> str:
         """Read one UTF-8 text file inside the workspace."""
 
+        check_execution_budget()
         file_path = self._resolve(path)
         if not file_path.is_file():
             raise ToolError(f"文件不存在：{path}")
@@ -105,13 +108,16 @@ class FileSystemTools:
             raise ToolError(f"文件过大，最多允许读取 {MAX_FILE_SIZE_BYTES} 字节。")
 
         try:
-            return file_path.read_text(encoding="utf-8")
+            content = file_path.read_text(encoding="utf-8")
         except UnicodeDecodeError as error:
             raise ToolError("只能读取 UTF-8 文本文件。") from error
+        check_execution_budget()
+        return content
 
     def search_text(self, query: str, path: str = ".") -> str:
         """Search for case-insensitive text matches within the workspace."""
 
+        check_execution_budget()
         if not query.strip():
             raise ToolError("搜索内容不能为空。")
 
@@ -121,6 +127,7 @@ class FileSystemTools:
         normalized_query = query.casefold()
 
         for file_path in files:
+            check_execution_budget()
             if len(matches) >= MAX_SEARCH_RESULTS:
                 break
             if not self._is_searchable_file(file_path):
