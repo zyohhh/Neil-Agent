@@ -54,7 +54,7 @@ class GuestExportImportTools:
             payload = file_contents[entry.path]
             target = self._staging_file_path(files_root, entry.path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
+            FileSystemTools._write_bytes_no_follow(target, payload, exclusive=True)
         manifest_path = staging_root / "manifest.json"
         manifest_path.write_text(
             json.dumps(

@@ -11,7 +11,7 @@
 | 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
 | 测试 | 846 项 pytest（`uv run pytest`）；Web 前端独立 `npm test` / Playwright |
-| 安全加固 | 批次 1–4 **已完成**；批次 5–6 **未开始** |
+| 安全加固 | 批次 1–6 **已完成** |
 | 运行时预设 | 批次 1–3 **已完成**；批次 4–6 **可选、未开始** |
 
 ## 已完成能力（摘要）
@@ -39,12 +39,11 @@
 
 | 严重度 | 领域 | 问题 | 位置 / 说明 |
 | --- | --- | --- | --- |
-| **高** | 安全（批次 5） | 已跟踪敏感文件仍可能经 `git_diff` / `git_status` 进入模型上下文 | `tools/shell.py`；见 [`security-hardening.md`](security-hardening.md) 批次 5 |
-| **高** | 子任务 | `KeyboardInterrupt` / `SystemExit` 曾被 `BaseException` 包装为 `ToolError` | `subtask.py`（审视后已修复，需回归测试） |
+| **高** | 子任务 | `KeyboardInterrupt` / `SystemExit` 曾被 `BaseException` 包装为 `ToolError` | `subtask.py`（已修复） |
 | **中** | 子任务 | 超时/取消仅在流式 chunk 间检查，阻塞中的 `read_file` 等无法被强制打断 | `subtask.py` + `agent.py` 工具循环 |
 | **中** | 子任务 | CLI 未向 `SubtaskParentState` 传入 `cancel`；`parent_run_id` CLI 用 `turn-…`、Web 用 `run-…` | `cli.py` / `controller.py` |
-| **中** | 子任务 | 工具 JSON schema `maxLength` 与 `Settings.subtask_max_prompt_chars` 可能漂移 | `tools/subtask.py`（审视后改为注册时绑定 settings） |
-| **中** | 安全（批次 6） | 普通 `write_file` / guest staging 无 `O_NOFOLLOW`，存在 symlink TOCTOU | `tools/filesystem.py` |
+| **中** | 子任务 | 工具 JSON schema `maxLength` 与 `Settings.subtask_max_prompt_chars` 可能漂移 | `tools/subtask.py`（已改为注册时绑定 settings） |
+| **中** | 安全（批次 6） | 普通 `write_file` / guest staging 无 `O_NOFOLLOW`，存在 symlink TOCTOU | `tools/filesystem.py`（已修复） |
 | **低** | 观测 | 子任务转发事件仍含 `workspace_path` 元数据（无正文） | `events.py` 白名单 + Web `runtime_step` |
 | **低** | 安全投影 | `run_readonly_subtask` 未单独列入 Security Shield 分组 | `security.py` |
 | **低** | 成本 | 单回合可多次调用子任务，无显式调用次数上限 | 设计取舍，可按需加 `subtask_max_invocations` |
@@ -57,8 +56,8 @@
 
 | 优先级 | 项 | 归属 | 完成标准 |
 | --- | --- | --- | --- |
-| P0 | **安全批次 5**：Git 输出内容过滤 | `security-hardening.md` | `git_diff` / `git_status` 剥离 denylist 路径 hunk；回归测试 |
-| P0 | **安全批次 6**：突变写 `O_NOFOLLOW` | `security-hardening.md` | `write_file` / guest staging 与检查点恢复同级 symlink 拒绝 |
+| P0 | **安全批次 5**：Git 输出内容过滤 | `security-hardening.md` | ✅ 已完成 |
+| P0 | **安全批次 6**：突变写 `O_NOFOLLOW` | `security-hardening.md` | ✅ 已完成 |
 | P1 | **子任务超时/取消可中断** | `runtime-profile.md` 批次 3 补强 | 工具 I/O 期间可感知 deadline/cancel；Web turn 取消不长时间挂起 |
 | P1 | **子任务 CLI 取消与统一 `parent_run_id`** | 观测一致性 | CLI 绑定 cancel；驾驶舱折叠语义 CLI/Web 一致 |
 | P2 | **子任务测试补强** | `tests/test_readonly_subtask.py` | 超时、KeyboardInterrupt、schema 与 settings 一致 |

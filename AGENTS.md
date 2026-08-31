@@ -5,7 +5,7 @@
 ## 文档权威
 
 1. 行为与协议以 **代码 + 测试** 为准。
-2. 安全批次：[`docs/security-hardening.md`](docs/security-hardening.md)（批次 1–4 已完成，5–6 待做）。
+2. 安全批次：[`docs/security-hardening.md`](docs/security-hardening.md)（批次 1–6 已完成）。
 3. 运行时预设：[`docs/runtime-profile.md`](docs/runtime-profile.md)（批次 1–3 已完成）。
 4. 当前缺口与必做项：[`docs/project-status.md`](docs/project-status.md)。
 5. Web 协议细节：[`docs/web-workbench-development.md`](docs/web-workbench-development.md)；以 `tests/test_web_workbench.py` 为准。

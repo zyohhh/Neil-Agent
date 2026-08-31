@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from ..errors import ToolError
+from ..git_output_filter import redact_git_diff_text, redact_git_status_text
 from ..schemas import ToolDefinition
 from ..sensitive_paths import is_sensitive_relative_path
 from .registry import ToolRegistry
@@ -123,14 +124,19 @@ class ShellTools:
     def git_status(self) -> str:
         """Return concise working-tree status without modifying Git state."""
 
-        return self._run(self._git_status_command())
+        return self._run_git(self._git_status_command())
 
     def git_status_snapshot(self) -> str:
         """Return raw concise Git status for the local ``/status`` command."""
 
-        return self._capture(
-            self._git_status_command(),
-            timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
+        command = self._git_status_command()
+        return self._sanitize_git_output(
+            command,
+            self._capture(
+                command,
+                truncate=False,
+                timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
+            ),
         )
 
     def git_review_status_snapshot(self) -> str:
@@ -181,20 +187,24 @@ class ShellTools:
         normalized = self._normalize_git_paths(paths)
         if len(normalized) > 2:
             raise ToolError("A Web review diff accepts at most two rename paths.")
-        content = self._capture_stdout(
-            self._git_command(
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--ignore-submodules=all",
-                "--no-renames",
-                "--unified=3",
-                "--no-color",
-                "HEAD",
-                "--",
-                *self._literal_pathspecs(normalized),
+        command = self._git_command(
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=all",
+            "--no-renames",
+            "--unified=3",
+            "--no-color",
+            "HEAD",
+            "--",
+            *self._literal_pathspecs(normalized),
+        )
+        content = self._sanitize_git_output(
+            command,
+            self._capture_stdout(
+                command,
+                timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
             ),
-            timeout=min(self.timeout, STATUS_TIMEOUT_SECONDS),
         )
         return GitDiffSnapshot(
             content=content[:max_chars],
@@ -214,7 +224,7 @@ class ShellTools:
         )
         if staged:
             command.append("--cached")
-        return self._run(command)
+        return self._run_git(command)
 
     def preview_git_stage(self, paths: list[str]) -> str:
         """Preview the exact explicit paths and content that would be staged."""
@@ -234,28 +244,30 @@ class ShellTools:
         if not status:
             raise ToolError("所选路径没有可暂存的变更。")
 
-        cached_diff = self._capture(
-            self._git_command(
-                "diff",
-                "--cached",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--",
-                *pathspecs,
-            ),
-            truncate=False,
+        cached_command = self._git_command(
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--",
+            *pathspecs,
         )
-        working_diff = self._capture(
-            self._git_command(
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "--",
-                *pathspecs,
-            ),
-            truncate=False,
+        working_command = self._git_command(
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--",
+            *pathspecs,
+        )
+        cached_diff = self._sanitize_git_output(
+            cached_command,
+            self._capture(cached_command, truncate=False),
+        )
+        working_diff = self._sanitize_git_output(
+            working_command,
+            self._capture(working_command, truncate=False),
         )
         untracked_diffs = [
             self._preview_untracked_file(path)
@@ -312,15 +324,16 @@ class ShellTools:
         """Preview a local commit message and the complete staged diff."""
 
         commit_message = self._validate_commit_message(message)
-        staged_diff = self._capture(
-            self._git_command(
-                "diff",
-                "--cached",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-            ),
-            truncate=False,
+        staged_diff_command = self._git_command(
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+        )
+        staged_diff = self._sanitize_git_output(
+            staged_diff_command,
+            self._capture(staged_diff_command, truncate=False),
         )
         if not staged_diff:
             raise ToolError("暂存区为空，无法创建提交。")
@@ -368,6 +381,39 @@ class ShellTools:
         if completed.returncode != 0:
             raise ToolError(result)
         return result
+
+    def _run_git(self, command: list[str]) -> str:
+        completed = self._run_process(command)
+        stdout = self._sanitize_git_output(command, completed.stdout)
+        stderr = completed.stderr
+        result = self._format_process_result(
+            command,
+            subprocess.CompletedProcess(
+                args=completed.args,
+                returncode=completed.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            ),
+        )
+        if completed.returncode != 0:
+            raise ToolError(result)
+        return result
+
+    @staticmethod
+    def _git_subcommand(command: list[str]) -> str | None:
+        if "status" in command:
+            return "status"
+        if "diff" in command:
+            return "diff"
+        return None
+
+    def _sanitize_git_output(self, command: list[str], stdout: str) -> str:
+        subcommand = self._git_subcommand(command)
+        if subcommand == "status":
+            return redact_git_status_text(stdout)
+        if subcommand == "diff":
+            return redact_git_diff_text(stdout)
+        return stdout
 
     def _capture(
         self,

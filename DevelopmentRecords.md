@@ -1644,3 +1644,12 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 同步 `README.md`、`architecture.md`、`host-runtime.md`、`security-hardening.md`、`runtime-profile.md`、`AGENTS.md`、`web-workbench-basic-acceptance.md`（历史标注）。
 - 修复 `subtask.py`：`KeyboardInterrupt` / `SystemExit` / `GeneratorExit` 不再包装为 `ToolError`。
 - `tools/subtask.py`：工具 schema `maxLength` 与 `Settings.subtask_max_prompt_chars` 注册时绑定。
+
+## 2026-08-31：安全批次 5–6（Git 脱敏与写路径 O_NOFOLLOW）
+
+### 交付
+
+- 新增 `git_output_filter.py`：`redact_git_status_text` / `redact_git_diff_text`；`ShellTools` 在 status/diff/预览/快照路径统一脱敏。
+- `FileSystemTools`：lexical 写入路径校验、符号链接拒绝、`O_NOFOLLOW` 突变写；guest staging 复用 `_write_bytes_no_follow`。
+- 测试：`test_git_output_filter.py`、扩展 `test_shell.py` / `test_permissions.py`。
+- 文档：`security-hardening.md` 批次 5–6 已完成；`project-status.md` / `README.md` / `AGENTS.md` 同步。

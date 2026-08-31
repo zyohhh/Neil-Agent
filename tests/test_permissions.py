@@ -143,3 +143,29 @@ def test_atomic_write_failure_preserves_original_file(
     assert "原文件保持不变" in result.content
     assert target.read_text(encoding="utf-8") == "original"
     assert list(tmp_path.glob(".neil-agent-*.tmp")) == []
+
+
+def test_write_file_rejects_symlink_target(tmp_path: Path) -> None:
+    target = tmp_path / "real.txt"
+    target.write_text("original", encoding="utf-8")
+    link = tmp_path / "linked.txt"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not supported in this environment")
+    registry = ToolRegistry()
+    FileSystemTools(tmp_path).register(registry)
+    call = ToolCall(
+        id="call-link",
+        name="write_file",
+        arguments={"path": "linked.txt", "content": "changed"},
+    )
+    preview = registry.preview(call)
+    result = registry.execute(
+        call,
+        approved=True,
+        approved_preview=preview.content,
+    )
+    assert result.is_error is True
+    assert target.read_text(encoding="utf-8") == "original"
+

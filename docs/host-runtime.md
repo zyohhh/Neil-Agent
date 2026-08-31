@@ -105,6 +105,6 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 - [`visualization-development.md`](visualization-development.md) — TUI 可视化路线（Phase 0A–4 已收口）
 - [`web-workbench-development.md`](web-workbench-development.md) — Web 产品与协议
 - [`claude-code-review.md`](claude-code-review.md) — 与 Claude Code 的能力对照
-- [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次（批次 1–4 已完成）
+- [`security-hardening.md`](security-hardening.md) — 对照后的安全加固批次（批次 1–6 已完成）
 - [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设（批次 1–3 已完成）
 - [`project-status.md`](project-status.md) — 项目状态、缺口与必做后续

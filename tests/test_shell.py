@@ -512,3 +512,47 @@ def test_safe_environment_keeps_runtime_paths_without_secrets(
     assert "DEEPSEEK_API_KEY" not in environment
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
     assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+
+
+def test_git_status_and_diff_redact_tracked_sensitive_content(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "visible.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=tracked\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / ".env").write_text("SECRET=changed\n", encoding="utf-8")
+    (tmp_path / "src" / "visible.py").write_text("print('changed')\n", encoding="utf-8")
+
+    registry = ToolRegistry()
+    ShellTools(tmp_path).register_read_only(registry)
+    status = registry.execute(ToolCall(id="status", name="git_status"))
+    diff = registry.execute(ToolCall(id="diff", name="git_diff"))
+
+    assert status.is_error is False
+    assert diff.is_error is False
+    assert "visible.py" in status.content
+    assert "SECRET=changed" not in status.content
+    assert "SECRET=changed" not in diff.content
+    assert "redacted sensitive path" in status.content
+    assert "Content redacted" in diff.content
+

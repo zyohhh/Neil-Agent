@@ -20,8 +20,8 @@
 | 2 | 已完成 | 质量检查预警与去掉自动催促 | `run_quality_check` 预览明确写「无 OS 隔离的宿主执行」；去掉写入成功后必须跑检查的系统提示 |
 | 3 | 已完成 | 审批绑定对齐 v2 | 非交互 `ApprovalStore.consume()` 在执行前再校验；CLI/Web 批准后在应用前复核当前 `AGENTS.md`（及可选 prompt）摘要 |
 | 4 | 已完成 | Web `command_id` 与 `LLM_BASE_URL` | 命令结果缓存按 `client_id` 隔离，ID 不可猜测；`LLM_BASE_URL` 有 host 策略或显式危险开关；生产 `TRUSTED_HOSTS` 去掉 `testserver` |
-| 5 | 未开始 | `git_diff` / `git_status` 内容过滤 | 只读 Git 输出不包含 denylist 路径的 diff hunk；与批次 1 的路径拒绝互补 |
-| 6 | 未开始 | 写路径 `O_NOFOLLOW` | 普通 `write_file` / guest staging 与检查点恢复一样拒绝 symlink 写穿 |
+| 5 | 已完成 | `git_diff` / `git_status` 内容过滤 | 只读 Git 输出不包含 denylist 路径的 diff hunk；与批次 1 的路径拒绝互补 |
+| 6 | 已完成 | 写路径 `O_NOFOLLOW` | 普通 `write_file` / guest staging 与检查点恢复一样拒绝 symlink 写穿 |
 
 批次 1 完成后，编号可视化 / Web P0–P9 仍保持已收口；本文件是后续安全工作的唯一检查清单。批次 1–4 完成后的**交叉缺口与优先级**见 [`project-status.md`](project-status.md)。
 
@@ -77,9 +77,13 @@ Loopback + `SameSite=strict` 保持不变。
 
 交付：对 porcelain / diff 输出按共享 denylist 剥离或替换为占位行，不把密钥 hunk 送进上下文。
 
+**已实现：** `git_output_filter.py` 提供 `redact_git_status_text` / `redact_git_diff_text`；`ShellTools` 在 `git_status`、`git_diff`、快照与暂存/提交预览路径统一调用。
+
 ## 批次 6：symlink / TOCTOU
 
 检查点恢复已拒绝 symlink；普通写入与 guest staging 仍 `resolve()` 后 `write_bytes`。同用户竞态可写穿。交付：突变写使用 `O_NOFOLLOW` 或与恢复路径相同的 lexical 校验。
+
+**已实现：** `FileSystemTools._lexical_workspace_path` + `_assert_write_path_safe`；`_atomic_write` 与 guest staging 使用 `O_NOFOLLOW`（可用时）并拒绝符号链接目标。
 
 ## 明确不做
 
@@ -91,6 +95,7 @@ Loopback + `SameSite=strict` 保持不变。
 ## 相关代码
 
 - `src/neil_agent/sensitive_paths.py` — 共享 denylist
+- `src/neil_agent/git_output_filter.py` — Git status/diff 输出脱敏
 - `src/neil_agent/tools/filesystem.py` / `shell.py`
 - `src/neil_agent/web/service.py`
 - `src/neil_agent/sandbox_export.py` / `sandbox_snapshot.py` / `sandbox.py` / `windows_sandbox.py`

@@ -637,12 +637,61 @@ class FileSystemTools:
         return files
 
     def _prepare_write_target(self, path: str) -> Path:
-        file_path = self._resolve(path)
-        if file_path.exists() and not file_path.is_file():
-            raise ToolError(f"目标不是文件：{path}")
-        if not file_path.parent.is_dir():
-            raise ToolError(f"父目录不存在：{self._relative_display(file_path.parent)}")
-        return file_path
+        lexical = self._lexical_workspace_path(path)
+        self._assert_write_path_safe(lexical)
+        if lexical.exists():
+            self._require_safe_regular_file(lexical, path)
+        elif not lexical.parent.is_dir():
+            raise ToolError(f"父目录不存在：{self._relative_display(lexical.parent)}")
+        return lexical
+
+    def _lexical_workspace_path(self, path: str) -> Path:
+        requested = Path(path)
+        if requested.is_absolute():
+            raise ToolError("拒绝使用绝对路径写入。")
+        if ".." in requested.parts:
+            raise ToolError("拒绝访问工作区之外的路径。")
+        lexical = self.root.joinpath(*requested.parts)
+        try:
+            lexical.relative_to(self.root)
+        except ValueError as error:
+            raise ToolError("拒绝访问工作区之外的路径。") from error
+        if not self._is_allowed_lexical(lexical):
+            raise ToolError("该路径包含受保护的目录或敏感文件。")
+        return lexical
+
+    def _is_allowed_lexical(self, path: Path) -> bool:
+        try:
+            relative = path.relative_to(self.root)
+        except ValueError:
+            return False
+        return not is_sensitive_relative_path(relative.parts)
+
+    def _assert_write_path_safe(self, lexical: Path) -> None:
+        relative = lexical.relative_to(self.root)
+        current = self.root
+        for part in relative.parts:
+            current = current / part
+            if current == lexical:
+                break
+            if current.exists() and current.is_symlink():
+                raise ToolError("路径包含符号链接目录，拒绝写入。")
+
+    @staticmethod
+    def _require_safe_regular_file(file_path: Path, display_path: str) -> None:
+        try:
+            file_stat = file_path.lstat()
+            resolved = file_path.resolve(strict=True)
+        except FileNotFoundError as error:
+            raise ToolError(f"文件不存在：{display_path}") from error
+        except OSError as error:
+            raise ToolError("无法检查写入目标。") from error
+        if (
+            file_path.is_symlink()
+            or not stat.S_ISREG(file_stat.st_mode)
+            or resolved != file_path
+        ):
+            raise ToolError("拒绝写入符号链接或非常规文件目标。")
 
     def _read_optional_text(self, file_path: Path) -> str | None:
         if not file_path.exists():
@@ -780,6 +829,24 @@ class FileSystemTools:
         return f"{diff}\nChange-ID: {change_id}"
 
     def _atomic_write(self, file_path: Path, content: str) -> None:
+        self._assert_write_path_safe(file_path)
+        if file_path.exists():
+            self._require_safe_regular_file(
+                file_path,
+                self._relative_display(file_path),
+            )
+        payload = content.encode("utf-8")
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if no_follow:
+            try:
+                if file_path.exists():
+                    self._write_bytes_no_follow(file_path, payload, exclusive=False)
+                else:
+                    self._write_bytes_no_follow(file_path, payload, exclusive=True)
+                return
+            except OSError as error:
+                raise ToolError("写入失败，原文件保持不变。") from error
+
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -797,6 +864,10 @@ class FileSystemTools:
                 temporary_path = Path(temporary_file.name)
 
             if file_path.exists():
+                self._require_safe_regular_file(
+                    file_path,
+                    self._relative_display(file_path),
+                )
                 os.chmod(temporary_path, file_path.stat().st_mode)
             os.replace(temporary_path, file_path)
             temporary_path = None
@@ -808,6 +879,28 @@ class FileSystemTools:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    @staticmethod
+    def _write_bytes_no_follow(
+        file_path: Path,
+        payload: bytes,
+        *,
+        exclusive: bool,
+    ) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        if exclusive:
+            flags |= os.O_EXCL
+        else:
+            flags |= os.O_TRUNC
+        descriptor = os.open(file_path, flags, 0o644)
+        try:
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(descriptor, payload[offset:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def _is_allowed(self, path: Path) -> bool:
         try:
