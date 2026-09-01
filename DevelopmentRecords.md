@@ -9,8 +9,8 @@
 - 项目负责人：Neil
 - 文档创建时间：2026 年 7 月
 - GitHub 仓库：https://github.com/zyohhh/Neil-Agent
-- 当前版本：v0.1.0-dev
-- 当前状态：真实 v1/v2 协议验收已通过；OS 沙箱契约与 Windows fail-closed 能力门禁已接入，通用命令仍保持关闭
+- 当前版本：v0.1.0
+- 当前状态：功能收口；真实 v1/v2 协议验收已通过；OS 沙箱契约与 Windows fail-closed 能力门禁已接入，通用命令仍保持关闭。默认维护：修缺陷、依赖与文档，不扩能力面。
 
 ## 文件职责
 
@@ -1716,6 +1716,11 @@ CLI 展示修改预览并等待用户输入 y/yes
 
 - `load_skill`：仅读取工作区 `skills/<name>/SKILL.md`；CLI/Web `standard`/`web-safe` 注册。
 - 当前回合把有界正文交给模型；提交历史时替换为占位符。不进审计/Web 事件正文。
+
+## 2026-09-01：v0.1.0 功能收口
+
+- 包版本与 Git tag 对齐为 `v0.1.0`；进入维护期起点（默认修缺陷与文档，不扩能力面）。
+- 可选未做：Session goals、Plan DSL、GitHub Actions 工作流推送、Web 独立子任务面板。
 
 
 
