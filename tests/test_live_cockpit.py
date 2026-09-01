@@ -268,6 +268,7 @@ def _security_snapshot() -> SecurityShield:
             "run_quality_check": True,
             "git_stage": True,
             "git_commit": True,
+            "run_readonly_subtask": False,
         },
         sandbox_backend="disabled",
         audit_enabled=True,
@@ -289,6 +290,7 @@ def _changed_security_snapshot() -> SecurityShield:
             "run_quality_check": True,
             "git_stage": True,
             "git_commit": True,
+            "run_readonly_subtask": False,
         },
         sandbox_backend="windows-sandbox",
         audit_enabled=False,
@@ -480,7 +482,7 @@ def test_security_formatters_show_four_states_and_distinct_layers() -> None:
     compact_watch = format_security_boundary_watch(watch, compact=True)
     detail = format_security_boundaries(security, watch)
 
-    assert "DIRECT 3" in title.plain
+    assert "DIRECT 4" in title.plain
     assert "APPROVAL 3" in title.plain
     assert "FORBIDDEN 1" in title.plain
     assert "UNAVAILABLE 1" in title.plain
@@ -488,7 +490,7 @@ def test_security_formatters_show_four_states_and_distinct_layers() -> None:
     assert "WORKSPACE READ" in bands.plain
     assert "bounded paths" in bands.plain
     assert "bounded paths" not in compact.plain
-    assert len(short.plain.splitlines()) == 7
+    assert len(short.plain.splitlines()) == 8
     assert "FORBIDDEN HOST SHELL" in short.plain
     assert "UNAVAILABLE OS CMD" in short.plain
     assert "P APP" in compact_watch.plain

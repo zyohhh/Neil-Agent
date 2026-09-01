@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from .sandbox_export import (
     MAX_EXPORT_FILES,

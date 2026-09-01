@@ -1661,3 +1661,15 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 新增 `execution_budget.py`：子 Agent 与只读工具在模型轮次、流式 chunk、工具调用前后协作检查 cancel/deadline。
 - CLI 每轮绑定 `cancel` Event 与 `new_parent_run_id()`（`run-…` 格式，与 Web 一致）；Ctrl+C 时设置 cancel。
 - Security Shield 增加 `READONLY SUBTASK` 能力带；扩展 `test_readonly_subtask.py`（超时、run id 格式）。
+
+## 2026-09-01：P0 门禁（lint / type / 测试对齐）
+
+### 交付
+
+- 修复 `live_cockpit.py` 未导入 `NeilAgentError`；`test_sandbox_evidence.py` 改为调用 `_parse_junit` 并删除死代码。
+- 收口 ruff / mypy（`pyproject.toml` 增加 `[tool.ruff]` / `[tool.mypy]`）。
+- 测试与子任务工具面、Web `parent_run_id` 对齐；`test_real_runner_*` 标为 `windows_sandbox_security`。
+- 离线门禁：829 passed（排除 `online` 与 `windows_sandbox_security`）。
+- 通用 GitHub Actions 工作流写在 `.github/workflows/ci.yml`（本地保留）；因 PAT 缺少 `workflow` scope **未推送**。
+- 文档：`project-status.md`、`architecture.md`、`host-runtime.md`、`AGENTS.md`、`web-workbench-development.md`、`claude-code-review.md`。
+

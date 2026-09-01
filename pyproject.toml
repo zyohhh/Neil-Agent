@@ -47,3 +47,13 @@ markers = [
     "online: networked provider smoke tests that require explicit environment opt-in",
     "windows_sandbox_security: attack-oriented tests that require a real Windows Sandbox installation",
 ]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true

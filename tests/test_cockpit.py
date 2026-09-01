@@ -62,6 +62,7 @@ def _snapshot(tmp_path: Path) -> CockpitSnapshot:
                 "run_quality_check": True,
                 "git_stage": True,
                 "git_commit": True,
+                "run_readonly_subtask": False,
             },
             sandbox_backend="disabled",
             audit_enabled=True,
@@ -97,10 +98,10 @@ def test_cockpit_renders_useful_runtime_metadata(tmp_path: Path) -> None:
     assert "WORKSPACE SIGNAL" in output
     assert "Build cockpit" in output
     assert "TOTAL 9,200" in output
-    assert "DIRECT 3" in output
+    assert "DIRECT 4" in output
     assert "FORBIDDEN 1" in output
     assert "UNAVAILABLE 1" in output
-    assert "DIRECT 7 · APPROVAL 5" in output
+    assert "DIRECT 8 · APPROVAL 5" in output
     assert "SEPARATE FROM APP POLICY" in output
     assert "RECORDING METADATA" in output
     assert "PATH APP" in output

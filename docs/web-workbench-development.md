@@ -931,7 +931,7 @@ P0–P9 已全部完成。下列为立项期决策；已决项不再阻塞实现
 
 **仍未立项（非 P10+ Phase）：** Web Terminal/PTY（需独立安全评审）、Focus/Build 真实权限、跨 Provider 切换、自动 fallback、跨 turn 完整质量检查历史。在契约明确前继续保持 unavailable。
 
-P1–P9 已接入真实 Agent、逐工具审批（含 `binding_kind`）、Review、wheel 分发、参考图回归、前端故障恢复、Web 会话连续性、受控模型切换与 guest export 导入；P0 fixture 仍用于视觉与状态回归。
+P1–P9 已接入真实 Agent、逐工具审批（含 `binding_kind`）、Review、wheel 分发、参考图回归、前端故障恢复、Web 会话连续性、受控模型切换与 guest export 导入；P0 fixture 仍用于视觉与状态回归。`run_readonly_subtask` 由 Web `standard`/`web-safe` 工具面注册，turn worker 传入 `parent_run_id`；**前端无独立子任务 UI**，观测走通用 `runtime_step`。
 
 ## 20. 完成定义
 

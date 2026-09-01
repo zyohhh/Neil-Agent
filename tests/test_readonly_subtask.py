@@ -21,7 +21,7 @@ from neil_agent.host_runtime import (
     RuntimeProfile,
     build_host_runtime,
 )
-from neil_agent.schemas import Message, ModelResponse, ToolCall, ToolDefinition, ToolResult
+from neil_agent.schemas import Message, ModelResponse, ToolCall, ToolDefinition
 from neil_agent.subtask import (
     SubtaskParentState,
     execute_readonly_subtask,

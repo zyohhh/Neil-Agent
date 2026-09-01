@@ -115,7 +115,8 @@ class SandboxCommandTools:
         if not isinstance(executable, str) or not isinstance(argv, list):
             raise ToolError("run_command 参数无效。")
         try:
-            with self._prepared_spec(executable, argv, export_paths) as spec:
+            export_list = list(export_paths) if export_paths else None
+            with self._prepared_spec(executable, argv, export_list) as spec:
                 cli_executable = self._backend._require_certified_cli()
                 material = self._backend._load_runtime(cli_executable)
                 _manifest, _snapshot, _executable, binding = (

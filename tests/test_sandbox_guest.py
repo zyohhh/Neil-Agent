@@ -330,6 +330,7 @@ def test_runner_source_keeps_fixed_candidate_security_contract() -> None:
     assert "WriteAtomic(ExportRoot, ExportPath, resultBytes)" in source
 
 
+@pytest.mark.windows_sandbox_security
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows Job Objects")
 def test_real_runner_reclassifies_fast_flood_after_child_exit(tmp_path: Path) -> None:
     """Cover output overflow discovered only after the direct child has exited."""
@@ -454,6 +455,7 @@ internal static class FastFlood
     assert parsed.job_terminated is True
 
 
+@pytest.mark.windows_sandbox_security
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows Job Objects")
 def test_real_runner_cancels_only_after_guest_tree_is_ready(tmp_path: Path) -> None:
     compiler = find_dotnet_framework_csc()

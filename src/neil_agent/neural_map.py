@@ -218,8 +218,8 @@ def extract_workspace_paths(
     path_key = _PATH_ARG_BY_TOOL.get(tool_name)
     if path_key is None:
         return ()
-    sanitized = sanitize_workspace_path(arguments.get(path_key))
-    return (sanitized,) if sanitized is not None else ()
+    path_value = sanitize_workspace_path(arguments.get(path_key))
+    return (path_value,) if path_value is not None else ()
 
 
 def render_neural_map_snapshot(
@@ -370,6 +370,8 @@ def _collect_file_activities(nodes: Iterable[ExecutionNode]) -> tuple[_FileActiv
         directories = tuple(
             _directory_for_path(path, str(kind), tool_name) for path in paths
         ) or (".",)
+        raw_count = metadata.get("argument_count", 1)
+        count = raw_count if isinstance(raw_count, int) else 1
         pending.append(
             (
                 timestamp,
@@ -377,7 +379,7 @@ def _collect_file_activities(nodes: Iterable[ExecutionNode]) -> tuple[_FileActiv
                     kind=kind,  # type: ignore[arg-type]
                     directories=directories,
                     window_label=_TIME_WINDOW_LABELS[0],
-                    weight=max(int(metadata.get("argument_count", 1)), 1),
+                    weight=max(count, 1),
                     failed=bool(metadata.get("is_error")),
                 ),
             )

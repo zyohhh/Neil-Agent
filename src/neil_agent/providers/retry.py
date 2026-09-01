@@ -47,7 +47,7 @@ class RetryPolicy:
             raise ValueError("retry number must be positive")
         if error.retry_after is not None:
             return min(error.retry_after, self.max_delay)
-        exponential = self.base_delay * (2 ** (retry_number - 1))
+        exponential = float(self.base_delay * (2 ** (retry_number - 1)))
         return min(exponential, self.max_delay)
 
 

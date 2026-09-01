@@ -170,7 +170,14 @@ def _track_registry_tools(
             continue
         seen.add(definition.name)
         name = definition.name
-        disposers.append(lambda registry=registry, name=name: registry.unregister(name))
+
+        def _unregister_tool(
+            registry: ToolRegistry = registry,
+            tool_name: str = name,
+        ) -> None:
+            registry.unregister(tool_name)
+
+        disposers.append(_unregister_tool)
 
 
 def _register_benchmark_minimal_filesystem(

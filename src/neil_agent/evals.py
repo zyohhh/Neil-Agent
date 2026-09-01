@@ -922,12 +922,13 @@ def _eval_guest_export_import_approval() -> str:
         )
         request = _parse_json_object(request_stdout.getvalue())
         _require(request_exit == 3, "request mode did not stop for approval")
-        approvals = request.get("approval_requests")
+        approvals_value = request.get("approval_requests")
         _require(
-            isinstance(approvals, list) and len(approvals) == 1,
+            isinstance(approvals_value, list) and len(approvals_value) == 1,
             "request mode did not emit one approval",
         )
-        approval = approvals[0]
+        assert isinstance(approvals_value, list)
+        approval = approvals_value[0]
         _require(
             isinstance(approval, dict)
             and approval.get("tool_name") == "import_guest_export"

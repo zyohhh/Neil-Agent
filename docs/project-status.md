@@ -1,16 +1,17 @@
 # 项目状态与后续路线
 
-本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-08-28 审视）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
+本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-09-01 审视）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
 
 ## 当前快照
 
 | 项 | 状态 |
 | --- | --- |
-| 版本 | `v0.1.0-dev`（`main` @ `3924677` 及之后） |
+| 版本 | `v0.1.0-dev` |
 | Python | ≥ 3.13；包管理 `uv` |
 | 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
-| 测试 | 846 项 pytest（`uv run pytest`）；Web 前端独立 `npm test` / Playwright |
+| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**829 passed**、10 skipped、16 deselected；Web 前端独立 `npm test` / Playwright |
+| 静态检查 | `uv run ruff check .` 与 `uv run mypy src` 为开发门禁（`pyproject.toml` 含 `[tool.ruff]` / `[tool.mypy]`） |
 | 安全加固 | 批次 1–6 **已完成** |
 | 运行时预设 | 批次 1–3 **已完成**；批次 4–6 **可选、未开始** |
 
@@ -39,13 +40,12 @@
 
 | 严重度 | 领域 | 问题 | 位置 / 说明 |
 | --- | --- | --- | --- |
-| **高** | 子任务 | `KeyboardInterrupt` / `SystemExit` 曾被 `BaseException` 包装为 `ToolError` | `subtask.py`（已修复） |
-| **中** | 子任务 | 超时/取消仅在流式 chunk 间检查，阻塞中的 `read_file` 等无法被强制打断 | `execution_budget.py` + `agent.py` + `filesystem.py`（已修复：协作式 budget 检查） |
 | **低** | 观测 | 子任务转发事件仍含 `workspace_path` 元数据（无正文） | `events.py` 白名单 + Web `runtime_step` |
-| **低** | 安全投影 | `run_readonly_subtask` 未单独列入 Security Shield 分组 | `security.py`（已修复） |
 | **低** | 成本 | 单回合可多次调用子任务，无显式调用次数上限 | 设计取舍，可按需加 `subtask_max_invocations` |
+| **低** | 产品 | Web 已注册 `run_readonly_subtask`，前端无独立子任务 UI | 后端能力；见 `web-workbench-development.md` |
+| **低** | CI | 通用 PR 工作流文件在本地（`.github/workflows/ci.yml`），因 token 缺 `workflow` scope 尚未推送 | 推送后启用 ruff/mypy/pytest + Web lint/test/build |
 
-**非缺陷说明：** `test_web_workbench.py` 体量大（46 项、~2200 行），全量跑测耗时长，但无已知 flaky 标记；慢消费者行为有专门测试。在线 Provider smoke 与 `windows_sandbox_security` 为条件跳过。
+**非缺陷说明：** `test_web_workbench.py` 体量大（46 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
 
 ## 必做后续（按优先级）
 
@@ -59,7 +59,8 @@
 | P1 | **子任务 CLI 取消与统一 `parent_run_id`** | 观测一致性 | ✅ 已完成 |
 | P2 | **子任务测试补强** | `tests/test_readonly_subtask.py` | ✅ 已完成（超时/中断/ schema） |
 | P2 | **Security Shield 子任务面** | `security.py` | ✅ 已完成 |
-| P3 | **文档与验收记录** | 本文 + 各专项 doc | 架构图、能力矩阵、README 状态与代码同步（审视批次） |
+| P3 | **文档与验收记录** | 本文 + 各专项 doc | ✅ 2026-09-01 同步（测试数、模块表、Git 脱敏 / `O_NOFOLLOW` / budget / CI） |
+| P3 | **静态检查与离线 pytest 门禁** | ruff / mypy / 测试对齐 | ✅ 已完成；通用 GitHub Actions 工作流待有 `workflow` 权限后推送 |
 
 ## 可选后续（不阻塞发版）
 

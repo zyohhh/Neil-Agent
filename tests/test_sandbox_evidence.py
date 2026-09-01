@@ -39,6 +39,7 @@ from neil_agent.sandbox_evidence import (
     verify_certification,
     verify_evidence_bundle,
     verify_evidence_runs,
+    _parse_junit,
 )
 from neil_agent.windows_sandbox import (
     WSB_EXPORTER_COMMAND,
@@ -412,20 +413,6 @@ def _finalize_certified_bundle(root: Path) -> ReviewTrustPins:
     _write_canonical(root / "independent-review.json", review)
     _write_canonical(root / "certification.json", certification)
     return pins
-    return collect_evidence_run(
-        repeat_id="repeat-0",
-        execution_nonce="0" * 32,
-        producer_id="github-actions:owner/repository",
-        workflow_run_id=100,
-        workflow_attempt=1,
-        pytest_exit_code=0,
-        started_at=_START,
-        finished_at=_START + timedelta(seconds=30),
-        platform=_platform(),
-        subject=_subject(),
-        cli_schema=_schema(0),
-        junit_path=junit_path,
-    ).tests
 
 
 def test_required_manifest_is_fixed_sorted_and_self_hashed() -> None:
@@ -1433,7 +1420,7 @@ def test_junit_suite_counters_must_match_testcases(tmp_path: Path) -> None:
     )
 
     with pytest.raises(SandboxEvidenceError, match="counter does not match"):
-        _collect_junit(junit_path)
+        _parse_junit(junit_path)
 
 
 @pytest.mark.parametrize(
@@ -1479,7 +1466,7 @@ def test_junit_requires_one_pytest_suite_with_direct_testcases(
     junit_path.write_bytes(ElementTree.tostring(output_root, encoding="utf-8"))
 
     with pytest.raises(SandboxEvidenceError, match="JUnit"):
-        _collect_junit(junit_path)
+        _parse_junit(junit_path)
 
 
 @pytest.mark.parametrize(
@@ -1506,7 +1493,7 @@ def test_junit_always_binds_classname_to_required_module(
         SandboxEvidenceError,
         match="invalid name or classname|mapped uniquely",
     ):
-        _collect_junit(junit_path)
+        _parse_junit(junit_path)
 
 
 def test_cli_collects_three_runs_and_verifies_a_canonical_aggregate(

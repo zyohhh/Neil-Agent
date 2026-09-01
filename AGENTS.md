@@ -20,7 +20,7 @@
 ## 开发命令
 
 ```text
-uv run pytest                    # 全量 Python 测试
+uv run pytest -m "not online and not windows_sandbox_security"  # 离线门禁
 uv run pytest tests/test_host_runtime.py tests/test_readonly_subtask.py  # 运行时相关
 uv run ruff check . && uv run mypy src
 cd web && npm run lint && npm run test && npm run build
@@ -40,6 +40,9 @@ uv build --wheel
 | --- | --- |
 | `host_runtime.py` | 三入口共享装配、`RuntimeProfile`、`HostRuntime.close()` |
 | `subtask.py` / `tools/subtask.py` | 只读子任务 |
+| `execution_budget.py` | 协作式 cancel / deadline |
+| `git_output_filter.py` | Git status/diff 脱敏 |
+| `security.py` | Security Shield 投影 |
 | `agent.py` | 对话与工具循环 |
 | `sensitive_paths.py` | 共享 denylist |
 | `approval.py` | 审批绑定与 `consume()` |

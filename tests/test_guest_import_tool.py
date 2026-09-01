@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from neil_agent.approval import ApprovalStore, NoninteractiveApprovalBroker
+from neil_agent.approval import ApprovalStore
 from neil_agent.config import Settings
 from neil_agent.errors import ToolError
 from neil_agent.host_runtime import HostMode, build_host_runtime

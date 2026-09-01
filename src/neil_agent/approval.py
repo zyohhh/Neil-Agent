@@ -752,7 +752,9 @@ def _record_version(payload: bytes) -> int:
         raise ApprovalError("审批请求格式无效。") from error
     if not isinstance(value, dict) or type(value.get("version")) is not int:
         raise ApprovalError("审批请求缺少有效的记录版本。")
-    return value["version"]
+    version = value["version"]
+    assert isinstance(version, int)
+    return version
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:

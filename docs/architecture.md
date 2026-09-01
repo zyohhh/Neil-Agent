@@ -24,6 +24,9 @@ host_runtime.py
 subtask.py
   只读子任务父上下文、预算执行与事件转发（`run_readonly_subtask` 子运行时）
     ↓
+execution_budget.py
+  协作式 cancel / deadline（子任务与主循环检查点）
+    ↓
 agent.py
   对话历史、工具循环、活动事件、生命周期 hooks、审批协调、修改后验证工作流
     ↘ events.py
@@ -63,6 +66,8 @@ tools/registry.py
     │    工作区受限的读取、搜索和原子写入
     ├→ tools/shell.py
     │    固定质量检查、只读 Git、本地暂存和提交、子进程安全边界
+    ├→ git_output_filter.py
+    │    Git status/diff 输出脱敏（敏感路径不进工具结果）
     └→ tools/subtask.py
          只读子任务工具 `run_readonly_subtask`（CLI/Web standard 面）
     sensitive_paths.py
@@ -263,7 +268,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 工具注册分为两类：
 
-- 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`、`set_task_plan`、`update_task_step`
+- 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`、`set_task_plan`、`update_task_step`、`run_readonly_subtask`（仅 CLI/Web 标准面）
 - 必须审批：`write_file`、`replace_text`、`run_quality_check`、`git_stage`、`git_commit`；认证就绪时还条件注册 `run_command` 与 `import_guest_export`（后者依赖已暂存的 guest export manifest）
 
 `/permissions` 只读取注册表与工作区配置，展示上述分类、敏感路径、命令和网络边界，并明确当前没有 OS 级命令沙箱；它不修改规则，也不把提示词描述成强制权限。
@@ -286,7 +291,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - diff 预览最多显示 20,000 字符。
 - 过期的 diff 审批不能用于已经发生外部变化的文件。
 - 精确替换要求实际匹配数量等于 `expected_replacements`。
-- 写入使用同目录临时文件和 `os.replace`；替换失败时原文件保持不变。
+- 写入使用 lexical 路径校验、拒绝符号链接，并以 `O_NOFOLLOW` 打开目标；同目录临时文件和 `os.replace`；替换失败时原文件保持不变。
 - 一次 `Agent.stream_chat()` 回合构成一个文件任务边界；无论回合成功、失败或被取消，已完成的 `write_file` / `replace_text` 都会在边界结束时合并为一个内存检查点。同一路径只保留任务前原内容和最终结果哈希，任务内回到原内容的净零修改不会留下检查点。
 - 单个任务最多记录 50 个路径；任务前原内容与任务后回滚内容分别限制为 5,000,000 字符，路径最多 1,000 字符，历史最多保留 20 个任务。任何无法安全记录的下一次写入都在文件变更前 fail-closed，旧历史只在新任务完成后按边界淘汰。
 - `/rewind-task`（兼容别名 `/rewind-file`）列出全部目标和有界反向 diff，再要求 `y` / `yes` 批准；准备阶段及批准后会全量校验最新任务、路径范围、真实普通文件和每个结果哈希，任一目标变化都在首个恢复写入前拒绝。
@@ -296,7 +301,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 ## 命令安全边界
 
 - `run_quality_check` 只允许离线 `eval`、`pytest`、`ruff`、`mypy`，调用参数由程序固定拼装；在宿主机以 `shell=False` 执行，无 OS 沙箱或网络隔离，预览与 `/permissions` 会明确告知。
-- `git_status` 固定读取简洁状态；`git_diff` 只允许切换是否查看暂存区，并禁用 external diff 与 textconv。
+- `git_status` 固定读取简洁状态；`git_diff` 只允许切换是否查看暂存区，并禁用 external diff 与 textconv。工具结果经 `git_output_filter` 剥离敏感路径条目与对应 diff hunk。
 - Git 命令禁用 fsmonitor、分页器和可选锁，避免执行扩展程序或产生非必要写入。
 - 不接收任意可执行文件、命令参数或 Shell 字符串，子进程始终使用 `shell=False`。
 - 命令工作目录固定为解析后的 `WORKSPACE_ROOT`，标准输入设为空，避免命令等待交互。

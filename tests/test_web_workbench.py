@@ -18,7 +18,6 @@ from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from neil_agent.config import Settings
-from neil_agent.host_runtime import build_host_runtime
 from neil_agent.errors import SessionError
 from neil_agent.events import RuntimeEventFactory
 from neil_agent.schemas import ActivityEvent, Message, TokenUsage
@@ -67,6 +66,8 @@ class EchoWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):  # type: ignore[no-untyped-def]
         on_activity(ActivityEvent(status="running", message="Model request started"))
         factory = RuntimeEventFactory()
@@ -101,6 +102,8 @@ class BlockingWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):  # type: ignore[no-untyped-def]
         self.started.set()
         if not cancel.wait(2):
@@ -124,6 +127,8 @@ class ApprovalWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):
         self.requested.set()
         self.approved = request_approval(
@@ -162,6 +167,8 @@ class GuestImportApprovalWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):
         call = ToolCall(
             id="import-1",
@@ -191,6 +198,8 @@ class DoubleApprovalWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):
         self.first_requested.set()
         self.decisions.append(
@@ -217,6 +226,8 @@ class QualityHistoryWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):  # type: ignore[no-untyped-def]
         factory = RuntimeEventFactory()
         for status in ("succeeded", "failed", "skipped"):
@@ -250,6 +261,8 @@ class SessionWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):
         self.restored_session_ids.append(
             None if session is None else session.session_id
@@ -284,6 +297,8 @@ class FailingWorker:
         on_activity,
         on_runtime,
         request_approval,
+        *,
+        parent_run_id=None,
     ):  # type: ignore[no-untyped-def]
         raise RuntimeError("worker failed")
 

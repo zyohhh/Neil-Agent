@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar, Token
+from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Event
 from time import monotonic
@@ -97,7 +97,6 @@ def _require_parent_state() -> SubtaskParentState:
 def _bound_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
-    half = max(1, max_chars // 2)
     marker = "\n... [subtask summary truncated] ...\n"
     keep = max_chars - len(marker)
     if keep < 2:
@@ -113,7 +112,7 @@ def _forward_subtask_event(
     parent_run_id: str,
     parent_event_id: str | None,
 ) -> RuntimeEvent:
-    metadata = {item.name: item.value for item in event.metadata}
+    metadata: dict[str, object] = {item.name: item.value for item in event.metadata}
     metadata["parent_run_id"] = parent_run_id
     return event.model_copy(
         update={

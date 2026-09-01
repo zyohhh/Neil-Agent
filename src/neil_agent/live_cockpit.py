@@ -31,7 +31,7 @@ from .context import (
     context_budget_pressure,
 )
 from .checkpoint import PreparedFileRestore
-from .errors import ToolError
+from .errors import NeilAgentError, ToolError
 from .events import EventBus, EventSubscription, RuntimeEvent
 from .projections import (
     ExecutionGraph,

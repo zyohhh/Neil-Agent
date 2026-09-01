@@ -17,6 +17,7 @@ from neil_agent.config import Settings
 from neil_agent.errors import SessionError
 from neil_agent.event_store import JsonlEventStore
 from neil_agent.events import RuntimeEvent
+from neil_agent.host_runtime import RuntimeProfile
 from neil_agent.instructions import load_project_instructions
 from neil_agent.providers.base import ProviderId
 from neil_agent.schemas import (
@@ -105,7 +106,7 @@ def test_run_uses_injected_console(
     cockpit_text = cockpit_texts[0]
     assert "NEIL AGENT" in welcome_text
     assert "deepseek-v4-flash" in welcome_text
-    assert "12 个可用 · 5 个操作需要批准" in welcome_text
+    assert "14 个可用 · 6 个操作需要批准" in welcome_text
     assert "已加载 1 个来源" in welcome_text
     assert "CONTEXT TOMOGRAPHY" in cockpit_text
     assert "SECURITY SHIELD" in cockpit_text
@@ -300,8 +301,8 @@ def test_welcome_panel_remains_readable_in_a_narrow_terminal(tmp_path: Path) -> 
         model="deepseek-v4-flash",
         thinking_enabled=True,
         workspace_root=str(tmp_path / "a-very-long-workspace-directory"),
-        tool_count=12,
-        approval_tool_count=5,
+        tool_count=14,
+        approval_tool_count=6,
         session_id="20260721T120000000000Z-deadbeef",
         instructions=load_project_instructions(tmp_path),
     )
@@ -334,8 +335,8 @@ def test_welcome_panel_explains_inactive_instruction_state(
         model="deepseek-v4-flash",
         thinking_enabled=False,
         workspace_root=str(tmp_path),
-        tool_count=12,
-        approval_tool_count=5,
+        tool_count=14,
+        approval_tool_count=6,
         session_id="20260721T120000000000Z-deadbeef",
         instructions=load_project_instructions(tmp_path),
     )
@@ -378,6 +379,7 @@ def test_main_routes_one_shot_arguments_without_starting_interactive_cli(
         protocol_version: int,
         permission_mode: str,
         approval_id: str | None,
+        runtime_profile: RuntimeProfile,
     ) -> int:
         assert received_settings is settings
         calls.append(
