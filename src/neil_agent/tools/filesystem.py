@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+from collections.abc import Iterator
 from difflib import unified_diff
 from hashlib import sha256
 from pathlib import Path
@@ -122,14 +123,15 @@ class FileSystemTools:
             raise ToolError("搜索内容不能为空。")
 
         target = self._resolve(path)
-        files = [target] if target.is_file() else self._walk_files(target)
+        files: Iterator[Path] = (
+            iter((target,)) if target.is_file() else self._walk_files(target)
+        )
         matches: list[str] = []
         normalized_query = query.casefold()
+        truncated = False
 
         for file_path in files:
             check_execution_budget()
-            if len(matches) >= MAX_SEARCH_RESULTS:
-                break
             if not self._is_searchable_file(file_path):
                 continue
             try:
@@ -143,11 +145,14 @@ class FileSystemTools:
                     preview = line.strip()[:500]
                     matches.append(f"{relative}:{line_number}: {preview}")
                     if len(matches) >= MAX_SEARCH_RESULTS:
+                        truncated = True
                         break
+            if truncated:
+                break
 
         if not matches:
             return "未找到匹配内容。"
-        if len(matches) == MAX_SEARCH_RESULTS:
+        if truncated:
             matches.append(f"结果已限制为前 {MAX_SEARCH_RESULTS} 条。")
         return "\n".join(matches)
 
@@ -626,22 +631,20 @@ class FileSystemTools:
             raise ToolError("该路径包含受保护的目录或敏感文件。")
         return candidate
 
-    def _walk_files(self, directory: Path) -> list[Path]:
+    def _walk_files(self, directory: Path) -> Iterator[Path]:
         if not directory.is_dir():
             raise ToolError(f"路径不存在：{self._relative_display(directory)}")
 
-        files: list[Path] = []
         for current_path, directory_names, file_names in os.walk(directory):
+            check_execution_budget()
             current = Path(current_path)
-            directory_names[:] = [
+            directory_names[:] = sorted(
                 name for name in directory_names if self._is_allowed(current / name)
-            ]
-            files.extend(
-                current / name
-                for name in file_names
-                if self._is_allowed(current / name)
             )
-        return files
+            for name in sorted(file_names):
+                candidate = current / name
+                if self._is_allowed(candidate):
+                    yield candidate
 
     def _prepare_write_target(self, path: str) -> Path:
         lexical = self._lexical_workspace_path(path)
@@ -920,13 +923,15 @@ class FileSystemTools:
 
     def _is_searchable_file(self, path: Path) -> bool:
         try:
-            return (
-                path.is_file()
-                and self._is_allowed(path)
-                and path.stat().st_size <= MAX_FILE_SIZE_BYTES
-            )
+            if not path.is_file() or not self._is_allowed(path):
+                return False
+            if path.stat().st_size > MAX_FILE_SIZE_BYTES:
+                return False
+            with path.open("rb") as handle:
+                sample = handle.read(1024)
         except OSError:
             return False
+        return b"\x00" not in sample
 
     def _relative_display(self, path: Path) -> str:
         try:

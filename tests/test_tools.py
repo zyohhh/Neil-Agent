@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from neil_agent.schemas import ToolCall, ToolDefinition
-from neil_agent.tools.filesystem import FileSystemTools
+from neil_agent.tools.filesystem import MAX_FILE_SIZE_BYTES, MAX_SEARCH_RESULTS, FileSystemTools
 from neil_agent.tools.registry import ToolRegistry
 
 
@@ -26,6 +26,41 @@ def test_filesystem_tools_list_read_and_search(tmp_path: Path) -> None:
     assert "DIR  src/" in listing
     assert content == "Neil Agent\n"
     assert "src/main.py:1" in matches
+
+
+def test_search_text_stops_after_max_results(tmp_path: Path) -> None:
+    inspected: list[str] = []
+    for index in range(MAX_SEARCH_RESULTS + 40):
+        name = f"{index:03d}.txt"
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+    tools = FileSystemTools(tmp_path)
+    original = tools._is_searchable_file
+
+    def tracking(path: Path) -> bool:
+        inspected.append(path.name)
+        return original(path)
+
+    tools._is_searchable_file = tracking  # type: ignore[method-assign]
+
+    result = tools.search_text("needle")
+    lines = result.splitlines()
+
+    assert len(lines) == MAX_SEARCH_RESULTS + 1
+    assert lines[-1] == f"结果已限制为前 {MAX_SEARCH_RESULTS} 条。"
+    assert len(inspected) == MAX_SEARCH_RESULTS
+
+
+def test_search_text_skips_large_and_binary_files(tmp_path: Path) -> None:
+    (tmp_path / "keep.txt").write_text("needle visible\n", encoding="utf-8")
+    (tmp_path / "huge.txt").write_bytes(b"needle " + b"x" * (MAX_FILE_SIZE_BYTES + 1))
+    (tmp_path / "binary.bin").write_bytes(b"needle\x00hidden")
+    tools = FileSystemTools(tmp_path)
+
+    result = tools.search_text("needle")
+
+    assert "keep.txt:1" in result
+    assert "huge.txt" not in result
+    assert "binary.bin" not in result
 
 
 def test_registry_dispatches_tool_call(tmp_path: Path) -> None:

@@ -287,7 +287,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - 防止利用 `..`、绝对路径或符号链接逃出工作区。
 - 屏蔽规则只在 `sensitive_paths.py` 维护：`.env` / `.env.*`（`.env.example` 除外）、`.ssh` / `.aws` 等凭据目录、`id_rsa` / `credentials.json` 等文件名、`.git`、`.neil-agent`、`.venv`、缓存目录和常见私钥后缀。host 文件工具、Git 暂存、Web 文件树、guest export 与 sandbox snapshot 共用该名单。
 - 单文件读取和写入上限为 1 MB。
-- 搜索结果最多返回 100 条。
+- 搜索结果最多返回 100 条；遍历在达到上限时停止，并跳过超大文件与含 NUL 的非文本文件。
 - diff 预览最多显示 20,000 字符。
 - 过期的 diff 审批不能用于已经发生外部变化的文件。
 - 精确替换要求实际匹配数量等于 `expected_replacements`。

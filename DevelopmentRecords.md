@@ -1681,4 +1681,12 @@ CLI 展示修改预览并等待用户输入 y/yes
 - Web `AgentTurnWorker` 通过 `host_runtime_provider` 复用 `WorkbenchSnapshotService.host_runtime`；仅 `replace_host_runtime()`（模型切换）或 worker 未注入 runtime 时才新建并在 run 结束 `close()`。
 - 共享 tracker 在无会话 turn 上 `clear()`，有快照时 `restore()`。
 
+## 2026-09-01：`search_text` 早停
+
+### 交付
+
+- `_walk_files` 改为边遍历边 yield；命中 `MAX_SEARCH_RESULTS` 即停止 walk。
+- 跳过超过 `MAX_FILE_SIZE_BYTES` 的文件与含 NUL 的样本，避免为大二进制做全文解码。
+
+
 
