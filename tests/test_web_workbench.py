@@ -88,6 +88,49 @@ class EchoWorker:
         )
 
 
+class PathFoldingWorker:
+    def run(
+        self,
+        prompt,
+        session,
+        cancel,
+        on_text,
+        on_activity,
+        on_runtime,
+        request_approval,
+        *,
+        parent_run_id=None,
+    ):  # type: ignore[no-untyped-def]
+        factory = RuntimeEventFactory()
+        correlation = factory.new_correlation_id("tool_call")
+        metadata = {
+            "tool_name": "read_file",
+            "argument_count": 1,
+            "requires_approval": False,
+            "activity_kind": "read",
+            "workspace_path": "src/neil_agent/agent.py",
+        }
+        if parent_run_id:
+            metadata["parent_run_id"] = parent_run_id
+        on_runtime(
+            factory.create(
+                stage="tool_call",
+                status="started",
+                correlation_id=correlation,
+                metadata=metadata,
+            )
+        )
+        on_text("folded")
+        on_runtime(
+            factory.create(
+                stage="tool_call",
+                status="succeeded",
+                correlation_id=correlation,
+                metadata={**metadata, "is_error": False, "result_chars": 12},
+            )
+        )
+
+
 class BlockingWorker:
     def __init__(self) -> None:
         self.started = Event()
@@ -1096,6 +1139,56 @@ def test_realtime_start_stream_completion_and_idempotency(tmp_path: Path) -> Non
     assert snapshot["revision"] >= completed_revision
     assert snapshot["output"][-1]["text"] == "Echo: Inspect the project"
     assert snapshot["timeline"][0]["stage"] == "agent_turn"
+
+
+def test_runtime_step_folds_workspace_path_to_directory(tmp_path: Path) -> None:
+    client = _client(tmp_path, worker=PathFoldingWorker())
+    _authenticate(client)
+
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_json(
+            _command("pathfoldctrl", "acquire_control", connected["revision"])
+        )
+        control = _receive_result(socket, "pathfoldctrl")
+        socket.send_json(
+            _command(
+                "pathfoldturn",
+                "start_turn",
+                int(control["revision"]),
+                {"prompt": "Read a file"},
+            )
+        )
+        _receive_result(socket, "pathfoldturn")
+        saw_file_path = False
+        folded_paths: set[str] = set()
+        for _ in range(20):
+            event = socket.receive_json()
+            if event.get("event_type") == "runtime_step":
+                metadata = event["payload"]["step"]["metadata"]
+                path = metadata.get("workspace_path")
+                if path == "src/neil_agent/agent.py":
+                    saw_file_path = True
+                if isinstance(path, str):
+                    folded_paths.add(path)
+            if (
+                event.get("event_type") == "run_state"
+                and event["payload"]["status"] == "completed"
+            ):
+                break
+
+    assert not saw_file_path
+    assert folded_paths == {"src/neil_agent"}
+    snapshot = client.get("/api/v1/snapshot").json()
+    timeline_paths = {
+        step["metadata"]["workspace_path"]
+        for step in snapshot["timeline"]
+        if "workspace_path" in step["metadata"]
+    }
+    assert timeline_paths == {"src/neil_agent"}
 
 
 def test_current_web_turn_keeps_bounded_quality_check_history(tmp_path: Path) -> None:

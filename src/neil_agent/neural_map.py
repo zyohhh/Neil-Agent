@@ -562,3 +562,55 @@ def sanitize_workspace_path(value: object) -> str | None:
     if len(path) > MAX_RUNTIME_METADATA_TEXT_CHARS:
         path = f"{path[: MAX_RUNTIME_METADATA_TEXT_CHARS - 3]}..."
     return path
+
+
+def fold_workspace_path_for_web(
+    value: object,
+    *,
+    tool_name: str = "",
+    activity_kind: str = "other",
+) -> str | None:
+    """Keep unique relative directories; drop leaf filenames for Web DTOs."""
+
+    kind: NeuralMapActivityKind = (
+        activity_kind
+        if activity_kind in {"read", "write", "check", "other"}
+        else "other"
+    )
+    folded: list[str] = []
+    seen: set[str] = set()
+    for segment in _split_workspace_paths(value):
+        sanitized = sanitize_workspace_path(segment)
+        if sanitized is None:
+            continue
+        directory = _directory_for_path(sanitized, kind, tool_name)
+        if directory not in seen:
+            seen.add(directory)
+            folded.append(directory)
+    bounded = _join_bounded_paths(tuple(folded))
+    if not bounded:
+        return None
+    return ";".join(bounded)
+
+
+def project_web_runtime_metadata(
+    metadata: Mapping[str, bool | int | str],
+) -> dict[str, bool | int | str]:
+    """Copy runtime metadata and fold ``workspace_path`` to directories."""
+
+    projected = dict(metadata)
+    raw_path = projected.get("workspace_path")
+    if raw_path is None:
+        return projected
+    tool_name = projected.get("tool_name", "")
+    activity_kind = projected.get("activity_kind", "other")
+    folded = fold_workspace_path_for_web(
+        raw_path,
+        tool_name=tool_name if isinstance(tool_name, str) else "",
+        activity_kind=activity_kind if isinstance(activity_kind, str) else "other",
+    )
+    if folded is None:
+        projected.pop("workspace_path", None)
+    else:
+        projected["workspace_path"] = folded
+    return projected

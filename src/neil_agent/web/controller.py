@@ -22,6 +22,7 @@ from ..providers.factory import create_provider
 from ..runtime_models import prepare_runtime_model_switch, runtime_model_catalog
 from ..schemas import ActivityEvent, Message, TokenUsage, ToolCall
 from ..session import SessionHandle, SessionSnapshot, UNTITLED_SESSION
+from ..neural_map import project_web_runtime_metadata
 from ..subtask import SubtaskParentState, new_parent_run_id, subtask_parent_scope
 from ..task import QualityCheckRecord, TaskStep
 from .dto import (
@@ -825,7 +826,7 @@ class WorkbenchController:
         )
 
     def _record_runtime(self, run_id: str, event: RuntimeEvent) -> None:
-        metadata = event.metadata_dict()
+        metadata = project_web_runtime_metadata(event.metadata_dict())
         status_map = {
             "started": "running",
             "waiting": "waiting_for_approval",

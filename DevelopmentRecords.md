@@ -1695,6 +1695,13 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `Settings.subtask_max_invocations`（默认 3，环境变量 `SUBTASK_MAX_INVOCATIONS`）。
 - `SubtaskParentState.invocations` 在父回合内计数；超限返回 `ToolError`，不启动子运行时。
 
+## 2026-09-01：Web 折叠 `workspace_path`
+
+### 交付
+
+- `project_web_runtime_metadata`：Web `runtime_step` 与快照 timeline 将 `workspace_path` 折成相对目录（`read_file` 去叶名，`list_directory` 保留目录）。
+- 事件总线与 TUI Neural Map 仍使用脱敏相对文件路径；不改 `events.py` 白名单。
+
 
 
 

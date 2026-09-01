@@ -111,7 +111,7 @@
 
 **已知缺口（审视 2026-09-01，见 [`project-status.md`](project-status.md)）：**
 
-- 子任务转发事件仍含 `workspace_path` 元数据，不含 prompt/正文（低优先级观测项）。
+- Web `runtime_step` 将 `workspace_path` 折成相对目录（不含文件名）；事件总线与 Neural Map 仍保留脱敏相对路径。
 - 单回合 `run_readonly_subtask` 次数由 `subtask_max_invocations`（默认 3）限制。
 
 ## 批次 4–6（可选，不提前开工）

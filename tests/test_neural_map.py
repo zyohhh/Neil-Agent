@@ -13,6 +13,8 @@ from neil_agent.neural_map import (
     build_neural_map_fixture_events,
     classify_activity_kind,
     extract_workspace_paths,
+    fold_workspace_path_for_web,
+    project_web_runtime_metadata,
     render_neural_map_snapshot,
     sanitize_workspace_path,
 )
@@ -130,6 +132,59 @@ def test_workspace_path_sanitization_rejects_absolute_and_traversal() -> None:
     assert sanitize_workspace_path("/etc/passwd") is None
     assert sanitize_workspace_path("src/../secret.py") is None
     assert sanitize_workspace_path("C:\\src\\foo.py") is None
+
+
+def test_fold_workspace_path_for_web_drops_leaf_filenames() -> None:
+    assert (
+        fold_workspace_path_for_web(
+            "src/neil_agent/agent.py",
+            tool_name="read_file",
+            activity_kind="read",
+        )
+        == "src/neil_agent"
+    )
+    assert (
+        fold_workspace_path_for_web(
+            "README.md",
+            tool_name="read_file",
+            activity_kind="read",
+        )
+        == "."
+    )
+    assert (
+        fold_workspace_path_for_web(
+            "src/neil_agent",
+            tool_name="list_directory",
+            activity_kind="read",
+        )
+        == "src/neil_agent"
+    )
+    assert (
+        fold_workspace_path_for_web(
+            "src/a.py;src/b.py;pkg/c.py",
+            tool_name="git_stage",
+            activity_kind="write",
+        )
+        == "src;pkg"
+    )
+    assert fold_workspace_path_for_web("/etc/passwd", tool_name="read_file") is None
+
+
+def test_project_web_runtime_metadata_folds_workspace_path() -> None:
+    projected = project_web_runtime_metadata(
+        {
+            "tool_name": "read_file",
+            "activity_kind": "read",
+            "workspace_path": "src/neil_agent/agent.py",
+            "parent_run_id": "run-" + "a" * 32,
+        }
+    )
+    assert projected["workspace_path"] == "src/neil_agent"
+    assert projected["parent_run_id"].startswith("run-")
+    stripped = project_web_runtime_metadata(
+        {"tool_name": "read_file", "workspace_path": "/etc/passwd"}
+    )
+    assert "workspace_path" not in stripped
 
 
 def test_tool_activity_metadata_helpers() -> None:
