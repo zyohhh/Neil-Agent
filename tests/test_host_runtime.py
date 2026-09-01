@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -253,3 +254,71 @@ def test_workbench_service_close_marks_host_runtime_closed(tmp_path: Path) -> No
 
     assert service.host_runtime_closed
     assert service.registry.definitions == ()
+
+
+class _EchoModel:
+    def complete(self, messages, *, system_prompt):  # type: ignore[no-untyped-def]
+        return "ok"
+
+    def stream(self, messages, *, system_prompt, tools=()):  # type: ignore[no-untyped-def]
+        yield "ok"
+        from neil_agent.schemas import ModelResponse
+
+        yield ModelResponse(content="ok")
+
+
+def test_build_agent_binds_runtime_registry_and_instructions(tmp_path: Path) -> None:
+    from neil_agent.host_runtime import build_agent
+
+    (tmp_path / "AGENTS.md").write_text("BOUND-INSTRUCTION", encoding="utf-8")
+    settings = _settings(tmp_path)
+    runtime = build_host_runtime(settings, mode=HostMode.CLI)
+    try:
+        agent = build_agent(settings, runtime, _EchoModel())
+        assert agent._registry is runtime.registry
+        assert "BOUND-INSTRUCTION" in agent._system_prompt
+        assert agent._task_tracker is runtime.task_tracker
+        assert "".join(agent.stream_chat("hello")) == "ok"
+    finally:
+        runtime.close()
+
+
+def test_agent_turn_worker_reuses_injected_host_runtime(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from neil_agent.host_runtime import build_host_runtime
+    from neil_agent.web.controller import AgentTurnWorker
+
+    settings = _settings(tmp_path)
+    runtime = build_host_runtime(settings, mode=HostMode.WEB)
+    worker = AgentTurnWorker(settings, host_runtime=runtime)
+    try:
+        with patch(
+            "neil_agent.web.controller.create_provider",
+            return_value=_EchoModel(),
+        ):
+            first = worker.run(
+                "one",
+                None,
+                Event(),
+                lambda text: None,
+                lambda event: None,
+                lambda event: None,
+                lambda call, preview: True,
+            )
+            second = worker.run(
+                "two",
+                None,
+                Event(),
+                lambda text: None,
+                lambda event: None,
+                lambda event: None,
+                lambda call, preview: True,
+            )
+        assert first.messages[-1].content == "ok"
+        assert second.messages[-1].content == "ok"
+        assert not runtime.closed
+        assert runtime.registry.definitions
+    finally:
+        runtime.close()
+

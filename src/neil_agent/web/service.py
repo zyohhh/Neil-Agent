@@ -15,7 +15,7 @@ from typing import Literal
 from ..config import Settings
 from ..context_projection import build_host_context_tomography
 from ..errors import SessionError, ToolError
-from ..host_runtime import HostMode, build_host_runtime, observe_host_security
+from ..host_runtime import HostMode, HostRuntime, build_host_runtime, observe_host_security
 from ..providers.factory import describe_provider
 from ..runtime_models import runtime_model_catalog
 from ..sensitive_paths import is_sensitive_entry_name, is_sensitive_relative_path
@@ -106,6 +106,12 @@ class WorkbenchSnapshotService:
         """Release the shared host runtime when the workbench shuts down."""
 
         self._host_runtime.close()
+
+    @property
+    def host_runtime(self) -> HostRuntime:
+        """Return the session-scoped runtime shared with Agent turns."""
+
+        return self._host_runtime
 
     @property
     def host_runtime_closed(self) -> bool:

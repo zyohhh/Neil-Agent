@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .audit import AuditLogStatus, JsonlAuditSink
 from .config import Settings
@@ -24,6 +24,10 @@ from .tools.shell import ShellTools
 from .sandbox import WindowsSandboxBackend
 from .security import SecurityShield, observe_security_shield
 
+if TYPE_CHECKING:
+    from .agent import ActivityHandler, Agent, ChatModel, ToolApprovalHandler
+    from .events import EventBus, RuntimeEventFactory
+
 BENCHMARK_MINIMAL_READONLY_TOOLS = (
     "list_directory",
     "read_file",
@@ -32,6 +36,13 @@ BENCHMARK_MINIMAL_READONLY_TOOLS = (
 BENCHMARK_MINIMAL_WRITE_TOOLS = BENCHMARK_MINIMAL_READONLY_TOOLS + ("replace_text",)
 
 RuntimeDisposer = Callable[[], None]
+
+
+class _UnsetType:
+    """Sentinel so ``build_agent`` can pass through explicit ``None`` budgets."""
+
+
+_UNSET = _UnsetType()
 
 
 class HostMode(str, Enum):
@@ -336,4 +347,79 @@ def build_host_runtime(
         guest_import=guest_import,
         profile=host_profile,
         _disposers=disposers,
+    )
+
+
+def build_agent(
+    settings: Settings,
+    host_runtime: HostRuntime,
+    llm: ChatModel,
+    *,
+    approval_handler: ToolApprovalHandler | None = None,
+    activity_handler: ActivityHandler | None = None,
+    event_bus: EventBus | None = None,
+    event_factory: RuntimeEventFactory | None = None,
+    system_prompt: str | None = None,
+    project_instructions: str | None = None,
+    max_rounds: int | None | _UnsetType = _UNSET,
+    max_context_chars: int | None | _UnsetType = _UNSET,
+    max_context_tokens: int | None | _UnsetType = _UNSET,
+    max_tool_rounds: int | None | _UnsetType = _UNSET,
+    attach_task_tracker: bool = True,
+    attach_hooks: bool = True,
+    attach_checkpoints: bool = True,
+    attach_instruction_scope: bool = True,
+) -> Agent:
+    """Construct an Agent bound to one assembled host runtime."""
+
+    from .agent import Agent
+
+    rounds = settings.max_rounds if isinstance(max_rounds, _UnsetType) else max_rounds
+    context_chars = (
+        settings.max_context_chars
+        if isinstance(max_context_chars, _UnsetType)
+        else max_context_chars
+    )
+    context_tokens = (
+        settings.max_context_tokens
+        if isinstance(max_context_tokens, _UnsetType)
+        else max_context_tokens
+    )
+    tool_rounds = (
+        settings.max_tool_rounds
+        if isinstance(max_tool_rounds, _UnsetType)
+        else max_tool_rounds
+    )
+    if rounds is None or context_chars is None or tool_rounds is None:
+        raise ValueError("Agent round and context budgets must be integers")
+
+    return Agent(
+        llm,
+        system_prompt=(
+            settings.system_prompt if system_prompt is None else system_prompt
+        ),
+        project_instructions=(
+            host_runtime.instruction_manager.current.prompt_section()
+            if project_instructions is None
+            else project_instructions
+        ),
+        max_rounds=rounds,
+        max_context_chars=context_chars,
+        max_context_tokens=context_tokens,
+        registry=host_runtime.registry,
+        max_tool_rounds=tool_rounds,
+        approval_handler=approval_handler,
+        task_tracker=host_runtime.task_tracker if attach_task_tracker else None,
+        activity_handler=activity_handler,
+        instruction_scope_handler=(
+            host_runtime.instruction_manager.resolve_tool_call
+            if attach_instruction_scope
+            else None
+        ),
+        hooks=host_runtime.hooks if attach_hooks else None,
+        event_bus=event_bus,
+        event_factory=event_factory,
+        file_checkpoints=(
+            host_runtime.filesystem.checkpoints if attach_checkpoints else None
+        ),
     )

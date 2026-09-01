@@ -15,7 +15,7 @@ from .config import Settings
 from .errors import NeilAgentError, ToolError
 from .events import EventBus, RuntimeEvent, redact_runtime_metadata
 from .execution_budget import check_execution_budget, execution_budget_scope
-from .host_runtime import HostMode, RuntimeProfile, build_host_runtime
+from .host_runtime import HostMode, RuntimeProfile, build_agent, build_host_runtime
 
 if TYPE_CHECKING:
     from .agent import ChatModel
@@ -173,15 +173,20 @@ def execute_readonly_subtask(prompt: str) -> str:
 
             subscription = child_bus.subscribe(forward)
 
-        from .agent import Agent
-
-        child_agent = Agent(
+        child_agent = build_agent(
+            settings,
+            child_runtime,
             parent.model,
+            event_bus=child_bus,
             system_prompt=READONLY_SUBTASK_SYSTEM_PROMPT,
+            project_instructions="",
             max_tool_rounds=settings.subtask_max_tool_rounds,
             max_context_chars=settings.subtask_max_context_chars,
-            registry=child_runtime.registry,
-            event_bus=child_bus,
+            max_context_tokens=None,
+            attach_task_tracker=False,
+            attach_hooks=False,
+            attach_checkpoints=False,
+            attach_instruction_scope=False,
         )
         with execution_budget_scope(deadline=deadline, cancel=parent.cancel):
             summary = _collect_stream_text(child_agent.stream_chat(prompt_text))

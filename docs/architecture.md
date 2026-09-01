@@ -19,7 +19,7 @@ cli.py                          neil-agent-web (web/runtime.py)
          Textual 实时执行树、线程桥接、筛选、详情和审批界面
     ↓
 host_runtime.py
-  CLI / 非交互 / Web 共享的工具注册、指令作用域、审计 hooks 与 HostProfile 能力矩阵
+  CLI / 非交互 / Web 共享的工具注册、指令作用域、审计 hooks、`build_agent()` 与 HostProfile 能力矩阵
     ↓
 subtask.py
   只读子任务父上下文、预算执行与事件转发（`run_readonly_subtask` 子运行时）

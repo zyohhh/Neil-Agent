@@ -38,7 +38,7 @@ uv build --wheel
 
 | 模块 | 职责 |
 | --- | --- |
-| `host_runtime.py` | 三入口共享装配、`RuntimeProfile`、`HostRuntime.close()` |
+| `host_runtime.py` | 三入口共享装配、`RuntimeProfile`、`build_agent()`、`HostRuntime.close()` |
 | `subtask.py` / `tools/subtask.py` | 只读子任务 |
 | `execution_budget.py` | 协作式 cancel / deadline |
 | `git_output_filter.py` | Git status/diff 脱敏 |

@@ -1673,3 +1673,12 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 通用 GitHub Actions 工作流写在 `.github/workflows/ci.yml`（本地保留）；因 PAT 缺少 `workflow` scope **未推送**。
 - 文档：`project-status.md`、`architecture.md`、`host-runtime.md`、`AGENTS.md`、`web-workbench-development.md`、`claude-code-review.md`。
 
+## 2026-09-01：`build_agent()` 与 Web HostRuntime 复用
+
+### 交付
+
+- `host_runtime.build_agent()`：CLI、非交互、Web turn、只读子任务共用 Agent 装配。
+- Web `AgentTurnWorker` 通过 `host_runtime_provider` 复用 `WorkbenchSnapshotService.host_runtime`；仅 `replace_host_runtime()`（模型切换）或 worker 未注入 runtime 时才新建并在 run 结束 `close()`。
+- 共享 tracker 在无会话 turn 上 `clear()`，有快照时 `restore()`。
+
+

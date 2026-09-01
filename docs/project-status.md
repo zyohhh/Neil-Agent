@@ -45,6 +45,8 @@
 | **低** | 产品 | Web 已注册 `run_readonly_subtask`，前端无独立子任务 UI | 后端能力；见 `web-workbench-development.md` |
 | **低** | CI | 通用 PR 工作流文件在本地（`.github/workflows/ci.yml`），因 token 缺 `workflow` scope 尚未推送 | 推送后启用 ruff/mypy/pytest + Web lint/test/build |
 
+CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装配 `Agent`。Web turn 复用 `WorkbenchSnapshotService.host_runtime`，不再每轮 `build_host_runtime()`。
+
 **非缺陷说明：** `test_web_workbench.py` 体量大（46 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
 
 ## 必做后续（按优先级）

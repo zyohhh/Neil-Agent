@@ -13,12 +13,11 @@ from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..agent import Agent
 from ..approval import GENERIC_APPROVAL_BINDING_KIND
 from ..config import Settings
 from ..errors import SessionError
 from ..events import EventBus, RuntimeEvent
-from ..host_runtime import HostMode, build_host_runtime
+from ..host_runtime import HostMode, HostRuntime, build_agent, build_host_runtime
 from ..providers.factory import create_provider
 from ..runtime_models import prepare_runtime_model_switch, runtime_model_catalog
 from ..schemas import ActivityEvent, Message, TokenUsage, ToolCall
@@ -92,8 +91,18 @@ TurnWorkerFactory = Callable[[Settings], TurnWorker]
 class AgentTurnWorker:
     """Run the configured Agent with preview-gated mutation tools for P3."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        host_runtime: HostRuntime | None = None,
+        host_runtime_provider: Callable[[], HostRuntime] | None = None,
+    ) -> None:
+        if host_runtime is not None and host_runtime_provider is not None:
+            raise ValueError("pass host_runtime or host_runtime_provider, not both")
         self._settings = settings
+        self._host_runtime = host_runtime
+        self._host_runtime_provider = host_runtime_provider
 
     def run(
         self,
@@ -108,33 +117,32 @@ class AgentTurnWorker:
         parent_run_id: str | None = None,
     ) -> CompletedTurnState:
         settings = self._settings
-        host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
+        owned_runtime = False
+        if self._host_runtime_provider is not None:
+            host_runtime = self._host_runtime_provider()
+        elif self._host_runtime is not None:
+            host_runtime = self._host_runtime
+        else:
+            host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
+            owned_runtime = True
+        if host_runtime.closed:
+            raise RuntimeError("Web host runtime is closed")
         try:
-            registry = host_runtime.registry
-            instruction_manager = host_runtime.instruction_manager
-            hooks = host_runtime.hooks
             task_tracker = host_runtime.task_tracker
             if task_tracker is None:
                 raise RuntimeError("Web host runtime must include a task tracker.")
+            if session is None:
+                task_tracker.clear()
             bus = EventBus(queue_size=256, max_observers=1)
             subscription = bus.subscribe(on_runtime)
             model = create_provider(settings, retry_handler=on_activity)
-            agent = Agent(
+            agent = build_agent(
+                settings,
+                host_runtime,
                 model,
-                system_prompt=settings.system_prompt,
-                project_instructions=instruction_manager.current.prompt_section(),
-                max_rounds=settings.max_rounds,
-                max_context_chars=settings.max_context_chars,
-                max_context_tokens=settings.max_context_tokens,
-                registry=registry,
-                max_tool_rounds=settings.max_tool_rounds,
-                activity_handler=on_activity,
-                instruction_scope_handler=instruction_manager.resolve_tool_call,
-                task_tracker=task_tracker,
-                event_bus=bus,
-                file_checkpoints=host_runtime.filesystem.checkpoints,
                 approval_handler=request_approval,
-                hooks=hooks,
+                activity_handler=on_activity,
+                event_bus=bus,
             )
             if session is not None:
                 agent.restore_messages(session.messages, session.last_usage)
@@ -170,7 +178,8 @@ class AgentTurnWorker:
                     subscription.close()
                     bus.close(timeout=0.5)
         finally:
-            host_runtime.close()
+            if owned_runtime:
+                host_runtime.close()
 
 
 CommandName = Literal[
@@ -276,10 +285,16 @@ class WorkbenchController:
     def production(
         cls, settings: Settings, service: WorkbenchSnapshotService
     ) -> WorkbenchController:
+        def factory(runtime_settings: Settings) -> AgentTurnWorker:
+            return AgentTurnWorker(
+                runtime_settings,
+                host_runtime_provider=lambda: service.host_runtime,
+            )
+
         return cls(
             service,
-            AgentTurnWorker(settings),
-            worker_factory=AgentTurnWorker,
+            factory(settings),
+            worker_factory=factory,
         )
 
     def snapshot(self) -> WorkbenchSnapshotDto:

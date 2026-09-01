@@ -130,7 +130,7 @@
 
 ## 相关代码（落地后维护此表）
 
-- `src/neil_agent/host_runtime.py` — `HostMode`、`HostProfile`、`build_host_runtime()`
+- `src/neil_agent/host_runtime.py` — `HostMode`、`HostProfile`、`build_host_runtime()`、`build_agent()`
 - `src/neil_agent/subtask.py` — 只读子任务上下文、预算与 `execute_readonly_subtask()`
 - `src/neil_agent/execution_budget.py` — 子任务协作式 cancel/deadline 检查
 - `src/neil_agent/tools/subtask.py` — `run_readonly_subtask` 工具注册

@@ -31,6 +31,7 @@ from .events import EventBus, EventSubscription, RuntimeEvent
 from .host_runtime import (
     HostMode,
     RuntimeProfile,
+    build_agent,
     build_host_runtime,
     observe_host_security,
     windows_sandbox_backend,
@@ -335,7 +336,6 @@ def run(console: Console) -> None:
     filesystem_tools = host_runtime.filesystem
     shell_tools = host_runtime.shell
     registry = host_runtime.registry
-    lifecycle_hooks = host_runtime.hooks
     audit_sink = host_runtime.audit_sink
     instruction_manager = host_runtime.instruction_manager
     project_instructions = instruction_manager.current
@@ -353,25 +353,16 @@ def run(console: Console) -> None:
     except NeilAgentError as error:
         console.print(f"[bold red]Provider 启动失败：[/bold red]{error}")
         raise SystemExit(1) from None
-    agent = Agent(
+    agent = build_agent(
+        settings,
+        host_runtime,
         llm,
-        system_prompt=settings.system_prompt,
-        project_instructions=project_instructions.prompt_section(),
-        max_rounds=settings.max_rounds,
-        max_context_chars=settings.max_context_chars,
-        max_context_tokens=settings.max_context_tokens,
-        registry=registry,
-        max_tool_rounds=settings.max_tool_rounds,
         approval_handler=lambda call, preview: _confirm_tool_call(
             console,
             call,
             preview,
         ),
-        task_tracker=task_tracker,
         activity_handler=renderer.show_activity,
-        instruction_scope_handler=instruction_manager.resolve_tool_call,
-        hooks=lifecycle_hooks,
-        file_checkpoints=filesystem_tools.checkpoints,
     )
     _show_welcome(
         console,

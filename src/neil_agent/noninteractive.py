@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, TextIO
 from unicodedata import category
 
-from .agent import Agent, ChatModel
+from .agent import ChatModel
 from .approval import (
     ApprovalRequest,
     ApprovalStore,
@@ -25,7 +25,7 @@ from .errors import (
     SessionError,
     ToolError,
 )
-from .host_runtime import HostMode, RuntimeProfile, build_host_runtime
+from .host_runtime import HostMode, RuntimeProfile, build_agent, build_host_runtime
 from .hooks import LifecycleHooks
 from .providers.factory import create_provider
 from .schemas import ActivityEvent, TokenUsage
@@ -321,7 +321,6 @@ def run_noninteractive(
             filesystem = host_runtime.filesystem
             registry = host_runtime.registry
             instruction_manager = host_runtime.instruction_manager
-            active_hooks = host_runtime.hooks
             approval_broker: NoninteractiveApprovalBroker | None = None
             if permission_mode != "read-only":
                 approval_broker = NoninteractiveApprovalBroker(
@@ -336,20 +335,12 @@ def run_noninteractive(
             session_store = SessionStore(filesystem.root)
             session = session_store.new_session()
             model = llm or create_provider(settings, retry_handler=writer.activity)
-            agent = Agent(
+            agent = build_agent(
+                settings,
+                host_runtime,
                 model,
-                system_prompt=settings.system_prompt,
-                project_instructions=instruction_manager.current.prompt_section(),
-                max_rounds=settings.max_rounds,
-                max_context_chars=settings.max_context_chars,
-                max_context_tokens=settings.max_context_tokens,
-                registry=registry,
-                max_tool_rounds=settings.max_tool_rounds,
-                activity_handler=writer.activity,
-                instruction_scope_handler=instruction_manager.resolve_tool_call,
-                hooks=active_hooks,
                 approval_handler=approval_broker,
-                file_checkpoints=filesystem.checkpoints,
+                activity_handler=writer.activity,
             )
             writer.start(
                 session_id=session.session_id,
