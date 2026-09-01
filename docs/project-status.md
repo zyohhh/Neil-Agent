@@ -6,7 +6,7 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 版本 | **`v0.1.0`**（功能收口 / 维护期起点，Git tag `v0.1.0`） |
+| 版本 | **`v0.1.0`**（功能收口 / 维护期起点，Git tag [`v0.1.0`](https://github.com/zyohhh/Neil-Agent/releases/tag/v0.1.0)；说明 [`releases/v0.1.0.md`](releases/v0.1.0.md)） |
 | Python | ≥ 3.13；包管理 `uv` |
 | 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
