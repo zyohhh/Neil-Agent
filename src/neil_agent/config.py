@@ -185,6 +185,12 @@ class Settings(BaseSettings):
         gt=0,
         description="Wall-clock timeout in seconds for one read-only subtask.",
     )
+    subtask_max_invocations: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Maximum run_readonly_subtask calls allowed in one parent turn.",
+    )
     workspace_root: Path = Field(
         default=Path("."),
         description="Directory boundary for local project tools.",

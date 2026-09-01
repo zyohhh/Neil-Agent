@@ -37,6 +37,7 @@ class SubtaskParentState:
     parent_run_id: str | None = None
     forward_runtime_event: RuntimeEventForwarder | None = None
     cancel: Event | None = None
+    invocations: int = 0
 
 
 _parent_state: ContextVar[SubtaskParentState | None] = ContextVar(
@@ -146,6 +147,11 @@ def execute_readonly_subtask(prompt: str) -> str:
     parent_run_id = parent.parent_run_id
     if not parent_run_id:
         raise ToolError("只读子任务缺少父回合标识。")
+    if parent.invocations >= settings.subtask_max_invocations:
+        raise ToolError(
+            f"本回合只读子任务已达 {settings.subtask_max_invocations} 次上限。"
+        )
+    parent.invocations += 1
 
     child_runtime = build_host_runtime(
         settings,

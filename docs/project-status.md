@@ -41,7 +41,6 @@
 | 严重度 | 领域 | 问题 | 位置 / 说明 |
 | --- | --- | --- | --- |
 | **低** | 观测 | 子任务转发事件仍含 `workspace_path` 元数据（无正文） | `events.py` 白名单 + Web `runtime_step` |
-| **低** | 成本 | 单回合可多次调用子任务，无显式调用次数上限 | 设计取舍，可按需加 `subtask_max_invocations` |
 | **低** | 产品 | Web 已注册 `run_readonly_subtask`，前端无独立子任务 UI | 后端能力；见 `web-workbench-development.md` |
 | **低** | CI | 通用 PR 工作流文件在本地（`.github/workflows/ci.yml`），因 token 缺 `workflow` scope 尚未推送 | 推送后启用 ruff/mypy/pytest + Web lint/test/build |
 
@@ -71,7 +70,7 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | Session goals（跨回合目标） | [`runtime-profile.md`](runtime-profile.md) 批次 4 |
 | Skills 目录 + `load_skill` | 批次 5 |
 | 受限 Plan DSL | 批次 6 |
-| 子任务每回合调用次数 / 聚合 token 上限 | 本文 §已知缺口 |
+| 子任务每回合调用次数 / 聚合 token 上限 | `subtask_max_invocations` 已落地（默认 3）；聚合 token 仍可选 |
 | Web 子树 UI 进一步折叠路径元数据 | `web-workbench-development.md` |
 | `AGENTS.md` 仓库级协作规则扩充 | 根目录 `AGENTS.md` |
 

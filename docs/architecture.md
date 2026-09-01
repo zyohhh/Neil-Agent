@@ -395,6 +395,7 @@ NeilAgentError
 | `MAX_CONTEXT_CHARS` | 模型请求的近似 JSON 字符软预算 | `120000` |
 | `MAX_CONTEXT_TOKENS` | 可选的近似 token 软预算 | 未配置 |
 | `MAX_TOOL_ROUNDS` | 单次请求工具循环上限 | `5` |
+| `SUBTASK_MAX_INVOCATIONS` | 单父回合 `run_readonly_subtask` 次数上限 | `3` |
 | `REQUEST_TIMEOUT` | 单次模型请求超时（秒） | `120` |
 | `MAX_RETRIES` | 瞬时模型错误的额外尝试次数 | `2` |
 | `RETRY_BASE_DELAY` | 首次重试等待（秒） | `1` |

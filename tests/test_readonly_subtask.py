@@ -249,6 +249,26 @@ def test_execute_readonly_subtask_reraises_keyboard_interrupt(tmp_path: Path) ->
             execute_readonly_subtask("interrupt me")
 
 
+def test_execute_readonly_subtask_caps_invocations_per_parent_turn(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, subtask_max_invocations=2)
+    child_model = SubtaskChildModel()
+    with subtask_parent_scope(
+        SubtaskParentState(
+            settings=settings,
+            model=child_model,
+            parent_run_id="run-cap",
+        )
+    ) as parent:
+        assert execute_readonly_subtask("first") == "subtask summary"
+        assert execute_readonly_subtask("second") == "subtask summary"
+        with pytest.raises(ToolError, match="已达 2 次上限"):
+            execute_readonly_subtask("third")
+        assert parent.invocations == 2
+    assert len(child_model.requests) == 2
+
+
 def test_subtask_tool_schema_matches_settings(tmp_path: Path) -> None:
     registry = ToolRegistry()
     ReadonlySubtaskTools().register(registry, max_prompt_chars=2_500)

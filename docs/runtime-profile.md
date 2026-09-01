@@ -109,10 +109,10 @@
 - `SubtaskParentState` + `subtask_parent_scope`；Web 传入 `parent_run_id=run_id`；子事件经 `parent_run_id` 与 `parent_event_id` 折叠。
 - `HostRuntime.close()` 在子任务结束路径必调用；取消与超时均 settle。
 
-**已知缺口（审视 2026-08-28，见 [`project-status.md`](project-status.md)）：**
+**已知缺口（审视 2026-09-01，见 [`project-status.md`](project-status.md)）：**
 
 - 子任务转发事件仍含 `workspace_path` 元数据，不含 prompt/正文（低优先级观测项）。
-- 单回合可多次调用子任务，无显式调用次数上限（成本设计取舍）。
+- 单回合 `run_readonly_subtask` 次数由 `subtask_max_invocations`（默认 3）限制。
 
 ## 批次 4–6（可选，不提前开工）
 

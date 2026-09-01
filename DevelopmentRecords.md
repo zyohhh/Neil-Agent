@@ -1688,5 +1688,13 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `_walk_files` 改为边遍历边 yield；命中 `MAX_SEARCH_RESULTS` 即停止 walk。
 - 跳过超过 `MAX_FILE_SIZE_BYTES` 的文件与含 NUL 的样本，避免为大二进制做全文解码。
 
+## 2026-09-01：子任务每回合调用次数上限
+
+### 交付
+
+- `Settings.subtask_max_invocations`（默认 3，环境变量 `SUBTASK_MAX_INVOCATIONS`）。
+- `SubtaskParentState.invocations` 在父回合内计数；超限返回 `ToolError`，不启动子运行时。
+
+
 
 
