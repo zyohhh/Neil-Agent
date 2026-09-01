@@ -1702,6 +1702,15 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `project_web_runtime_metadata`：Web `runtime_step` 与快照 timeline 将 `workspace_path` 折成相对目录（`read_file` 去叶名，`list_directory` 保留目录）。
 - 事件总线与 TUI Neural Map 仍使用脱敏相对文件路径；不改 `events.py` 白名单。
 
+## 2026-09-01：可选路线说明（Skills / AGENTS.md）
+
+### 文档
+
+- `runtime-profile.md` 批次 4–6 写成与 1–3 同级的拟交付/不做边界；批次 5 区分运行时 `AGENTS.md` 链与按需 Skills。
+- `project-status.md` 可选表补充含义列；标明本仓库 `AGENTS.md` 是 Cursor 协作约束。
+- 根 `AGENTS.md` 增加两种指令文件说明、workflow 推送与 PowerShell 约定。
+
+
 
 
 

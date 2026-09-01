@@ -64,14 +64,19 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 
 ## 可选后续（不阻塞发版）
 
-| 项 | 文档 |
-| --- | --- |
-| Session goals（跨回合目标） | [`runtime-profile.md`](runtime-profile.md) 批次 4 |
-| Skills 目录 + `load_skill` | 批次 5 |
-| 受限 Plan DSL | 批次 6 |
-| 子任务每回合调用次数 / 聚合 token 上限 | `subtask_max_invocations` 已落地（默认 3）；聚合 token 仍可选 |
-| Web 子树 UI 进一步折叠路径元数据 | ✅ `runtime_step` 将 `workspace_path` 折成目录；独立子任务面板仍可选 |
-| `AGENTS.md` 仓库级协作规则扩充 | 根目录 `AGENTS.md` |
+| 项 | 含义 | 文档 |
+| --- | --- | --- |
+| Session goals | 跨回合、可暂停的用户目标（会话事件）；区别于当前回合的 `set_task_plan` | [`runtime-profile.md`](runtime-profile.md) 批次 4 |
+| Skills 目录 + `load_skill` | 用户工作区 `skills/<name>/SKILL.md`，模型按需加载长手册；**不是**始终注入的 `AGENTS.md` | 同上，批次 5 |
+| 受限 Plan DSL | JSON 步骤由 runtime 串行执行并走审批；不 eval 脚本 | 同上，批次 6 |
+| 子任务聚合 token 上限 | 每回合调用次数已有 `subtask_max_invocations`（默认 3）；跨子任务 token 加总仍可选 | `config.py` / 批次 3 |
+| Web 独立子任务面板 | 路径元数据已在 `runtime_step` 折成目录；前端仍无子树 UI | [`web-workbench-development.md`](web-workbench-development.md) |
+| 本仓库 `AGENTS.md` 扩充 | **Cursor 协作约束**（本文件仓库根），与运行时用户工作区 `AGENTS.md` 链无关 | 根目录 [`AGENTS.md`](../AGENTS.md) |
+
+**两种 `AGENTS.md`（勿混用）：**
+
+1. **运行时（已实现）：** 用户打开的工作区里，`instructions.py` 按根→目标目录加载同名文件，作为非可信项目指令。
+2. **本仓库协作（本表「扩充」）：** Neil-Agent 仓库根给 Cursor / 编码 Agent 的开发纪律。扩充 = 把容易踩的约定写进该文件（门禁命令、安全内核、禁止事项），不是给 `neil-agent` 增加新指令格式。
 
 ## 文档权威与维护规则
 

@@ -1,12 +1,14 @@
 # Agent instructions
 
-本文件为在 **Neil Agent 仓库** 内协作的 Cursor / 编码 Agent 提供约束。用户工作区内的 `AGENTS.md` 是运行时项目指令，与此文件无关。
+本文件只约束在 **Neil Agent 仓库** 内协作的 Cursor / 编码 Agent。
+
+用户用 `neil-agent` 打开**另一个工作区**时，运行时由 `instructions.py` 加载的是那个工作区里的 `AGENTS.md` 链，与本文件无关。可选的 **Skills**（`skills/<name>/SKILL.md` + `load_skill`）也是运行时能力，**尚未实现**；规范见 [`docs/runtime-profile.md`](docs/runtime-profile.md) 批次 5。不要把本文件改写成 Skill，也不要在未立项时实现 `load_skill`。
 
 ## 文档权威
 
 1. 行为与协议以 **代码 + 测试** 为准。
 2. 安全批次：[`docs/security-hardening.md`](docs/security-hardening.md)（批次 1–6 已完成）。
-3. 运行时预设：[`docs/runtime-profile.md`](docs/runtime-profile.md)（批次 1–3 已完成）。
+3. 运行时预设：[`docs/runtime-profile.md`](docs/runtime-profile.md)（批次 1–3 已完成；4–6 可选）。
 4. 当前缺口与必做项：[`docs/project-status.md`](docs/project-status.md)。
 5. Web 协议细节：[`docs/web-workbench-development.md`](docs/web-workbench-development.md)；以 `tests/test_web_workbench.py` 为准。
 
@@ -33,6 +35,8 @@ uv build --wheel
 - 完成安全或 runtime 批次后：更新对应 `docs/*.md` 状态表、`DevelopmentRecords.md`、`docs/project-status.md`。
 - 仅当用户明确要求时 `git commit` / `git push`。
 - 不提交 `.env`、API Key 或凭据文件。
+- 不要推送 `.github/workflows/*`，除非用户确认 GitHub token 具有 `workflow` scope 并明确要求推送。
+- Windows 开发机默认 PowerShell：多条命令用 `;` 连接，不要用 bash 的 `&&`。
 
 ## 关键模块
 

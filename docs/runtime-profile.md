@@ -61,7 +61,7 @@
 | 5 | 未开始（可选） | Skills 目录 | 仅加载工作区内已声明 `SKILL.md`；与 `sensitive_paths` 共用 denylist |
 | 6 | 未开始（可选） | 受限 Plan DSL | 串行步骤由 runtime 解释；步骤仍走审批；禁止任意脚本 |
 
-批次 1–3 是本路线的提交范围。4–6 记录以免遗忘，**不在 1–3 完成前开工**。安全批次 5–6（Git 内容过滤、`O_NOFOLLOW`）与本路线并行，互不阻塞。
+批次 1–3 是本路线的提交范围，**已完成**。4–6 仍为可选，不阻塞发版；开工前以本节与 [`project-status.md`](project-status.md) 为准。
 
 ## 批次 1：RuntimeProfile + benchmark-minimal
 
@@ -114,11 +114,45 @@
 - Web `runtime_step` 将 `workspace_path` 折成相对目录（不含文件名）；事件总线与 Neural Map 仍保留脱敏相对路径。
 - 单回合 `run_readonly_subtask` 次数由 `subtask_max_invocations`（默认 3）限制。
 
-## 批次 4–6（可选，不提前开工）
+## 批次 4：Session goals（可选）
 
-- **Goals：** 用户级持久目标写入会话事件，与 `set_task_plan` 分工（plan = 当前回合步骤，goal = 跨回合目标）。创建/暂停需与当前审批主体一致。
-- **Skills：** `skills/<name>/SKILL.md` 经路径校验后由 `load_skill` 注入有界上下文；脚本类技能若出现必须走现有工具，不得新开解释器。
-- **Plan DSL：** JSON 步骤列表（只读或已批准写），runtime 串行执行并在每步重绑预览。明确拒绝 TypeScript/Python eval（Harness Code Mode 不照搬）。
+**问题：** `set_task_plan` 只描述当前回合步骤，跨回合目标会随压缩或新任务丢失。Harness `ctx.goals` 把可暂停目标写进会话。
+
+**拟交付：** 用户级 goal 写入会话事件（CAS 修订）；创建/暂停与当前审批主体一致；压缩与 `/branch` 后仍在。plan = 本回合步骤，goal = 跨回合意图。
+
+**本批不做：** 用 goal 绕过审批；把 goal 正文打进运行时事件元数据。
+
+## 批次 5：Skills 目录（可选）
+
+**问题：** 仓库级 `AGENTS.md` 链会在每次请求进入系统上下文，不适合放长篇、按任务才需要的操作手册。Claude Code / Cursor 用 **Skill**：工作区内的短文档，模型在相关时再加载，而不是始终塞进提示。
+
+**与 `AGENTS.md` 的分工（运行时，用户工作区）：**
+
+| | `AGENTS.md`（已实现） | Skills（未实现） |
+| --- | --- | --- |
+| 位置 | 工作区根到目标目录的同名文件链 | 约定目录 `skills/<name>/SKILL.md` |
+| 何时进入上下文 | 启动与路径作用域刷新时加载 | 仅当模型调用拟议工具 `load_skill` |
+| 适合写什么 | 短约束：构建命令、目录约定、禁止事项 | 长步骤：发布清单、某子系统排障、固定操作手册 |
+| 安全 | 非可信；不能放宽 denylist / 审批 | 同样非可信；路径须在工作区内且走 `sensitive_paths` |
+
+Neil 仓库根目录的 `AGENTS.md` 是给 **Cursor / 编码 Agent** 的协作约束，**不是** `instructions.py` 加载的用户工作区指令。见 [`project-status.md`](project-status.md)「可选后续」。
+
+**拟交付：**
+
+- 仅加载工作区内已存在的 `skills/<name>/SKILL.md`（名称字符集受限，拒绝 `..` 与绝对路径）。
+- `load_skill` 经 `build_host_runtime()` 按 profile 注册（默认仅 `standard` / `web-safe`）；返回有界正文（字节/字符上限，与指令加载同量级），注入**当前请求**上下文，不写入会话 JSON、审计正文或 Web 事件。
+- 若 Skill 提到脚本，只能通过现有工具（读文件、已批准写、认证后 `run_command`）执行；**不得**为 Skill 新开解释器、任意 Bash 或动态注册工具。
+- 子运行时 `READONLY_SUBTASK` **不**注册 `load_skill`。
+
+**本批不做：** 技能市场、网络下载 Skill、Skill 改工具白名单、把本仓库的 Cursor `AGENTS.md` 当成运行时 Skill。
+
+## 批次 6：受限 Plan DSL（可选）
+
+**问题：** 系统提示里的「先读再改」只是建议；Harness Code Mode 用可执行 TS/Python 编排，安全面过大。
+
+**拟交付：** 有界 JSON 步骤列表（只读或已批准写），由 runtime 串行解释，每步重绑预览并走现有审批。拒绝 TypeScript/Python eval。
+
+**本批不做：** 照搬 Harness Code Mode；步骤内嵌任意代码或新工具。
 
 ## 明确不做
 
