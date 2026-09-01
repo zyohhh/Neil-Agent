@@ -61,6 +61,7 @@ from .schemas import (
     TokenUsage,
     validate_message_history,
 )
+from .skills import redact_skill_bodies_from_messages
 from .subtask import note_parent_run_id, parent_tool_event_scope
 from .execution_budget import check_execution_budget
 from .task import TaskTracker
@@ -839,7 +840,7 @@ class Agent:
         )
 
     def _commit_messages(self, messages: Sequence[Message]) -> None:
-        self._messages.extend(messages)
+        self._messages.extend(redact_skill_bodies_from_messages(messages))
         self._messages = self._trim_history(self._messages)
 
     def _trim_history(self, messages: Sequence[Message]) -> list[Message]:

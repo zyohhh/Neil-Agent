@@ -116,6 +116,13 @@ _CAPABILITY_GROUPS = (
         "one-shot read-only child runtime",
     ),
     _CapabilityGroup(
+        "skill-load",
+        "SKILL LOAD",
+        "application",
+        ("load_skill",),
+        "bounded SKILL.md · untrusted request context",
+    ),
+    _CapabilityGroup(
         "git-inspect",
         "GIT INSPECT",
         "application",

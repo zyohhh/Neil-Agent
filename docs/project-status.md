@@ -13,7 +13,7 @@
 | 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**829 passed**、10 skipped、16 deselected；Web 前端独立 `npm test` / Playwright |
 | 静态检查 | `uv run ruff check .` 与 `uv run mypy src` 为开发门禁（`pyproject.toml` 含 `[tool.ruff]` / `[tool.mypy]`） |
 | 安全加固 | 批次 1–6 **已完成** |
-| 运行时预设 | 批次 1–3 **已完成**；批次 4–6 **可选、未开始** |
+| 运行时预设 | 批次 1–3、**5** 已完成；批次 4、6 可选未开始 |
 
 ## 已完成能力（摘要）
 
@@ -28,7 +28,7 @@
 
 - **批次 1**：`RuntimeProfile`（`standard` / `benchmark-minimal` / `web-safe`）；eval 默认 `benchmark-minimal`。
 - **批次 2**：注册返回 disposer；`HostRuntime.close()` 逆序 teardown。
-- **批次 3**：`run_readonly_subtask` + `READONLY_SUBTASK` 子运行时；独立 `subtask_*` 预算；`parent_run_id` 事件链路。
+- **批次 5**：`load_skill` 按需加载工作区 `skills/<name>/SKILL.md`；子运行时不注册。
 
 ### 其他已收口主线
 
@@ -67,7 +67,7 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | 项 | 含义 | 文档 |
 | --- | --- | --- |
 | Session goals | 跨回合、可暂停的用户目标（会话事件）；区别于当前回合的 `set_task_plan` | [`runtime-profile.md`](runtime-profile.md) 批次 4 |
-| Skills 目录 + `load_skill` | 用户工作区 `skills/<name>/SKILL.md`，模型按需加载长手册；**不是**始终注入的 `AGENTS.md` | 同上，批次 5 |
+| Skills 目录 + `load_skill` | ✅ 用户工作区 `skills/<name>/SKILL.md` 按需加载；**不是**始终注入的 `AGENTS.md` | [`runtime-profile.md`](runtime-profile.md) 批次 5 |
 | 受限 Plan DSL | JSON 步骤由 runtime 串行执行并走审批；不 eval 脚本 | 同上，批次 6 |
 | 子任务聚合 token 上限 | 每回合调用次数已有 `subtask_max_invocations`（默认 3）；跨子任务 token 加总仍可选 | `config.py` / 批次 3 |
 | Web 独立子任务面板 | 路径元数据已在 `runtime_step` 折成目录；前端仍无子树 UI | [`web-workbench-development.md`](web-workbench-development.md) |

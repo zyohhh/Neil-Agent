@@ -98,6 +98,9 @@ def describe_tool_call(call: ToolCall) -> ToolActivity:
             "启动只读子任务",
             (f"提示规模：{_text_metrics(prompt)}",),
         )
+    if call.name == "load_skill":
+        skill_name = _safe_text(call.arguments.get("name"), "未指定")
+        return ToolActivity("加载技能", (f"名称：{skill_name}",))
 
     tool_name = _safe_text(call.name, "未知工具")
     argument_names = ", ".join(sorted(call.arguments)) or "无"
@@ -126,6 +129,8 @@ def describe_tool_result(call: ToolCall, result: ToolResult) -> tuple[str, ...]:
         return ()
     if call.name == "run_readonly_subtask":
         return (f"摘要：{_result_excerpt(result.content)}",)
+    if call.name == "load_skill":
+        return (f"结果：{_text_metrics(result.content)}",)
     return (f"结果：{_result_excerpt(result.content)}",)
 
 

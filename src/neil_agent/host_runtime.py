@@ -317,6 +317,7 @@ def build_host_runtime(
         _uses_standard_tool_surface(runtime_profile)
         and mode in {HostMode.CLI, HostMode.WEB}
     ):
+        from .tools.skills import SkillTools
         from .tools.subtask import ReadonlySubtaskTools
 
         disposers.append(
@@ -325,6 +326,7 @@ def build_host_runtime(
                 max_prompt_chars=settings.subtask_max_prompt_chars,
             )
         )
+        disposers.append(SkillTools(filesystem.root).register(registry))
         _track_registry_tools(registry, disposers, seen_tools)
 
     host_profile = HostProfile(

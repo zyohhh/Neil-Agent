@@ -118,6 +118,7 @@ def test_readonly_subtask_profile_exposes_only_read_tools(tmp_path: Path) -> Non
         assert runtime.profile.tool_names == BENCHMARK_MINIMAL_READONLY_TOOLS
         assert "replace_text" not in runtime.profile.tool_names
         assert "run_readonly_subtask" not in runtime.profile.tool_names
+        assert "load_skill" not in runtime.profile.tool_names
     finally:
         runtime.close()
 
@@ -126,6 +127,7 @@ def test_standard_cli_registers_run_readonly_subtask(tmp_path: Path) -> None:
     runtime = build_host_runtime(_settings(tmp_path), mode=HostMode.CLI)
     try:
         assert "run_readonly_subtask" in runtime.profile.tool_names
+        assert "load_skill" in runtime.profile.tool_names
     finally:
         runtime.close()
 
@@ -138,6 +140,7 @@ def test_benchmark_minimal_does_not_register_run_readonly_subtask(tmp_path: Path
     )
     try:
         assert "run_readonly_subtask" not in runtime.profile.tool_names
+        assert "load_skill" not in runtime.profile.tool_names
     finally:
         runtime.close()
 

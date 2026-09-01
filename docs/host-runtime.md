@@ -36,6 +36,7 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | Git 写工具 | ✅ | ❌ | ✅ | ✅ |
 | 计划工具 `set_task_plan` | ✅ | ❌ | ❌ | ✅ |
 | 只读子任务 `run_readonly_subtask` | ✅ | ❌ | ❌ | ✅ |
+| Skills `load_skill` | ✅ | ❌ | ❌ | ✅ |
 | Windows `run_command` | 认证后 | 认证后 | 认证后 | 认证后（与 CLI 同路径） |
 | `import_guest_export` | 认证后需暂存 | 写入模式 | 写入模式 | 写入模式 |
 | 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
@@ -97,7 +98,7 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 
 当前无已知 host_runtime 迁移缺口；后续新能力应优先经 `build_host_runtime()` 接入三入口。
 
-`HostMode` 只描述入口差异。与入口正交的能力预设（`standard` / `benchmark-minimal` / `web-safe` / `readonly-subtask`）、可逆注册与只读子任务见 [`runtime-profile.md`](runtime-profile.md)（批次 1–3 已完成；批次 4–6 Session goals / Skills / Plan DSL 仍为可选）。Web 默认 `web-safe`（与 `standard` 工具面一致）；`neil-agent-eval` 默认 `benchmark-minimal`。`run_readonly_subtask` 仅在 CLI/Web 的 `standard` / `web-safe` 面注册；子运行时使用 `readonly-subtask` profile。CLI 与 Web 每 turn 使用 `new_parent_run_id()` 与 `subtask_parent_scope`（含 `cancel`）；协作取消/超时见 `execution_budget.py`。Web **后端**支持子任务，前端无独立子任务面板。CLI / 非交互进程结束、Web `replace_host_runtime()`（模型切换）与 Workbench 关闭时调用 `HostRuntime.close()` 逆序卸载。Web **turn 结束不再**关闭共享 runtime。`WorkbenchSnapshotService` 持有会话级实例；`AgentTurnWorker` 经 `host_runtime_provider` 复用。已知缺口见 [`project-status.md`](project-status.md)。
+`HostMode` 只描述入口差异。与入口正交的能力预设（`standard` / `benchmark-minimal` / `web-safe` / `readonly-subtask`）、可逆注册、只读子任务与 Skills 见 [`runtime-profile.md`](runtime-profile.md)（批次 1–3、5 已完成；批次 4、6 Session goals / Plan DSL 仍为可选）。Web 默认 `web-safe`（与 `standard` 工具面一致）；`neil-agent-eval` 默认 `benchmark-minimal`。`run_readonly_subtask` 与 `load_skill` 仅在 CLI/Web 的 `standard` / `web-safe` 面注册；子运行时使用 `readonly-subtask` profile，不注册二者。CLI 与 Web 每 turn 使用 `new_parent_run_id()` 与 `subtask_parent_scope`（含 `cancel`）；协作取消/超时见 `execution_budget.py`。Web **后端**支持子任务，前端无独立子任务面板。CLI / 非交互进程结束、Web `replace_host_runtime()`（模型切换）与 Workbench 关闭时调用 `HostRuntime.close()` 逆序卸载。Web **turn 结束不再**关闭共享 runtime。`WorkbenchSnapshotService` 持有会话级实例；`AgentTurnWorker` 经 `host_runtime_provider` 复用。已知缺口见 [`project-status.md`](project-status.md)。
 
 ## 相关文档
 

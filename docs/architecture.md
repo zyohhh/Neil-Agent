@@ -70,6 +70,8 @@ tools/registry.py
     │    Git status/diff 输出脱敏（敏感路径不进工具结果）
     └→ tools/subtask.py
          只读子任务工具 `run_readonly_subtask`（CLI/Web standard 面）
+    └→ tools/skills.py
+         按需加载 `skills/<name>/SKILL.md` 的 `load_skill`（CLI/Web standard 面）
     sensitive_paths.py
       共享凭据目录/文件 denylist，供文件工具、Git 暂存、Web 文件树、guest export 与沙箱快照使用
 
@@ -98,7 +100,7 @@ web/ (React + TypeScript)
 - `/init` 不调用模型，只读取有界的常见项目清单，生成简洁初稿并展示 unified diff；只有 `y` 或 `yes` 才创建，批准后使用独占创建再次保证不覆盖已出现的根 `AGENTS.md`。
 - 每个带 `path` 的文件工具调用都会先解析目标目录。生效指令链发生变化时，Agent 更新系统上下文并返回一个“本次未执行”的工具结果；模型必须在下一轮看到新规则后重新决定是否调用，避免先读写再补载规则。
 - 作用域刷新失败时文件操作直接拒绝；`AGENTS.md` 仍只提供行为上下文，工作区边界、敏感路径屏蔽和审批继续由代码强制执行。
-- **Skills 未实现。** 按需加载的 `skills/<name>/SKILL.md` 属于可选运行时批次 5，与上述始终加载的指令链不同；见 [`runtime-profile.md`](runtime-profile.md)。Neil 仓库根 `AGENTS.md` 只约束本仓库的编码 Agent，不进入用户工作区指令链。
+- **Skills（批次 5）：** `load_skill` 读取工作区 `skills/<name>/SKILL.md`（有界、非可信、拒绝符号链接），仅注入当前请求的工具结果；提交历史时去掉正文。不能加工具或新开解释器。Neil 仓库根 `AGENTS.md` 只约束本仓库的编码 Agent。
 
 ## 对话和工具循环
 
@@ -269,7 +271,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 工具注册分为两类：
 
-- 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`、`set_task_plan`、`update_task_step`、`run_readonly_subtask`（仅 CLI/Web 标准面）
+- 直接执行：`list_directory`、`read_file`、`search_text`、`git_status`、`git_diff`、`set_task_plan`、`update_task_step`、`run_readonly_subtask`、`load_skill`（后两项仅 CLI/Web 标准面）
 - 必须审批：`write_file`、`replace_text`、`run_quality_check`、`git_stage`、`git_commit`；认证就绪时还条件注册 `run_command` 与 `import_guest_export`（后者依赖已暂存的 guest export manifest）
 
 `/permissions` 只读取注册表与工作区配置，展示上述分类、敏感路径、命令和网络边界，并明确当前没有 OS 级命令沙箱；它不修改规则，也不把提示词描述成强制权限。

@@ -1710,6 +1710,14 @@ CLI 展示修改预览并等待用户输入 y/yes
 - `project-status.md` 可选表补充含义列；标明本仓库 `AGENTS.md` 是 Cursor 协作约束。
 - 根 `AGENTS.md` 增加两种指令文件说明、workflow 推送与 PowerShell 约定。
 
+## 2026-09-01：运行时 Skills（批次 5）
+
+### 交付
+
+- `load_skill`：仅读取工作区 `skills/<name>/SKILL.md`；CLI/Web `standard`/`web-safe` 注册。
+- 当前回合把有界正文交给模型；提交历史时替换为占位符。不进审计/Web 事件正文。
+
+
 
 
 

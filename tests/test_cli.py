@@ -106,7 +106,7 @@ def test_run_uses_injected_console(
     cockpit_text = cockpit_texts[0]
     assert "NEIL AGENT" in welcome_text
     assert "deepseek-v4-flash" in welcome_text
-    assert "14 个可用 · 6 个操作需要批准" in welcome_text
+    assert "15 个可用 · 6 个操作需要批准" in welcome_text
     assert "已加载 1 个来源" in welcome_text
     assert "CONTEXT TOMOGRAPHY" in cockpit_text
     assert "SECURITY SHIELD" in cockpit_text
@@ -301,7 +301,7 @@ def test_welcome_panel_remains_readable_in_a_narrow_terminal(tmp_path: Path) -> 
         model="deepseek-v4-flash",
         thinking_enabled=True,
         workspace_root=str(tmp_path / "a-very-long-workspace-directory"),
-        tool_count=14,
+        tool_count=15,
         approval_tool_count=6,
         session_id="20260721T120000000000Z-deadbeef",
         instructions=load_project_instructions(tmp_path),
@@ -335,7 +335,7 @@ def test_welcome_panel_explains_inactive_instruction_state(
         model="deepseek-v4-flash",
         thinking_enabled=False,
         workspace_root=str(tmp_path),
-        tool_count=14,
+        tool_count=15,
         approval_tool_count=6,
         session_id="20260721T120000000000Z-deadbeef",
         instructions=load_project_instructions(tmp_path),

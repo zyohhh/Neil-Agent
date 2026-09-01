@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, cast
 from unicodedata import category
 
 from .activity import COMMAND_TOOL_NAMES, WRITE_TOOL_NAMES
@@ -572,8 +572,8 @@ def fold_workspace_path_for_web(
 ) -> str | None:
     """Keep unique relative directories; drop leaf filenames for Web DTOs."""
 
-    kind: NeuralMapActivityKind = (
-        activity_kind
+    kind = (
+        cast(NeuralMapActivityKind, activity_kind)
         if activity_kind in {"read", "write", "check", "other"}
         else "other"
     )

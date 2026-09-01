@@ -58,10 +58,10 @@
 | 2 | 已完成 | 可逆注册与 runtime teardown | 工具 / hook / 审批 / sandbox 注册返回 disposer；`switch_model` 与关闭路径逆序清理，无残留注册 |
 | 3 | 已完成 | 只读子任务 | 并行只读探索；独立预算；无写 / 无 shell；`await` + 必 `dispose`；事件带 parent |
 | 4 | 未开始（可选） | Session goals | 会话日志中的可 pause/resume 目标；CAS；压缩与分支后仍在 |
-| 5 | 未开始（可选） | Skills 目录 | 仅加载工作区内已声明 `SKILL.md`；与 `sensitive_paths` 共用 denylist |
+| 5 | 已完成 | Skills 目录 | 仅加载工作区内已声明 `SKILL.md`；与 `sensitive_paths` 共用 denylist |
 | 6 | 未开始（可选） | 受限 Plan DSL | 串行步骤由 runtime 解释；步骤仍走审批；禁止任意脚本 |
 
-批次 1–3 是本路线的提交范围，**已完成**。4–6 仍为可选，不阻塞发版；开工前以本节与 [`project-status.md`](project-status.md) 为准。
+批次 1–3 与 **批次 5（Skills）** 已完成。批次 4、6 仍为可选，不阻塞发版。
 
 ## 批次 1：RuntimeProfile + benchmark-minimal
 
@@ -128,21 +128,20 @@
 
 **与 `AGENTS.md` 的分工（运行时，用户工作区）：**
 
-| | `AGENTS.md`（已实现） | Skills（未实现） |
+| | `AGENTS.md`（已实现） | Skills（已实现） |
 | --- | --- | --- |
 | 位置 | 工作区根到目标目录的同名文件链 | 约定目录 `skills/<name>/SKILL.md` |
-| 何时进入上下文 | 启动与路径作用域刷新时加载 | 仅当模型调用拟议工具 `load_skill` |
+| 何时进入上下文 | 启动与路径作用域刷新时加载 | 仅当模型调用 `load_skill` |
 | 适合写什么 | 短约束：构建命令、目录约定、禁止事项 | 长步骤：发布清单、某子系统排障、固定操作手册 |
 | 安全 | 非可信；不能放宽 denylist / 审批 | 同样非可信；路径须在工作区内且走 `sensitive_paths` |
 
 Neil 仓库根目录的 `AGENTS.md` 是给 **Cursor / 编码 Agent** 的协作约束，**不是** `instructions.py` 加载的用户工作区指令。见 [`project-status.md`](project-status.md)「可选后续」。
 
-**拟交付：**
+**已实现（批次 5）：**
 
-- 仅加载工作区内已存在的 `skills/<name>/SKILL.md`（名称字符集受限，拒绝 `..` 与绝对路径）。
-- `load_skill` 经 `build_host_runtime()` 按 profile 注册（默认仅 `standard` / `web-safe`）；返回有界正文（字节/字符上限，与指令加载同量级），注入**当前请求**上下文，不写入会话 JSON、审计正文或 Web 事件。
-- 若 Skill 提到脚本，只能通过现有工具（读文件、已批准写、认证后 `run_command`）执行；**不得**为 Skill 新开解释器、任意 Bash 或动态注册工具。
-- 子运行时 `READONLY_SUBTASK` **不**注册 `load_skill`。
+- `skills.py` + `tools/skills.py`：`load_skill` 仅打开 `skills/<name>/SKILL.md`（kebab-case 名、32 字符、32768 字节、UTF-8、普通文件、拒绝符号链接与 denylist）。
+- 仅 CLI / Web 的 `standard` / `web-safe` 注册；`benchmark-minimal` 与 `READONLY_SUBTASK` 不注册。
+- 正文作为当前回合 ToolResult 进入模型；`_commit_messages` 用占位符替换，不把 Skill 正文写入会话历史。活动事件与审计只记规模，不记正文。
 
 **本批不做：** 技能市场、网络下载 Skill、Skill 改工具白名单、把本仓库的 Cursor `AGENTS.md` 当成运行时 Skill。
 
@@ -167,7 +166,7 @@ Neil 仓库根目录的 `AGENTS.md` 是给 **Cursor / 编码 Agent** 的协作�
 - `src/neil_agent/host_runtime.py` — `HostMode`、`HostProfile`、`build_host_runtime()`、`build_agent()`
 - `src/neil_agent/subtask.py` — 只读子任务上下文、预算与 `execute_readonly_subtask()`
 - `src/neil_agent/execution_budget.py` — 子任务协作式 cancel/deadline 检查
-- `src/neil_agent/tools/subtask.py` — `run_readonly_subtask` 工具注册
+- `src/neil_agent/skills.py` / `tools/skills.py` — `load_skill` 有界加载
 - `src/neil_agent/evals.py` — 离线与真实验收入口
 - `src/neil_agent/web/controller.py` — 模型切换与 worker 生命周期
 - `src/neil_agent/hooks.py` / `audit.py` — 注册与卸除

@@ -64,6 +64,7 @@ def test_build_host_runtime_cli_registers_write_and_task_tools(
     assert runtime.profile.runtime_profile is RuntimeProfile.STANDARD
     assert "write_file" in runtime.profile.tool_names
     assert "set_task_plan" in runtime.profile.tool_names
+    assert "load_skill" in runtime.profile.tool_names
     assert runtime.profile.instruction_scope == "cwd"
     assert runtime.profile.task_tools_enabled is True
     assert runtime.profile.sandbox_tools_enabled is False
@@ -79,6 +80,7 @@ def test_build_host_runtime_noninteractive_readonly_is_read_only(
     assert "write_file" not in runtime.profile.tool_names
     assert "git_commit" not in runtime.profile.tool_names
     assert "read_file" in runtime.profile.tool_names
+    assert "load_skill" not in runtime.profile.tool_names
     assert runtime.profile.task_tools_enabled is False
     assert runtime.task_tracker is None
 
