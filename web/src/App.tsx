@@ -5,6 +5,7 @@ import {
   type LiveApproval,
   type LiveConnectionState,
   type LiveGitDiff,
+  type LiveOutputEntry,
   type LiveRuntimeStep,
   type WorkbenchSnapshotV1,
 } from './protocol'
@@ -20,6 +21,7 @@ import {
   type TimelineStep,
 } from './fixtures'
 import { useWorkbenchConnection } from './useWorkbenchConnection'
+import { ConversationPanel } from './ConversationPanel'
 
 type IconName =
   | 'spark'
@@ -934,13 +936,38 @@ function OutputPanel({
   onCollapsedChange: (collapsed: boolean) => void
   onHeightChange: (height: number) => void
 }) {
-  const [cleared, setCleared] = useState(false)
+  const [clearedOutput, setClearedOutput] = useState<{ key: string; entries: LiveOutputEntry[] } | null>(null)
+  const outputKey = liveSnapshot
+    ? `live:${liveSnapshot.workspace.identity}:${liveSnapshot.active_session?.session_id}:${liveSnapshot.run.run_id}`
+    : `fixture:${scenario.id}`
+  const cleared = clearedOutput?.key === outputKey
+  const clearedEntries = cleared ? clearedOutput.entries : []
+  const clearedById = new Map(clearedEntries.filter(entry => entry.entry_id).map(entry => [entry.entry_id, entry]))
+  // Retained answer segments stay cleared even when an old activity entry is evicted.
+  const visibleEntries = (liveSnapshot?.output ?? []).flatMap(entry => {
+    const previous = entry.entry_id ? clearedById.get(entry.entry_id) : clearedEntries.find(item =>
+      !item.entry_id && entry.kind === item.kind && entry.timestamp === item.timestamp
+      && (entry.kind === 'assistant' ? entry.text.startsWith(item.text) : entry.text === item.text))
+    if (!previous) return [entry]
+    const text = entry.kind === 'assistant' ? entry.text.slice(previous.text.length) : ''
+    return text ? [{ ...entry, text }] : []
+  })
   const outputSource = liveSnapshot ? 'live Agent' : 'fixture'
-  const visibleOutputLines = liveSnapshot
-    ? liveSnapshot.output.map((entry) => entry.text)
-    : scenario.outputLines
+  const visibleOutputRows: Pick<LiveOutputEntry, 'kind' | 'text'>[] = []
+  if (liveSnapshot) {
+    for (const entry of visibleEntries) {
+      const previous = visibleOutputRows.at(-1)
+      if (entry.kind === 'assistant' && previous?.kind === 'assistant') previous.text += entry.text
+      else visibleOutputRows.push({ kind: entry.kind, text: entry.text })
+    }
+  } else if (!cleared) {
+    visibleOutputRows.push(...scenario.outputLines.map((text) => ({ kind: 'status' as const, text })))
+  }
+  const displayedOutputRows = cleared && visibleOutputRows.length === 0
+    ? [{ kind: 'status' as const, text: `${liveSnapshot ? 'Live' : 'Fixture'} output cleared locally.` }]
+    : visibleOutputRows
 
-  useEffect(() => setCleared(false), [scenario.id])
+  useEffect(() => setClearedOutput(null), [outputKey])
 
   const outputMaximum = Math.max(128, Math.min(720, Math.floor((window.innerHeight * 0.45) / 16) * 16))
   const updateHeight = (nextHeight: number) => {
@@ -995,14 +1022,15 @@ function OutputPanel({
         <div className="output-actions">
           <span>{liveSnapshot?.git.branch ?? 'feature/web-workbench'}</span>
           <span className="status-dot" />
-          <button type="button" className="icon-button" aria-label={`Clear displayed ${outputSource} output locally`} onClick={() => setCleared(true)}><Icon name="x" size={16} /></button>
+          <button type="button" className="icon-button" aria-label={`Clear displayed ${outputSource} output locally`} onClick={() => setClearedOutput({ key: outputKey, entries: liveSnapshot?.output ?? [] })}><Icon name="x" size={16} /></button>
           <button type="button" className="icon-button" onClick={() => updateHeight(304)} aria-label="Expand output"><Icon name="plus" size={17} /></button>
         </div>
       </div>
       {!collapsed ? (
         <div className="output-stream" role="log" aria-label={liveSnapshot ? 'Live Agent output' : 'Synthetic fixture output'}>
-          {(cleared ? [`${liveSnapshot ? 'Live' : 'Fixture'} output cleared locally.`] : visibleOutputLines).map((line, index) => (
-            <div key={`${scenario.id}-${index}`} className={line.startsWith('×') || line.startsWith('!') ? 'output-warning' : line.startsWith('✓') ? 'output-success' : ''}>{line}</div>
+          {liveSnapshot?.output_truncated ? <p className="output-warning">实时输出达到显示上限。完整已保存回答可在会话历史中查看。</p> : null}
+          {displayedOutputRows.map((row, index) => (
+            <div key={`${scenario.id}-${index}`} className={row.kind === 'assistant' ? 'output-assistant' : row.text.startsWith('×') || row.text.startsWith('!') ? 'output-warning' : row.text.startsWith('✓') ? 'output-success' : ''}>{row.text}</div>
           ))}
         </div>
       ) : null}
@@ -1244,7 +1272,12 @@ function WorkspacePanel({
       )}
       {liveSnapshot?.run.objective ? <div className="objective-bar"><span className="objective-check"><Icon name="check" size={14} /></span><span>{liveSnapshot.run.objective}</span></div> : null}
       <div className="timeline-scroll" tabIndex={0} aria-label={liveSnapshot ? 'Scrollable live timeline' : 'Scrollable fixture timeline'}>
-        {liveSnapshot ? <LiveTimeline steps={liveSnapshot.timeline} /> : <Timeline scenario={scenario} />}
+        {liveSnapshot ? <>
+          {liveSnapshot.active_session && liveSnapshot.active_session.round_count > 0 && liveSnapshot.active_session.history_revision !== undefined ? (
+            <ConversationPanel key={`${liveSnapshot.active_session.session_id}:${liveSnapshot.active_session.history_revision}`} sessionId={liveSnapshot.active_session.session_id} revision={liveSnapshot.active_session.history_revision} />
+          ) : null}
+          {liveSnapshot.timeline.length > 0 || !liveSnapshot.active_session?.round_count ? <LiveTimeline steps={liveSnapshot.timeline} /> : null}
+        </> : <Timeline scenario={scenario} />}
       </div>
     </main>
   )

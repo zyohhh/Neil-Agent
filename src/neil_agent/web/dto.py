@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Self
 
@@ -138,6 +139,24 @@ class ActiveSessionDto(WorkbenchDto):
     persistence_status: Literal["unsaved", "saved", "save_failed"]
     runtime_provider: str = Field(min_length=1, max_length=64)
     runtime_model: str = Field(min_length=1, max_length=256)
+    history_revision: int = Field(default=0, ge=0)
+
+
+class ConversationPartDto(WorkbenchDto):
+    message_index: int = Field(ge=0)
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=4_000)
+    offset: int = Field(ge=0)
+    is_last_part: bool
+
+
+class ConversationPageDto(WorkbenchDto):
+    session_id: str = Field(min_length=1, max_length=128)
+    revision: int = Field(ge=0)
+    items: tuple[ConversationPartDto, ...] = Field(default=(), max_length=32)
+    next_cursor: str | None = Field(default=None, max_length=32)
+    total_messages: int = Field(ge=0)
+    compacted: bool = False
 
 
 class FileNodeDto(WorkbenchDto):
@@ -485,6 +504,9 @@ class RuntimeStepDto(WorkbenchDto):
 
 
 class OutputEntryDto(WorkbenchDto):
+    entry_id: str = Field(
+        default_factory=lambda: secrets.token_hex(16), pattern=r"^[0-9a-f]{32}$"
+    )
     kind: Literal["status", "activity", "assistant", "warning", "error"]
     text: str = Field(min_length=1, max_length=4_000)
     timestamp: AwareDatetime
@@ -536,6 +558,7 @@ class WorkbenchSnapshotDto(WorkbenchDto):
     )
     timeline: tuple[RuntimeStepDto, ...] = Field(default=(), max_length=200)
     output: tuple[OutputEntryDto, ...] = Field(default=(), max_length=200)
+    output_truncated: bool = False
     approval: ApprovalRequestDto | None = None
     git: GitDto
     sessions: SessionListDto

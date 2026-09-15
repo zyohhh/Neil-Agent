@@ -33,6 +33,7 @@ from ..config import Settings
 from .assets import verify_static_bundle
 from .controller import ClientCommand, CommandError, WorkbenchController
 from .dto import (
+    ConversationPageDto,
     FileTreeDto,
     GitDiffDto,
     HealthDto,
@@ -256,6 +257,22 @@ def create_app(
     @app.get("/api/v1/sessions", response_model=SessionListDto)
     def sessions(_auth: None = Depends(require_session)) -> SessionListDto:
         return snapshot_service.sessions()
+
+    @app.get("/api/v1/conversation", response_model=ConversationPageDto)
+    def conversation(
+        session_id: Annotated[str, Query(min_length=1, max_length=128)],
+        revision: Annotated[int, Query(ge=0)],
+        cursor: Annotated[str | None, Query(pattern=r"^[0-9]{1,6}:[0-9]{1,10}$")] = None,
+        _auth: None = Depends(require_session),
+    ) -> ConversationPageDto:
+        try:
+            return workbench_controller.conversation(session_id, revision, cursor=cursor)
+        except CommandError as error:
+            raise HTTPException(
+                status_code=409, detail="The selected conversation changed"
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Invalid conversation cursor") from error
 
     @app.get("/api/v1/files/tree", response_model=FileTreeDto)
     def files(

@@ -25,9 +25,11 @@ from ..session import SessionHandle, SessionSnapshot, UNTITLED_SESSION
 from ..neural_map import project_web_runtime_metadata
 from ..subtask import SubtaskParentState, new_parent_run_id, subtask_parent_scope
 from ..task import QualityCheckRecord, TaskStep
+from .conversation import project_conversation
 from .dto import (
     ActiveSessionDto,
     ApprovalRequestDto,
+    ConversationPageDto,
     OutputEntryDto,
     QualityCheckDto,
     ReviewDto,
@@ -37,11 +39,11 @@ from .dto import (
     RuntimeStepDto,
     WorkbenchSnapshotDto,
 )
+from .output import MAX_OUTPUT_ENTRY_CHARS, OutputBuffer
 from .service import WorkbenchSnapshotService
 
 MAX_PROMPT_CHARS = 8_000
 MAX_EVENT_HISTORY = 512
-MAX_OUTPUT_ENTRIES = 200
 MAX_RUNTIME_STEPS = 200
 MAX_SUBSCRIBERS = 8
 SUBSCRIBER_QUEUE_SIZE = 64
@@ -259,7 +261,8 @@ class WorkbenchController:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = RLock()
         self._events: deque[dict[str, Any]] = deque(maxlen=event_history_size)
-        self._output: deque[OutputEntryDto] = deque(maxlen=MAX_OUTPUT_ENTRIES)
+        self._output = OutputBuffer()
+        self._history_revision = 0
         self._quality_checks: deque[QualityCheckDto] = deque(maxlen=20)
         self._steps: dict[str, RuntimeStepDto] = {}
         self._subscribers: dict[
@@ -345,6 +348,7 @@ class WorkbenchController:
                         ),
                         "timeline": tuple(self._steps.values())[-MAX_RUNTIME_STEPS:],
                         "output": tuple(self._output),
+                        "output_truncated": self._output.truncated,
                         "approval": approval,
                         "active_session": self._active_session_dto_locked(),
                         "review": base.review.model_copy(
@@ -526,6 +530,7 @@ class WorkbenchController:
             self._require_session_change_locked(client_id, command)
             self._active_handle = self._session_store.new_session()
             self._active_snapshot = None
+            self._history_revision += 1
             self._session_persistence = "unsaved"
             self._reset_session_runtime_locked()
         self._publish_session_changed(reset_runtime=True)
@@ -626,6 +631,7 @@ class WorkbenchController:
             self._require_session_change_locked(client_id, command)
             self._active_handle = self._session_store.handle_for(snapshot)
             self._active_snapshot = snapshot
+            self._history_revision += 1
             self._session_persistence = "saved"
             self._reset_session_runtime_locked()
         self._publish_session_changed(reset_runtime=True)
@@ -787,6 +793,7 @@ class WorkbenchController:
                 )
             else:
                 self._active_snapshot = saved
+                self._history_revision += 1
                 self._active_handle = self._session_store.handle_for(saved)
                 self._session_persistence = "saved"
         if self._session_persistence == "save_failed":
@@ -801,29 +808,39 @@ class WorkbenchController:
         return True
 
     def _record_text(self, run_id: str, text: str) -> None:
-        if not text:
-            return
-        safe = text[:4_000]
-        with self._lock:
-            if self._run.run_id != run_id:
-                return
-            self._output.append(
-                OutputEntryDto(kind="assistant", text=safe, timestamp=self._now())
-            )
-        self._publish("assistant_text_delta", {"run_id": run_id, "text": safe})
+        for offset in range(0, len(text), MAX_OUTPUT_ENTRY_CHARS):
+            safe = text[offset : offset + MAX_OUTPUT_ENTRY_CHARS]
+            with self._lock:
+                if self._run.run_id != run_id:
+                    return
+                entry = OutputEntryDto(kind="assistant", text=safe, timestamp=self._now())
+                self._output.append(entry)
+                self._publish(
+                    "assistant_text_delta",
+                    {
+                        "run_id": run_id,
+                        "text": safe,
+                        "entry_id": entry.entry_id,
+                        "output_truncated": self._output.truncated,
+                    },
+                )
 
     def _record_activity(self, run_id: str, event: ActivityEvent) -> None:
         text = event.message[:2_000]
         with self._lock:
             if self._run.run_id != run_id:
                 return
-            self._output.append(
-                OutputEntryDto(kind="activity", text=text, timestamp=self._now())
+            entry = OutputEntryDto(kind="activity", text=text, timestamp=self._now())
+            self._output.append(entry)
+            self._publish(
+                "activity",
+                {
+                    "run_id": run_id,
+                    "status": event.status,
+                    "message": text,
+                    "entry_id": entry.entry_id,
+                },
             )
-        self._publish(
-            "activity",
-            {"run_id": run_id, "status": event.status, "message": text},
-        )
 
     def _record_runtime(self, run_id: str, event: RuntimeEvent) -> None:
         metadata = project_web_runtime_metadata(event.metadata_dict())
@@ -1152,7 +1169,26 @@ class WorkbenchController:
             persistence_status=self._session_persistence,
             runtime_provider=self._runtime_settings.llm_provider.value,
             runtime_model=self._runtime_settings.selected_model,
+            history_revision=self._history_revision,
         )
+
+    def conversation(
+        self, session_id: str, revision: int, *, cursor: str | None = None
+    ) -> ConversationPageDto:
+        with self._lock:
+            if (
+                session_id != self._active_handle.session_id
+                or revision != self._history_revision
+            ):
+                raise CommandError(
+                    "conversation_stale", "The selected conversation changed"
+                )
+            return project_conversation(
+                self._active_snapshot,
+                session_id=session_id,
+                revision=revision,
+                cursor=cursor,
+            )
 
     def _model_changed_payload_locked(
         self,

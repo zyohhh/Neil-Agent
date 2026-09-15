@@ -502,6 +502,8 @@ interface WorkbenchSnapshotV1 {
 
 `capabilities` 明确告诉前端哪些操作真实可用，例如 `canStartTurn`、`canApproveTool`、`canShowDiff`、`canEstimateCost`、`hasPty`。前端通过能力控制可见性和禁用状态，不通过版本号猜测。
 
+2026-09-15 实现补充：保存的问答通过认证只读端点 `GET /api/v1/conversation?session_id=...&revision=...&cursor=...` 单独加载；`revision` 来自活动会话的 `history_revision`。只允许读取当前选中会话及对应版本，切换或成功保存后旧请求返回 409。每页最多 32 个正文部分，每部分最多 4000 字符，返回 `next_cursor` 后可继续加载；长消息按字符偏移分页，不截去前后内容。仅返回用户问题与助手回答，排除工具调用/结果、thinking、Provider 私有状态和内部压缩检查点；已压缩历史明确标记。快照和 `session_changed` 仍只携带会话摘要，端点响应使用 `no-store`，渲染为转义后的普通正文。
+
 ### 11.4 客户端命令
 
 首版命令：
@@ -686,9 +688,13 @@ Web 安全评审必须覆盖 DNS rebinding、CSRF、跨站 WebSocket 劫持、�
 
 ### P2：实时运行与恢复
 
+2026-09-15 可读性维护：显示时拼接连续的 `assistant` 正文，保留原文换行，使用 14 px 字体并自动折行；活动日志继续逐条显示。服务端与前端均将细碎分片合并为最多 4000 字符的条目，仍保留 200 条上限；活动日志优先淘汰，不再挤掉回答开头。真正达到正文容量时保留开头并显示提示，成功保存的完整回答可从会话历史分页读取。单次较大的流式回调拆分后完整保留，Unicode 字符计数与服务端一致。
+
 状态：已于 `feature/web-workbench` 完成。P2 在 P1 的 loopback bootstrap 会话之上增加 30 秒有效、单次消费且绑定原会话的 WebSocket ticket；一个 `WorkbenchController` 负责单活动 turn、单控制租约、命令幂等、revision 校验、512 条有界重放、每客户端 64 条有界队列和退出时协作取消。
 
 浏览器现在可以提交 prompt、取消活动 turn，并实时消费流式回答、`ActivityEvent` 和经 allowlist 约束的 `RuntimeEvent` 投影。前端检测 sequence 间隙或 `snapshot_invalidated` 后先重新获取 HTTP 快照，再用新的单次 ticket 重连；断线时保留 last-known 状态并以有界退避恢复。慢客户端不会阻塞 Agent：队列溢出后仅收到失效通知并必须重同步。
+
+2026-09-15 维护：Output 本地清空只隐藏当时已有正文，后续流式回答继续显示；为每个已清空条目记录稳定 `entry_id` 与字符偏移，合并条目和 HTTP 快照重同步后仍保留清空状态，旧活动日志淘汰也不会使已隐藏回答重新出现。收到新的 `run_id` 时，前端按服务端行为重置上一轮 output、timeline 和 approval 投影；同一轮的取消或完成事件保留当前输出。
 
 P2 的 Agent 只注册 bounded read-only filesystem/Git 工具和内存 task-plan 工具。没有 PTY、任意 shell、文件写入、Git 写入或网页审批；`can_approve_tool=false` 保持服务端固定。需要副作用的工具审批仍属于 P3，不能由 P2 客户端伪造。
 
@@ -780,7 +786,9 @@ P7 基本验收后的发布整改不新增产品阶段或能力：wheel 现在�
 
 ### P8：Web 会话连续性与运行时一致性
 
-状态：已于 `feature/web-session-continuity` 完成。P8 把左侧 Sessions 从只读展示升级为真实的 `new_session` / `select_session` 控制面，并补齐 Web 与 CLI 的剩余运行时一致性。控制器启动时创建不落盘的活动会话；只有持有控制租约、revision 精确匹配且没有活动 turn/待审批时才能新建或切换。选择已保存会话后，服务端恢复完整消息、计划、最近质量检查和服务端 usage；浏览器始终只收到摘要 DTO。
+2026-09-15 维护完成：按正文容量保留实时回答，并接入选中会话的只读分页问答；历史投影仅包含用户问题与助手正文，不包含工具、thinking 或 Provider 私有状态。前端按会话 ID 与历史版本重载，并取消旧请求；分页失败保留已加载内容，可重试当前页。
+
+状态：已于 `feature/web-session-continuity` 完成。P8 把左侧 Sessions 从只读展示升级为真实的 `new_session` / `select_session` 控制面，并补齐 Web 与 CLI 的剩余运行时一致性。控制器启动时创建不落盘的活动会话；只有持有控制租约、revision 精确匹配且没有活动 turn/待审批时才能新建或切换。选择已保存会话后，服务端恢复完整消息、计划、最近质量检查和服务端 usage；快照与事件投影摘要，主区域通过独立只读分页端点展示保存的问答。
 
 每个 Web turn 仍创建独立的 Agent 与工具运行时，但会在发起模型请求前恢复控制器选中的 `SessionSnapshot`。仅成功完成的 turn 才通过 `SessionStore` 原子保存；模型/工具失败、取消或关闭不写会话。保存失败时旧快照保持不变，活动会话进入 `save_failed`，控制器禁止继续启动 turn，直到用户显式新建或重新选择会话。跨 Provider 或模型的私有状态在切换时预检并于网络请求前拒绝，不做静默丢弃或降级。`session_changed` 不携带完整 output 或嵌套 Git 文件列表，重放窗口只保留最新一条；断线客户端若跨过被取代的序号，会收到 `snapshot_invalidated` 并通过 HTTP 快照重建。
 
@@ -792,6 +800,7 @@ P8 同时将 Security Shield 观察抽到 `host_runtime.observe_host_security()`
 - 新建、选择、恢复、成功保存及显式故障恢复；
 - 失败/取消不落盘、保存失败闭锁、跨 Provider 私有状态拒绝测试；
 - 前端真实会话操作、禁用原因、持久化状态和 Security Shield 摘要；
+- 保存问答的有界只读分页、版本校验、工具/私有状态过滤及会话切换请求取消；
 - Web/CLI 共享 Security Shield 投影与更新后的威胁评审。
 
 ### P9：idle-only 同 Provider 运行时模型切换
@@ -802,7 +811,7 @@ P8 同时将 Security Shield 观察抽到 `host_runtime.observe_host_security()`
 
 会话格式升级到版本 5，以成对的 `runtime_provider` / `runtime_model` 保存可选绑定。每个成功 Web turn 都写入当前绑定，已绑定会话后续不能改写绑定；重命名、分支和导入导出继续保留。选择会话时先比较快照绑定，再逐消息检查 Provider 私有状态。当前进程发生过运行时切换后，含历史但没有绑定的 v1–v4 会话拒绝恢复，避免用户先在空会话切模型、再选择旧历史绕过门禁。跨进程打开此类旧会话仍保持既有兼容行为，直到由成功 turn 升级并绑定。
 
-前端使用原生可访问 `select`，仅在实时连接、持有控制、后端声明 `can_switch_model` 且无运行/审批时启用；禁用原因通过辅助文本说明。模型 ID 和会话绑定属于非秘密元数据，浏览器仍不会收到 API Key、endpoint、thinking、完整消息或 Provider 私有 payload。
+前端使用原生可访问 `select`，仅在实时连接、持有控制、后端声明 `can_switch_model` 且无运行/审批时启用；禁用原因通过辅助文本说明。模型 ID 和会话绑定属于非秘密元数据，浏览器仍不会收到 API Key、endpoint、thinking、完整运行时消息对象或 Provider 私有 payload；只读会话历史仅展示问题和回答正文。
 
 交付：
 

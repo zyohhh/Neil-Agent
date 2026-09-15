@@ -21,7 +21,7 @@ from neil_agent.config import Settings
 from neil_agent.errors import SessionError
 from neil_agent.events import RuntimeEventFactory
 from neil_agent.schemas import ActivityEvent, Message, TokenUsage
-from neil_agent.schemas import ModelResponse, ToolCall
+from neil_agent.schemas import ModelResponse, ToolCall, ToolResult, ThinkingContent
 from neil_agent.providers.base import ProviderId, ProviderTurnState
 from neil_agent.security import project_security_shield
 from neil_agent.session import SessionStore
@@ -1189,6 +1189,128 @@ def test_runtime_step_folds_workspace_path_to_directory(tmp_path: Path) -> None:
         if "workspace_path" in step["metadata"]
     }
     assert timeline_paths == {"src/neil_agent"}
+
+
+def test_long_streamed_answer_survives_fragment_and_activity_pressure(tmp_path: Path) -> None:
+    prefix = "回答开头不会消失。" + "逐字输出。" * 160
+    large_chunk = "长分片" * 2500
+    answer = prefix + large_chunk + "回答结尾。"
+
+    class FragmentedWorker(EchoWorker):
+        def run(self, prompt, session, cancel, on_text, on_activity, on_runtime, request_approval, **kwargs):  # type: ignore[no-untyped-def]
+            for character in prefix:
+                on_text(character)
+            for index in range(250):
+                on_activity(ActivityEvent(status="running", message=f"Activity {index}"))
+            on_text(large_chunk)
+            on_text("回答结尾。")
+            return CompletedTurnState(messages=(Message(role="user", content=prompt), Message(role="assistant", content=answer)), steps=(), latest_quality_check=None, last_usage=None)
+
+    client = _client(tmp_path, worker=FragmentedWorker())
+    _authenticate(client)
+    controller = client.app.state.workbench_controller
+    controlled = controller.handle_command("owner", ClientCommand.model_validate(_command("long-control", "acquire_control", 0)))
+    started = controller.handle_command("owner", ClientCommand.model_validate(_command("long-answer", "start_turn", controlled["revision"], {"prompt": "完整回答"})))
+    assert started["status"] == "accepted"
+    _wait_for_run(controller, "completed")
+    snapshot = client.get("/api/v1/snapshot").json()
+    output = snapshot["output"]
+    assert "".join(item["text"] for item in output if item["kind"] == "assistant") == answer
+    assert len(output) <= 200
+    assert all(len(item["text"]) <= 4000 for item in output)
+    assert not snapshot["output_truncated"]
+    active = snapshot["active_session"]
+    history = client.get("/api/v1/conversation", params={"session_id": active["session_id"], "revision": active["history_revision"]})
+    assert history.status_code == 200
+    assert "".join(item["text"] for item in history.json()["items"] if item["role"] == "assistant") == answer
+    controller.close()
+
+
+def test_output_capacity_preserves_answer_prefix_and_reports_overflow() -> None:
+    from neil_agent.web.dto import OutputEntryDto
+    from neil_agent.web.output import OutputBuffer
+
+    buffer = OutputBuffer(max_entries=2)
+    buffer.append(OutputEntryDto(kind="assistant", text="开" * 4000, timestamp=NOW))
+    for index in range(250):
+        buffer.append(OutputEntryDto(kind="activity", text=f"Activity {index}", timestamp=NOW))
+    buffer.append(OutputEntryDto(kind="assistant", text="中" * 4000, timestamp=NOW))
+    buffer.append(OutputEntryDto(kind="assistant", text="尾", timestamp=NOW))
+    assert "".join(item.text for item in buffer) == "开" * 4000 + "中" * 4000
+    assert buffer.truncated
+    buffer.clear()
+    assert tuple(buffer) == ()
+    assert not buffer.truncated
+
+
+def test_selected_conversation_is_paginated_and_excludes_private_and_tool_state(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    controller = client.app.state.workbench_controller
+    store = client.app.state.workbench_service.session_store
+    answer = "回答开头。" + "内容" * 65000 + "回答结尾。"
+    saved = store.save(store.new_session(), (
+        Message(role="user", content="过去的问题"),
+        Message(role="assistant", content="PRIVATE_TOOL_COORDINATION", tool_calls=(ToolCall(id="call-1", name="read_file", arguments={"path": "PRIVATE_TOOL_ARGUMENT"}),)),
+        Message(role="user", tool_results=(ToolResult(tool_call_id="call-1", content="PRIVATE_TOOL_RESULT"),)),
+        Message(role="assistant", content=answer, thinking=(ThinkingContent(thinking="PRIVATE_THINKING", signature="PRIVATE_SIGNATURE"),), provider_state=ProviderTurnState(provider=ProviderId.DEEPSEEK, model="deepseek-test-model", schema_version=1, payload={"private": "PRIVATE_PROVIDER_STATE"})),
+    ), (), None, create_only=True, runtime_provider=ProviderId.DEEPSEEK, runtime_model="deepseek-test-model")
+    assert client.get("/api/v1/conversation", params={"session_id": saved.session_id, "revision": 0}).status_code == 401
+    _authenticate(client)
+    controlled = controller.handle_command("owner", ClientCommand.model_validate(_command("history-control", "acquire_control", 0)))
+    selected = controller.handle_command("owner", ClientCommand.model_validate(_command("history-select", "select_session", controlled["revision"], {"session_id": saved.session_id})))
+    assert selected["status"] == "accepted"
+    active = controller.snapshot().active_session
+    assert active is not None
+    params: dict[str, Any] = {"session_id": active.session_id, "revision": active.history_revision}
+    parts = []
+    page_count = 0
+    while True:
+        response = client.get("/api/v1/conversation", params=params)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert "PRIVATE_" not in response.text
+        assert "not-exposed" not in response.text
+        page = response.json()
+        assert page["total_messages"] == 2
+        assert len(page["items"]) <= 32
+        assert all(len(item["text"]) <= 4000 for item in page["items"])
+        parts.extend(page["items"])
+        page_count += 1
+        if page["next_cursor"] is None:
+            break
+        assert page_count < 10
+        params["cursor"] = page["next_cursor"]
+    assert page_count > 1
+    assert "".join(part["text"] for part in parts if part["role"] == "user") == "过去的问题"
+    assert "".join(part["text"] for part in parts if part["role"] == "assistant") == answer
+    params.pop("cursor", None)
+    assert client.get("/api/v1/conversation", params={**params, "revision": active.history_revision + 1}).status_code == 409
+    assert client.get("/api/v1/conversation", params={**params, "session_id": "../../.env"}).status_code == 409
+    assert client.get("/api/v1/conversation", params={**params, "cursor": "999:0"}).status_code == 400
+    assert client.get("/api/v1/conversation", params=params, headers={"Origin": "https://untrusted.example"}).status_code == 403
+    controller.handle_command("owner", ClientCommand.model_validate(_command("history-new", "new_session", controller.snapshot().revision)))
+    assert client.get("/api/v1/conversation", params=params).status_code == 409
+    active = controller.snapshot().active_session
+    assert active is not None
+    empty = client.get("/api/v1/conversation", params={"session_id": active.session_id, "revision": active.history_revision})
+    assert empty.json()["items"] == []
+    controller.close()
+
+
+def test_conversation_marks_compaction_without_exposing_checkpoint_text(tmp_path: Path) -> None:
+    from neil_agent.agent import COMPACTION_CHECKPOINT_USER
+    from neil_agent.web.conversation import project_conversation
+
+    store = SessionStore(tmp_path, clock=lambda: NOW)
+    saved = store.save(store.new_session(), (
+        Message(role="user", content=COMPACTION_CHECKPOINT_USER),
+        Message(role="assistant", content="PRIVATE_COMPACTION_SUMMARY"),
+        Message(role="user", content="保留的问题"),
+        Message(role="assistant", content="保留的回答"),
+    ), (), None, create_only=True)
+    page = project_conversation(saved, session_id=saved.session_id, revision=1)
+    assert page.compacted
+    assert [item.text for item in page.items] == ["保留的问题", "保留的回答"]
 
 
 def test_current_web_turn_keeps_bounded_quality_check_history(tmp_path: Path) -> None:

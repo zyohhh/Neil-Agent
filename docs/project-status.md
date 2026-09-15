@@ -1,6 +1,6 @@
 # 项目状态与后续路线
 
-本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-09-01 审视）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
+本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-09-15 更新）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
 
 ## 当前快照
 
@@ -10,7 +10,7 @@
 | Python | ≥ 3.13；包管理 `uv` |
 | 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
-| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**829 passed**、10 skipped、16 deselected；Web 前端独立 `npm test` / Playwright |
+| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**850 passed**、11 skipped、16 deselected；Web 前端 20 项测试、5 项 Playwright 页面回归 |
 | 静态检查 | `uv run ruff check .` 与 `uv run mypy src` 为开发门禁（`pyproject.toml` 含 `[tool.ruff]` / `[tool.mypy]`） |
 | 安全加固 | 批次 1–6 **已完成** |
 | 运行时预设 | 批次 1–3、**5** 已完成；批次 4、6 可选未开始 |
@@ -33,6 +33,7 @@
 ### 其他已收口主线
 
 - 多 Provider 适配（Phase 5）、Web Workbench P0–P9、TUI 可视化 Phase 0A–4、三入口 `host_runtime` 共享装配、Windows Sandbox 契约与认证路径。
+- 2026-09-15 Web 维护：修复本地清空后隐藏新回答、分片逐条换行与长回答开头丢失；正文连续排版并优先保留，新 turn 重置上一轮运行投影。选中 session 后显示保存的问答，长历史可继续加载；仅投影用户问题和助手正文。离线门禁、20 项前端测试、5 项页面回归及桌面/手机可读性、会话切换检查通过。
 
 ## 已知缺口与风险
 
@@ -45,7 +46,7 @@
 
 CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装配 `Agent`。Web turn 复用 `WorkbenchSnapshotService.host_runtime`，不再每轮 `build_host_runtime()`。
 
-**非缺陷说明：** `test_web_workbench.py` 体量大（46 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
+**非缺陷说明：** `test_web_workbench.py` 体量大（51 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
 
 ## 必做后续（按优先级）
 

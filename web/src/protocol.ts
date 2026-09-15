@@ -1,3 +1,5 @@
+import { appendLiveOutput } from './output'
+
 export interface LiveFileNode {
   name: string
   path: string
@@ -25,6 +27,7 @@ export interface LiveActiveSession {
   persistence_status: 'unsaved' | 'saved' | 'save_failed'
   runtime_provider: string
   runtime_model: string
+  history_revision?: number
 }
 
 export interface LiveGitFile {
@@ -77,6 +80,7 @@ export interface LiveRuntimeStep {
 }
 
 export interface LiveOutputEntry {
+  entry_id?: string
   kind: 'status' | 'activity' | 'assistant' | 'warning' | 'error'
   text: string
   timestamp: string
@@ -125,6 +129,7 @@ export interface WorkbenchSnapshotV1 {
   }
   timeline: LiveRuntimeStep[]
   output: LiveOutputEntry[]
+  output_truncated?: boolean
   approval: LiveApproval | null
   git: { available: boolean; branch: string | null; revision: string | null; change_count: number; files: LiveGitFile[]; truncated: boolean }
   sessions: { available: boolean; items: LiveSession[]; invalid_count: number; total_count: number }
@@ -324,6 +329,33 @@ export const fetchLiveSnapshot = (): Promise<WorkbenchSnapshotV1 | null> => {
 }
 
 export const refreshLiveSnapshot = () => requestSnapshot(false)
+
+export interface ConversationPart {
+  message_index: number
+  role: 'user' | 'assistant'
+  text: string
+  offset: number
+  is_last_part: boolean
+}
+
+export interface ConversationPage {
+  session_id: string
+  revision: number
+  items: ConversationPart[]
+  next_cursor: string | null
+  total_messages: number
+  compacted: boolean
+}
+
+export async function fetchLiveConversation(sessionId: string, revision: number, cursor: string | null, signal: AbortSignal): Promise<ConversationPage> {
+  const query = new URLSearchParams({ session_id: sessionId, revision: String(revision) })
+  if (cursor !== null) query.set('cursor', cursor)
+  const response = await fetch(`/api/v1/conversation?${query}`, { credentials: 'include', cache: 'no-store', signal })
+  if (!response.ok) throw new Error('Conversation unavailable')
+  const page = await response.json() as ConversationPage
+  if (page.session_id !== sessionId || page.revision !== revision || !Array.isArray(page.items)) throw new Error('Conversation changed')
+  return page
+}
 
 export const fetchLiveFileTree = async (revision: string): Promise<LiveFileTree> => {
   const response = await fetch(`/api/v1/files/tree?depth=2&revision=${encodeURIComponent(revision)}`, {
@@ -571,11 +603,13 @@ export const reduceWorkbenchEvent = (
   const base = { ...snapshot, revision: event.revision, last_sequence: event.sequence }
   if (event.event_type === 'run_state') {
     const run = event.payload as unknown as LiveRun
+    const newRun = run.run_id !== snapshot.run.run_id
     const active = run.status === 'running' || run.status === 'cancelling'
     const persistenceBlocked = snapshot.active_session?.persistence_status === 'save_failed'
     return {
       ...base,
       run,
+      ...(newRun ? { timeline: [], output: [], output_truncated: false, approval: null } : {}),
       capabilities: {
         ...snapshot.capabilities,
         can_start_turn: !active && !persistenceBlocked,
@@ -625,6 +659,7 @@ export const reduceWorkbenchEvent = (
         run: { status: 'idle', run_id: null, objective: null, started_at: null, finished_at: null, error_type: null } as LiveRun,
         timeline: [],
         output: [],
+        output_truncated: false,
         approval: null,
       } : {}),
     }
@@ -661,13 +696,16 @@ export const reduceWorkbenchEvent = (
       ? String(event.payload.text ?? '')
       : String(event.payload.message ?? '')
     if (!text) return base
+    const appended = appendLiveOutput(snapshot.output, {
+      kind: event.event_type === 'assistant_text_delta' ? 'assistant' : 'activity',
+      text,
+      timestamp: event.timestamp,
+      entry_id: event.payload.entry_id as string | undefined,
+    })
     return {
       ...base,
-      output: [...snapshot.output, {
-        kind: event.event_type === 'assistant_text_delta' ? 'assistant' : 'activity',
-        text,
-        timestamp: event.timestamp,
-      }].slice(-200) as LiveOutputEntry[],
+      output: appended.output,
+      output_truncated: Boolean(snapshot.output_truncated || appended.truncated || event.payload.output_truncated),
     }
   }
   return base

@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import { act } from 'react'
 import App from './App'
-import { reduceWorkbenchEvent, resetLiveSnapshotRequestForTests, WorkbenchRealtimeClient, type WorkbenchSnapshotV1 } from './protocol'
+import { reduceWorkbenchEvent, resetLiveSnapshotRequestForTests, WorkbenchRealtimeClient, type WorkbenchEventV1, type WorkbenchSnapshotV1 } from './protocol'
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -198,6 +198,155 @@ describe('WebWorkbenchApp', () => {
     await act(async () => root.unmount())
     container.remove()
     fetchMock.mockRestore()
+  })
+
+  it('shows new live output after clearing, resyncing, and starting another turn', async () => {
+    window.history.replaceState({}, '', '/#bootstrap=one-time-secret')
+    document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
+    let live: WorkbenchSnapshotV1 = {
+      ...snapshot,
+      run: { ...snapshot.run, status: 'running', run_id: `run-${'a'.repeat(32)}` },
+      output: [
+        ...Array.from({ length: 199 }, (_, index) => ({ kind: 'activity' as const, text: `Earlier activity ${index}`, timestamp: snapshot.generated_at })),
+        { kind: 'assistant', entry_id: 'a'.repeat(32), text: 'Original answer', timestamp: snapshot.generated_at },
+      ],
+    }
+    const sockets: FakeWebSocket[] = []
+    class FakeWebSocket {
+      static readonly OPEN = 1
+      readonly readyState = FakeWebSocket.OPEN
+      readonly sent: string[] = []
+      onmessage: ((event: MessageEvent<string>) => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      constructor() { sockets.push(this) }
+      send(value: string) { this.sent.push(value) }
+      close() {}
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (input === '/api/v1/bootstrap') return new Response(null, { status: 204 })
+      return new Response(JSON.stringify(input === '/api/v1/ws-ticket' ? { ticket: 'ticket' } : live), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const deliver = (payload: unknown) => sockets[0].onmessage?.(new MessageEvent('message', { data: JSON.stringify(payload) }))
+    const emit = (eventType: WorkbenchEventV1['event_type'], payload: Record<string, unknown>) => {
+      const event: WorkbenchEventV1 = {
+        protocol_version: 1, message_type: 'event', event_type: eventType,
+        sequence: live.last_sequence + 1, revision: live.revision + 1,
+        timestamp: new Date(Date.UTC(2026, 7, 13, 8, 0, live.last_sequence + 1)).toISOString(),
+        payload: (eventType === 'assistant_text_delta' || eventType === 'activity') && !payload.entry_id
+          ? { ...payload, entry_id: (live.last_sequence + 1).toString(16).padStart(32, '0') }
+          : payload,
+      }
+      live = reduceWorkbenchEvent(live, event)
+      deliver(event)
+    }
+    try {
+      await act(async () => root.render(<App />))
+      await act(async () => {
+        await vi.waitFor(() => expect(sockets).toHaveLength(1))
+      })
+      await act(async () => deliver({
+        protocol_version: 1, message_type: 'connected', client_id: 'local-client', sequence: 0, revision: 0, control: true,
+      }))
+      const output = container.querySelector('.output-stream')!
+      const clear = container.querySelector<HTMLButtonElement>('[aria-label="Clear displayed live Agent output locally"]')!
+      expect(output.textContent).toContain('Original answer')
+      const requestCount = fetchMock.mock.calls.length
+      const commandCount = sockets[0].sent.length
+      await act(async () => clear.click())
+      expect(output.textContent).toContain('Live output cleared locally.')
+      expect(output.textContent).not.toContain('Original answer')
+      expect(fetchMock.mock.calls).toHaveLength(requestCount)
+      expect(sockets[0].sent).toHaveLength(commandCount)
+
+      await act(async () => emit('runtime_step', { step: {
+        correlation_id: 'model-request', stage: 'model_request', title: 'Model request', status: 'succeeded',
+        timestamp: snapshot.generated_at, metadata: {},
+      } }))
+      expect(output.textContent).toContain('Live output cleared locally.')
+      const answerChunks = ['我', '可以', '修复', ' bug', '。\n\n', '并运行', '测试。']
+      const answer = answerChunks.join('')
+      for (const text of answerChunks) {
+        await act(async () => emit('assistant_text_delta', { run_id: live.run.run_id, text }))
+      }
+      expect(output.textContent).toBe(answer)
+      expect(output.children).toHaveLength(1)
+
+      const refresh = Array.from(container.querySelectorAll<HTMLButtonElement>('.review-panel button')).find(button => button.textContent === 'Refresh')!
+      await act(async () => refresh.click())
+      expect(output.textContent).toBe(answer)
+      expect(output.children).toHaveLength(1)
+      await act(async () => emit('activity', { status: 'running', message: 'Running tests' }))
+      await act(async () => emit('assistant_text_delta', { run_id: live.run.run_id, text: '- lint\n- tests' }))
+      expect(Array.from(output.children, row => row.textContent)).toEqual([answer, 'Running tests', '- lint\n- tests'])
+      await act(async () => clear.click())
+      await act(async () => {
+        for (let index = 0; index < 200; index += 1) emit('assistant_text_delta', { run_id: live.run.run_id, text: `New chunk ${index};` })
+      })
+      expect(output.textContent).toContain('New chunk 0;')
+      expect(output.textContent).toContain('New chunk 199;')
+      expect(output.textContent).not.toContain(answer)
+      expect(output.children).toHaveLength(1)
+      await act(async () => clear.click())
+      await act(async () => emit('assistant_text_delta', { run_id: live.run.run_id, text: '长'.repeat(4000), entry_id: 'c'.repeat(32) }))
+      expect(output.textContent).toBe('长'.repeat(4000))
+      await act(async () => clear.click())
+      await act(async () => emit('assistant_text_delta', { run_id: live.run.run_id, text: '分段后的结尾', entry_id: 'd'.repeat(32) }))
+      expect(output.textContent).toBe('分段后的结尾')
+      await act(async () => emit('run_state', { ...live.run, status: 'completed' }))
+      expect(output.textContent).toBe('分段后的结尾')
+      await act(async () => emit('activity', { status: 'running', message: 'Old boundary log' }))
+      await act(async () => clear.click())
+      await act(async () => {
+        for (let index = 0; index < 250; index += 1) emit('activity', { status: 'running', message: `Fresh activity ${index}` })
+        emit('assistant_text_delta', { run_id: live.run.run_id, text: 'Fresh answer after logs' })
+      })
+      expect(output.textContent).toContain('Fresh answer after logs')
+      expect(output.textContent).not.toContain('分段后的结尾')
+      expect(output.textContent).not.toContain('Original answer')
+      expect(output.textContent).not.toContain('Old boundary log')
+      await act(async () => refresh.click())
+      expect(output.textContent).toContain('Fresh answer after logs')
+      expect(output.textContent).not.toContain('分段后的结尾')
+      await act(async () => clear.click())
+      await act(async () => emit('run_state', { ...live.run, run_id: `run-${'b'.repeat(32)}`, status: 'running' }))
+      expect(output.textContent).not.toContain('cleared locally')
+      await act(async () => emit('assistant_text_delta', { run_id: live.run.run_id, text: 'Answer to the next question' }))
+      expect(output.textContent).toBe('Answer to the next question')
+    } finally {
+      await act(async () => root.unmount())
+      container.remove()
+      fetchMock.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('resets transient output for a new run and preserves it through cancellation and completion', () => {
+    const previous: WorkbenchSnapshotV1 = {
+      ...snapshot,
+      run: { ...snapshot.run, status: 'completed', run_id: `run-${'a'.repeat(32)}` },
+      output: [{ kind: 'assistant', text: 'Previous answer', timestamp: snapshot.generated_at }],
+      timeline: [{ correlation_id: 'previous-turn', stage: 'agent_turn', title: 'Agent turn', status: 'succeeded', timestamp: snapshot.generated_at, metadata: {} }],
+    }
+    const event: WorkbenchEventV1 = {
+      protocol_version: 1, message_type: 'event', event_type: 'run_state', sequence: 1, revision: 1,
+      timestamp: snapshot.generated_at, payload: { ...previous.run, status: 'running', run_id: `run-${'b'.repeat(32)}` },
+    }
+    const started = reduceWorkbenchEvent(previous, event)
+    expect(started.output).toEqual([])
+    expect(started.timeline).toEqual([])
+    const streaming = { ...started, output: previous.output, timeline: previous.timeline }
+    for (const status of ['cancelling', 'completed']) {
+      const updated = reduceWorkbenchEvent(streaming, { ...event, payload: { ...started.run, status } })
+      expect(updated.output).toBe(streaming.output)
+      expect(updated.timeline).toBe(streaming.timeline)
+    }
   })
 
   it('shows a persisted session save failure as an explicit recovery state', async () => {
