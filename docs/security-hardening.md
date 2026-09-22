@@ -2,7 +2,7 @@
 
 本文把 2026-08-27 全树审查的建议实现顺序写成可执行批次。目标是补齐 **Neil 自己已经更严的沙箱快照策略** 与 **host 工具之间的缺口**，并收紧审批/Web/配置面，而不是引入任意 Bash 或默认打开 OS 沙箱。
 
-对照背景见 [`claude-code-review.md`](claude-code-review.md)。审查结论：没有远程 RCE 或 Workbench XSS；Neil 是应用层白名单 + 预览绑定写操作 + 可选认证 WSB，不是默认 OS 沙箱 Agent。
+对照背景见 [`claude-code-review.md`](claude-code-review.md)。2026-08-27 历史审查未发现远程 RCE 或 Workbench XSS；2026-09-22 补充审计发现并修复了本地仓库 Git 过滤器执行、敏感 diff 过滤与 Web 认证边界问题，详见 [审计记录](security-review-2026-09-22.md)。Neil 是应用层白名单 + 预览绑定写操作 + 可选认证 WSB，不是默认 OS 沙箱 Agent。
 
 ## 原则
 
@@ -22,6 +22,7 @@
 | 4 | 已完成 | Web `command_id` 与 `LLM_BASE_URL` | 命令结果缓存按 `client_id` 隔离，ID 不可猜测；`LLM_BASE_URL` 有 host 策略或显式危险开关；生产 `TRUSTED_HOSTS` 去掉 `testserver` |
 | 5 | 已完成 | `git_diff` / `git_status` 内容过滤 | 只读 Git 输出不包含 denylist 路径的 diff hunk；与批次 1 的路径拒绝互补 |
 | 6 | 已完成 | 写路径 `O_NOFOLLOW` | 普通 `write_file` / guest staging 与检查点恢复一样拒绝 symlink 写穿 |
+| 7 | 已完成 | Git 检查/审批与 Web 认证边界 | 禁止只读检查执行过滤器和发现父仓库；覆盖转义/合并 diff；审批绑定未脱敏内容；无效凭据不破坏登录，WebSocket 随会话到期 |
 
 批次 1 完成后，编号可视化 / Web P0–P9 仍保持已收口；本文件是后续安全工作的唯一检查清单。批次 1–4 完成后的**交叉缺口与优先级**见 [`project-status.md`](project-status.md)。
 
@@ -85,6 +86,17 @@ Loopback + `SameSite=strict` 保持不变。
 
 **已实现：** `FileSystemTools._lexical_workspace_path` + `_assert_write_path_safe`；`_atomic_write` 与 guest staging 使用 `O_NOFOLLOW`（可用时）并拒绝符号链接目标。
 
+## 批次 7：Git 与 Web 入口复核（2026-09-22）
+
+- 只读 Git 与审批预览先读取 filter 配置键，再以本次命令覆盖关闭 `clean` / `process` / `required`；不执行驱动，不修改仓库配置。配置读取失败或超过上限则停止检查。
+- 每条 Git 命令固定 `GIT_WORK_TREE` 并设置父目录发现边界。工作区自身没有仓库入口时，不读取父仓库；实际 Git worktree 的 `.git` 文件入口仍受支持。
+- 固定 diff 前缀、禁用颜色、使用完整对象 ID；按 Git C 转义和八进制字节解码路径，处理普通及 combined diff。无法识别的 diff 隐去正文，失败与超时的部分输出也经过过滤。
+- 提交 `Change-ID` 使用未脱敏完整 diff 的 SHA-256；显示仍脱敏，被隐藏内容变化也使旧审批失效。
+- bootstrap 只在校验成功或超时后消耗；非 ASCII 凭据返回认证失败。WebSocket 保留父会话绑定，收发与空闲等待均受八小时会话期限约束，到期关闭并清理控制租约、订阅和协程。
+- 前端停止时取消 ticket 请求；迟到响应、旧连接事件不再打开连接或更新已关闭视图。
+
+验证与复现条件见 [审计记录](security-review-2026-09-22.md)。
+
 ## 明确不做
 
 - 为对齐 Claude Code 而增加任意 Bash / MCP。
@@ -106,4 +118,4 @@ Loopback + `SameSite=strict` 保持不变。
 - [`architecture.md`](architecture.md) — 分层与文件安全边界
 - [`host-runtime.md`](host-runtime.md) — 三入口能力矩阵
 - [`runtime-profile.md`](runtime-profile.md) — 对照 DeepSeek Harness 的运行时预设（并行路线，不替代本清单）
-- [`project-status.md`](project-status.md) — 汇总安全批次 5–6 与运行时缺口的优先级
+- [`project-status.md`](project-status.md) — 汇总安全批次与运行时缺口的优先级

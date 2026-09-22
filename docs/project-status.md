@@ -1,6 +1,6 @@
 # 项目状态与后续路线
 
-本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-09-15 更新）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
+本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-09-22 更新）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
 
 ## 当前快照
 
@@ -10,9 +10,9 @@
 | Python | ≥ 3.13；包管理 `uv` |
 | 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
-| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**850 passed**、11 skipped、16 deselected；Web 前端 20 项测试、5 项 Playwright 页面回归 |
+| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**893 passed**、11 skipped、16 deselected；Web 前端 22 项测试、5 项 Playwright 页面回归 |
 | 静态检查 | `uv run ruff check .` 与 `uv run mypy src` 为开发门禁（`pyproject.toml` 含 `[tool.ruff]` / `[tool.mypy]`） |
-| 安全加固 | 批次 1–6 **已完成** |
+| 安全加固 | 批次 1–7 **已完成** |
 | 运行时预设 | 批次 1–3、**5** 已完成；批次 4、6 可选未开始 |
 
 ## 已完成能力（摘要）
@@ -23,6 +23,7 @@
 - **批次 2**：质量检查明确为宿主执行；去掉写入后自动催促检查。
 - **批次 3**：非交互 `ApprovalStore.consume()`；CLI/Web 批准前复核 `AGENTS.md` 摘要。
 - **批次 4**：Web `command_id` 按 `client_id` 隔离；`LLM_ALLOW_CUSTOM_BASE_URL`；生产 `TRUSTED_HOSTS` 不含 `testserver`。
+- **批次 7**：Git 检查禁止过滤器执行与父仓库发现，敏感 diff 失败关闭，提交审批绑定原始内容；Web 凭据健壮性、连接到期与前端连接清理。见 [2026-09-22 审计记录](security-review-2026-09-22.md)。
 
 ### 运行时预设（[`runtime-profile.md`](runtime-profile.md)）
 
@@ -46,7 +47,7 @@
 
 CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装配 `Agent`。Web turn 复用 `WorkbenchSnapshotService.host_runtime`，不再每轮 `build_host_runtime()`。
 
-**非缺陷说明：** `test_web_workbench.py` 体量大（51 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
+**非缺陷说明：** `test_web_workbench.py` 体量大（61 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
 
 ## 必做后续（按优先级）
 
@@ -94,6 +95,7 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | [`architecture.md`](architecture.md) | 分层架构与模块职责 |
 | [`host-runtime.md`](host-runtime.md) | 三入口装配与能力矩阵 |
 | [`security-hardening.md`](security-hardening.md) | 安全加固批次清单 |
+| [`security-review-2026-09-22.md`](security-review-2026-09-22.md) | Git 与 Web 审计发现、复现条件、修复及验证范围 |
 | [`runtime-profile.md`](runtime-profile.md) | 运行时预设与只读子任务 |
 | [`claude-code-review.md`](claude-code-review.md) | 与 Claude Code 对照 |
 | [`web-workbench-development.md`](web-workbench-development.md) | Web 产品与协议 |

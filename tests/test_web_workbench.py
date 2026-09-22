@@ -13,6 +13,7 @@ from threading import Event
 from time import monotonic, sleep
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
@@ -916,7 +917,80 @@ def test_bootstrap_exchange_is_atomic_and_csrf_and_ticket_expire() -> None:
 
     now += timedelta(seconds=30)
 
-    assert store.consume_ws_ticket(ticket.token) is False
+    assert store.consume_ws_ticket(ticket.token) is None
+
+
+@pytest.mark.parametrize("credential", [None, "wrong", "é", "\ud800"])
+def test_invalid_credentials_do_not_crash_or_consume_launch_secret(credential: str | None) -> None:
+    store = BootstrapSessionStore(BOOTSTRAP)
+    assert store.exchange(credential) is None
+    session = store.exchange(BOOTSTRAP)
+    assert session is not None
+    assert not store.validate(credential)
+    assert not store.validate_csrf(session.token, credential)
+    assert store.consume_ws_ticket(credential) is None
+    assert store.validate(session.token)
+    assert store.exchange(BOOTSTRAP) is None
+
+
+def test_non_ascii_http_credentials_are_rejected_without_server_error(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    wrong = client.post("/api/v1/bootstrap", headers={"Origin": "http://127.0.0.1:5173", "X-Neil-Bootstrap": "wrong"})
+    assert wrong.status_code == 401
+    _authenticate(client)
+    response = client.get("/api/v1/snapshot", headers={"cookie": 'neil_workbench_session="\\351"'})
+    assert response.status_code == 401
+    response = client.post("/api/v1/ws-ticket", headers={
+        "Origin": "http://127.0.0.1:5173", "X-Neil-CSRF": "invalid",
+        "cookie": 'neil_workbench_csrf="\\351"',
+    })
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("trigger", ["command", "event"])
+def test_expired_websocket_cannot_execute_or_observe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trigger: str) -> None:
+    now = NOW
+    store = BootstrapSessionStore(BOOTSTRAP, clock=lambda: now)
+    monkeypatch.setattr("neil_agent.web.app.BootstrapSessionStore", lambda secret: store)
+    client = _client(tmp_path)
+    _authenticate(client)
+    controller = client.app.state.workbench_controller
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        now += timedelta(hours=8)
+        if trigger == "command":
+            socket.send_json(_command("expired-command", "acquire_control", connected["revision"]))
+        else:
+            controller._publish("activity", {"message": "SYNTHETIC_PRIVATE_EVENT"})
+        with pytest.raises(WebSocketDisconnect) as disconnected:
+            socket.receive_json()
+        assert disconnected.value.code == 4401
+    assert not controller.connected_message(connected["client_id"], 0)["control"]
+    assert connected["client_id"] not in controller._subscribers
+
+
+def test_idle_websocket_expires_and_releases_control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("neil_agent.web.security.SESSION_TTL", timedelta(seconds=1))
+    client = _client(tmp_path)
+    _authenticate(client)
+    controller = client.app.state.workbench_controller
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_json(_command("take-control-before-expiry", "acquire_control", connected["revision"]))
+        while socket.receive_json()["message_type"] != "command_result":
+            pass
+        with pytest.raises(WebSocketDisconnect) as disconnected:
+            while True:
+                assert socket.receive_json()["event_type"] == "control_changed"
+        assert disconnected.value.code == 4401
+    assert not controller.connected_message(connected["client_id"], 0)["control"]
+    assert connected["client_id"] not in controller._subscribers
 
 
 def _ticket(client: TestClient) -> str:
@@ -1036,6 +1110,21 @@ def test_websocket_rejects_oversized_commands(tmp_path: Path) -> None:
             raise AssertionError("oversized WebSocket command remained connected")
         except WebSocketDisconnect as disconnect:
             assert disconnect.code == 4409
+
+
+@pytest.mark.parametrize("payload", ["[" * 2000 + "0" + "]" * 2000, "9" * 5000])
+def test_websocket_rejects_extreme_json_without_losing_connection(tmp_path: Path, payload: str) -> None:
+    client = _client(tmp_path)
+    _authenticate(client)
+    with client.websocket_connect(
+        f"/api/v1/events?ticket={_ticket(client)}&after=0",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    ) as socket:
+        connected = socket.receive_json()
+        socket.send_text(payload)
+        assert socket.receive_json()["code"] == "invalid_command"
+        socket.send_json(_command("ping-after-invalid", "ping", connected["revision"]))
+        assert socket.receive_json()["detail"] == "pong"
 
 
 def test_command_result_cache_isolated_per_client(tmp_path: Path) -> None:

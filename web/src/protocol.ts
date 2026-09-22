@@ -415,6 +415,7 @@ export class WorkbenchRealtimeClient {
   private reconnectTimer: number | null = null
   private reconnectDelay = 400
   private stopped = false
+  private ticketRequest: AbortController | null = null
   private revision = 0
   private lastSequence = 0
   private clientId: string | null = null
@@ -435,6 +436,9 @@ export class WorkbenchRealtimeClient {
 
   stop() {
     this.stopped = true
+    this.ticketRequest?.abort()
+    this.ticketRequest = null
+    this.pendingCommands.clear()
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer)
     this.socket?.close(1000, 'Workbench view closed')
     this.socket = null
@@ -473,19 +477,29 @@ export class WorkbenchRealtimeClient {
     this.handlers.onConnection('connecting')
     const csrfToken = getCookie('neil_workbench_csrf')
     if (!csrfToken) throw new Error('Realtime CSRF token unavailable')
+    this.ticketRequest?.abort()
+    const request = new AbortController()
+    this.ticketRequest = request
     const ticketResponse = await fetch('/api/v1/ws-ticket', {
       method: 'POST',
       headers: { 'X-Neil-CSRF': csrfToken },
       credentials: 'include',
       cache: 'no-store',
+      signal: request.signal,
     })
     if (!ticketResponse.ok) throw new Error('Realtime ticket unavailable')
     const ticketPayload = await ticketResponse.json() as { ticket: string }
+    if (this.stopped || request.signal.aborted) return
+    this.ticketRequest = null
     const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(`${scheme}//${window.location.host}/api/v1/events?ticket=${encodeURIComponent(ticketPayload.ticket)}&after=${this.lastSequence}`)
     this.socket = socket
-    socket.onmessage = (message) => this.handleMessage(message)
-    socket.onclose = () => this.handleDisconnect()
+    socket.onmessage = (message) => {
+      if (!this.stopped && this.socket === socket) this.handleMessage(message)
+    }
+    socket.onclose = () => {
+      if (this.socket === socket) this.handleDisconnect()
+    }
     socket.onerror = () => socket.close()
   }
 
@@ -560,7 +574,9 @@ export class WorkbenchRealtimeClient {
   private invalidate() {
     if (this.resyncing || this.stopped) return
     this.resyncing = true
-    this.socket?.close()
+    const previous = this.socket
+    this.socket = null
+    previous?.close()
     void this.resync()
   }
 
@@ -569,6 +585,7 @@ export class WorkbenchRealtimeClient {
     this.handlers.onConnection('connecting')
     try {
       const snapshot = await refreshLiveSnapshot()
+      if (this.stopped) return
       if (!snapshot) throw new Error('Session expired')
       this.revision = snapshot.revision
       this.lastSequence = snapshot.last_sequence

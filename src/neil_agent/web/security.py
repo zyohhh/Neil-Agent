@@ -16,6 +16,14 @@ MAX_SESSIONS = 8
 MAX_WS_TICKETS = 16
 
 
+def _tokens_match(expected: str, presented: str | None) -> bool:
+    return (
+        presented is not None
+        and presented.isascii()
+        and compare_digest(expected, presented)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class WebSession:
     token: str
@@ -39,9 +47,9 @@ class BootstrapSessionStore:
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if len(bootstrap_secret) < 32:
+        if len(bootstrap_secret) < 32 or not bootstrap_secret.isascii():
             raise ValueError(
-                "Web Workbench bootstrap secret must be at least 32 characters"
+                "Web Workbench bootstrap secret must be at least 32 ASCII characters"
             )
         self._bootstrap_secret: str | None = bootstrap_secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -56,14 +64,12 @@ class BootstrapSessionStore:
         with self._lock:
             now = self._now()
             expected = self._bootstrap_secret
-            self._bootstrap_secret = None
-            if (
-                expected is None
-                or presented_secret is None
-                or now >= self._bootstrap_expires_at
-                or not compare_digest(expected, presented_secret)
-            ):
+            if now >= self._bootstrap_expires_at:
+                self._bootstrap_secret = None
                 return None
+            if expected is None or not _tokens_match(expected, presented_secret):
+                return None
+            self._bootstrap_secret = None
             self._purge(now)
             if len(self._sessions) >= MAX_SESSIONS:
                 oldest = min(self._sessions.values(), key=lambda item: item.expires_at)
@@ -100,8 +106,20 @@ class BootstrapSessionStore:
             now = self._now()
             self._purge(now)
             session = self._find_session(session_token)
-            return session is not None and compare_digest(
+            return session is not None and _tokens_match(
                 session.csrf_token, presented_csrf
+            )
+
+    def remaining_seconds(self, token: str) -> float:
+        """Return the fixed session lifetime remaining, without renewing it."""
+
+        with self._lock:
+            now = self._now()
+            self._purge(now)
+            session = self._find_session(token)
+            return (
+                0.0 if session is None
+                else max(0.0, (session.expires_at - now).total_seconds())
             )
 
     def issue_ws_ticket(self, session_token: str | None) -> WebSocketTicket | None:
@@ -128,29 +146,26 @@ class BootstrapSessionStore:
             self._ws_tickets[token] = ticket
             return ticket
 
-    def consume_ws_ticket(self, presented_ticket: str | None) -> bool:
+    def consume_ws_ticket(self, presented_ticket: str | None) -> WebSession | None:
         """Consume an exact ticket once and revalidate its parent session."""
 
         with self._lock:
             if presented_ticket is None:
-                return False
+                return None
             now = self._now()
             self._purge(now)
             match = next(
                 (
                     token
                     for token in self._ws_tickets
-                    if compare_digest(token, presented_ticket)
+                    if _tokens_match(token, presented_ticket)
                 ),
                 None,
             )
             if match is None:
-                return False
+                return None
             ticket = self._ws_tickets.pop(match)
-            return (
-                ticket.expires_at > now
-                and self._find_session(ticket.session_token) is not None
-            )
+            return self._find_session(ticket.session_token)
 
     def _purge(self, now: datetime) -> None:
         expired = [
@@ -179,7 +194,7 @@ class BootstrapSessionStore:
             (
                 session
                 for token, session in self._sessions.items()
-                if compare_digest(token, presented_token)
+                if _tokens_match(token, presented_token)
             ),
             None,
         )

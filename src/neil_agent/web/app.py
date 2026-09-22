@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
 
+from anyio import CancelScope
 from fastapi import (
     Cookie,
     Depends,
@@ -113,9 +114,9 @@ def create_app(
 ) -> FastAPI:
     """Create an authenticated loopback API and one realtime Agent controller."""
 
-    if len(bootstrap_token) < 32:
+    if len(bootstrap_token) < 32 or not bootstrap_token.isascii():
         raise ValueError(
-            "Web Workbench bootstrap token must contain at least 32 characters"
+            "Web Workbench bootstrap token must contain at least 32 ASCII characters"
         )
     accepted_origins = _validated_origins(allowed_origins)
     accepted_hosts = frozenset(trusted_hosts)
@@ -245,7 +246,7 @@ def create_app(
         if (
             csrf_cookie is None
             or csrf_header is None
-            or not secrets.compare_digest(csrf_cookie, csrf_header)
+            or not session_store.validate_csrf(token, csrf_cookie)
             or not session_store.validate_csrf(token, csrf_header)
         ):
             raise HTTPException(status_code=403, detail="Valid CSRF token required")
@@ -309,11 +310,12 @@ def create_app(
     ) -> None:
         origin = websocket.headers.get("origin")
         host = websocket.headers.get("host", "").split(":", 1)[0]
-        if (
-            origin not in accepted_origins
-            or host not in accepted_hosts
-            or not session_store.consume_ws_ticket(ticket)
-        ):
+        session = (
+            session_store.consume_ws_ticket(ticket)
+            if origin in accepted_origins and host in accepted_hosts
+            else None
+        )
+        if session is None:
             await websocket.close(code=4401, reason="Local authentication required")
             return
         await websocket.accept()
@@ -330,21 +332,25 @@ def create_app(
 
         async def send(message: dict[str, object]) -> None:
             async with send_lock:
+                if not session_store.validate(session.token):
+                    raise TimeoutError("Local session expired")
                 await websocket.send_json(message)
-
-        await send(workbench_controller.connected_message(client_id, after))
 
         async def send_events() -> None:
             while True:
                 event = await subscription.queue.get()
                 await send(event)
 
-        sender = asyncio.create_task(send_events())
-        try:
+        async def receive_commands() -> None:
             while True:
-                message = await websocket.receive()
+                remaining = session_store.remaining_seconds(session.token)
+                if remaining <= 0:
+                    raise TimeoutError("Local session expired")
+                message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
                 if message["type"] == "websocket.disconnect":
                     break
+                if not session_store.validate(session.token):
+                    raise TimeoutError("Local session expired")
                 raw_payload = message.get("text")
                 if not isinstance(raw_payload, str):
                     await send(
@@ -367,7 +373,7 @@ def create_app(
                     break
                 try:
                     payload = json.loads(raw_payload)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
                     await send(
                         {
                             "protocol_version": 1,
@@ -388,11 +394,27 @@ def create_app(
                     )
                     continue
                 await send(workbench_controller.handle_command(client_id, command))
+
+        tasks: list[asyncio.Task[None]] = []
+        try:
+            await send(workbench_controller.connected_message(client_id, after))
+            tasks = [
+                asyncio.create_task(send_events()),
+                asyncio.create_task(receive_commands()),
+            ]
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                await task
+        except TimeoutError:
+            await websocket.close(code=4401, reason="Local session expired")
         except WebSocketDisconnect:
             pass
         finally:
-            sender.cancel()
             workbench_controller.unsubscribe(client_id)
+            for task in tasks:
+                task.cancel()
+            with CancelScope(shield=True):
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     if static_bundle is not None:
         app.mount(

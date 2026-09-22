@@ -460,6 +460,78 @@ describe('WebWorkbenchApp', () => {
     expect(reduced.provider.available_models).toEqual(['deepseek-fast', 'deepseek-live'])
   })
 
+  it('does not open a connection when a ticket response arrives after the view closes', async () => {
+    document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
+    const opened = vi.fn()
+    class FakeWebSocket {
+      constructor() { opened() }
+      close() {}
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    let deliverTicket!: (response: Response) => void
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(resolve => { deliverTicket = resolve }))
+    const onConnection = vi.fn()
+    const client = new WorkbenchRealtimeClient({
+      onConnection, onSnapshot: vi.fn(), onEvent: vi.fn(), onControl: vi.fn(), onCommandError: vi.fn(),
+    })
+    try {
+      client.start(snapshot)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      client.stop()
+      deliverTicket(new Response(JSON.stringify({ ticket: 'late-ticket' })))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(opened).not.toHaveBeenCalled()
+      expect(onConnection).toHaveBeenCalledTimes(1)
+    } finally {
+      client.stop()
+      fetchMock.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('discards late snapshots and events after the realtime view closes', async () => {
+    document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
+    const sockets: FakeWebSocket[] = []
+    class FakeWebSocket {
+      static OPEN = 1
+      readyState = 1
+      onmessage: ((event: MessageEvent<string>) => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      constructor() { sockets.push(this) }
+      send() {}
+      close() {}
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    let deliverSnapshot!: (response: Response) => void
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      if (input === '/api/v1/ws-ticket') return new Response(JSON.stringify({ ticket: 'ticket' }))
+      return new Promise(resolve => { deliverSnapshot = resolve })
+    })
+    const handlers = { onConnection: vi.fn(), onSnapshot: vi.fn(), onEvent: vi.fn(), onControl: vi.fn(), onCommandError: vi.fn() }
+    const client = new WorkbenchRealtimeClient(handlers)
+    try {
+      client.start(snapshot)
+      await vi.waitFor(() => expect(sockets).toHaveLength(1))
+      const deliver = (event_type: string) => sockets[0].onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({ message_type: 'event', event_type, sequence: 1, revision: 1, payload: {} }),
+      }))
+      deliver('snapshot_invalidated')
+      expect(deliverSnapshot).toBeDefined()
+      client.stop()
+      deliverSnapshot(new Response(JSON.stringify(snapshot)))
+      deliver('activity')
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(handlers.onSnapshot).not.toHaveBeenCalled()
+      expect(handlers.onEvent).not.toHaveBeenCalled()
+      expect(sockets).toHaveLength(1)
+    } finally {
+      client.stop()
+      fetchMock.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('sends an allowlisted runtime model command through the realtime protocol', async () => {
     document.cookie = 'neil_workbench_csrf=test-csrf-token; Path=/'
     const sockets: FakeWebSocket[] = []

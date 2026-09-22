@@ -331,12 +331,10 @@ class ShellTools:
             "--no-textconv",
             "--no-renames",
         )
-        staged_diff = self._sanitize_git_output(
-            staged_diff_command,
-            self._capture(staged_diff_command, truncate=False),
-        )
-        if not staged_diff:
+        raw_staged_diff = self._capture(staged_diff_command, truncate=False)
+        if not raw_staged_diff:
             raise ToolError("暂存区为空，无法创建提交。")
+        staged_diff = self._sanitize_git_output(staged_diff_command, raw_staged_diff)
         staged_stat = self._capture(
             self._git_command(
                 "diff",
@@ -347,7 +345,7 @@ class ShellTools:
             )
         )
         command = self._git_commit_command(commit_message)
-        change_id = sha256(staged_diff.encode("utf-8")).hexdigest()[:16]
+        change_id = sha256(raw_staged_diff.encode("utf-8")).hexdigest()
         preview_body = (
             "将创建本地 Git 提交；不会推送到远端。\n"
             f"工作目录：{self.root}\n"
@@ -383,28 +381,21 @@ class ShellTools:
         return result
 
     def _run_git(self, command: list[str]) -> str:
-        completed = self._run_process(command)
-        stdout = self._sanitize_git_output(command, completed.stdout)
-        stderr = completed.stderr
-        result = self._format_process_result(
-            command,
-            subprocess.CompletedProcess(
-                args=completed.args,
-                returncode=completed.returncode,
-                stdout=stdout,
-                stderr=stderr,
-            ),
-        )
-        if completed.returncode != 0:
-            raise ToolError(result)
-        return result
+        return self._run(command)
 
     @staticmethod
     def _git_subcommand(command: list[str]) -> str | None:
-        if "status" in command:
-            return "status"
-        if "diff" in command:
-            return "diff"
+        if command[0] != "git":
+            return None
+        index = 1
+        while index < len(command):
+            argument = command[index]
+            if argument == "-c":
+                index += 2
+            elif argument.startswith("-"):
+                index += 1
+            else:
+                return argument if argument in {"status", "diff"} else None
         return None
 
     def _sanitize_git_output(self, command: list[str], stdout: str) -> str:
@@ -451,11 +442,19 @@ class ShellTools:
         timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         effective_timeout = self.timeout if timeout is None else timeout
+        environment = self._safe_environment()
+        if command[0] == "git":
+            # A directory inside another repository is still a separate workspace.
+            environment["GIT_CEILING_DIRECTORIES"] = str(self.root.parent)
+            environment["GIT_WORK_TREE"] = str(self.root)
+            if self._git_subcommand(command) is not None and (self.root / ".git").exists():
+                overrides = self._readonly_filter_overrides(environment, effective_timeout)
+                command = [command[0], *overrides, *command[1:]]
         try:
             return subprocess.run(
                 command,
                 cwd=self.root,
-                env=self._safe_environment(),
+                env=environment,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -467,7 +466,7 @@ class ShellTools:
                 creationflags=self._creation_flags(),
             )
         except subprocess.TimeoutExpired as error:
-            output = self._timeout_output(error)
+            output = self._sanitize_git_output(command, self._timeout_output(error))
             message = (
                 f"Command: {subprocess.list2cmdline(command)}\n"
                 f"Working directory: {self.root}\n"
@@ -486,7 +485,9 @@ class ShellTools:
         command: list[str],
         completed: subprocess.CompletedProcess[str],
     ) -> str:
-        output = self._combined_output(completed.stdout, completed.stderr)
+        output = self._combined_output(
+            self._sanitize_git_output(command, completed.stdout), completed.stderr
+        )
         return (
             f"Command: {subprocess.list2cmdline(command)}\n"
             f"Working directory: {self.root}\n"
@@ -496,13 +497,70 @@ class ShellTools:
 
     @staticmethod
     def _git_command(*arguments: str) -> list[str]:
+        display_options = (
+            ["-c", "color.status=false"]
+            if arguments and arguments[0] == "status"
+            else []
+        )
+        if arguments and arguments[0] == "diff":
+            arguments = (
+                "diff",
+                "--no-color",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--no-relative",
+                "--full-index",
+                *arguments[1:],
+            )
         return [
             "git",
             "--no-pager",
             "-c",
             "core.fsmonitor=false",
+            *display_options,
             *arguments,
         ]
+
+    def _readonly_filter_overrides(
+        self, environment: dict[str, str], timeout: float
+    ) -> list[str]:
+        """Disable external conversion drivers before inspection, including previews."""
+
+        try:
+            result = subprocess.run(
+                self._git_command(
+                    "config", "--null", "--name-only", "--get-regexp",
+                    r"^filter\..*\.(clean|process|required)$",
+                ),
+                cwd=self.root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="strict",
+                timeout=timeout,
+                check=False,
+                shell=False,
+                creationflags=self._creation_flags(),
+            )
+        except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
+            raise ToolError("无法安全检查 Git filter 配置，已停止只读检查。") from error
+        if result.returncode not in {0, 1} or len(result.stdout) > 16_000:
+            raise ToolError("无法安全检查 Git filter 配置，已停止只读检查。")
+        drivers = sorted(
+            {key.rsplit(".", 1)[0] for key in result.stdout.split("\0") if key}
+        )
+        overrides: list[str] = []
+        for driver in drivers:
+            overrides.extend([
+                "-c", f"{driver}.clean=",
+                "-c", f"{driver}.process=",
+                "-c", f"{driver}.required=false",
+            ])
+        if sum(len(argument) + 3 for argument in overrides) > 24_000:
+            raise ToolError("Git filter 配置超出安全检查上限。")
+        return overrides
 
     def _git_status_command(self) -> list[str]:
         return self._git_command(
