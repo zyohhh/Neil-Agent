@@ -50,6 +50,7 @@ from .events import (
 )
 from .hooks import HookEvent, LifecycleHooks
 from .instructions import InstructionScopeUpdate
+from .providers.base import completion_error
 from .schemas import (
     ActivityEvent,
     ActivityStatus,
@@ -503,10 +504,15 @@ class Agent:
         )
         model_finished = False
         try:
+            check_execution_budget()
+            request_messages = self._budgeted_request_messages(
+                (user_message,), system_prompt=self._system_prompt, tools=(),
+            )
             response = self._llm.complete(
                 request_messages,
                 system_prompt=self._system_prompt,
             )
+            check_execution_budget()
             usage = (
                 self._llm.last_usage
                 if isinstance(self._llm, UsageReportingChatModel)
@@ -629,6 +635,12 @@ class Agent:
 
         while True:
             check_execution_budget()
+            budgeted_system_prompt = self._system_prompt
+            request_messages = self._budgeted_request_messages(
+                pending_messages,
+                system_prompt=budgeted_system_prompt,
+                tools=tool_definitions,
+            )
             try:
                 hook_context = self._before_model_hook(
                     model_round=tool_rounds + 1,
@@ -652,6 +664,15 @@ class Agent:
                     "生命周期 hook 已附加模型上下文",
                     (f"大小：{len(hook_context)} 字符",),
                 )
+            if request_system_prompt != budgeted_system_prompt:
+                request_messages = self._budgeted_request_messages(
+                    pending_messages,
+                    system_prompt=request_system_prompt,
+                    tools=tool_definitions,
+                )
+            request_instruction_digest = approval_context_digest(
+                self._project_instructions,
+            )
             model_activity = (
                 "分析用户请求" if tool_rounds == 0 else "根据工具结果继续处理"
             )
@@ -677,6 +698,7 @@ class Agent:
             )
             model_response: ModelResponse | None = None
             try:
+                check_execution_budget()
                 for event in self._llm.stream(
                     request_messages,
                     system_prompt=request_system_prompt,
@@ -687,6 +709,16 @@ class Agent:
                         yield event
                     else:
                         model_response = event
+                check_execution_budget()
+                if model_response is not None:
+                    terminal_error = completion_error(
+                        model_response.stop_reason,
+                        has_tool_calls=bool(model_response.tool_calls),
+                        # Legacy ChatModel implementations omit terminal metadata.
+                        allow_unknown="stop_reason" not in model_response.model_fields_set,
+                    )
+                    if terminal_error is not None:
+                        raise AgentError(terminal_error)
             except Exception as error:
                 self._finish_runtime_span(
                     model_span,
@@ -791,6 +823,7 @@ class Agent:
                     self._execute_tool_call(
                         call,
                         parent_event_id=self._span_event_id(model_span),
+                        instruction_digest=request_instruction_digest,
                     )
                     for call in model_response.tool_calls
                 ),
@@ -814,6 +847,45 @@ class Agent:
     def _request_messages(self, user_message: Message) -> list[Message]:
         selection = self._context_selection((user_message,))
         return [*selection.messages, user_message]
+
+    def _budgeted_request_messages(
+        self,
+        current_chain: Sequence[Message],
+        *,
+        system_prompt: str,
+        tools: Sequence[ToolDefinition],
+    ) -> list[Message]:
+        """Re-select whole history rounds for every request, including hook context."""
+
+        current_chars = estimate_fixed_chars(
+            system_prompt, tools
+        ) + estimate_messages_chars(
+            current_chain,
+        )
+        current_tokens = (
+            0
+            if self._max_context_tokens is None
+            else estimate_fixed_tokens(system_prompt, tools)
+            + estimate_messages_tokens(current_chain)
+        )
+        if current_chars > self._max_context_chars or (
+            self._max_context_tokens is not None
+            and current_tokens > self._max_context_tokens
+        ):
+            raise AgentError(
+                "当前回合上下文超过本地请求预算，未发送下一次模型请求。"
+                "请减少输入或使用有界搜索结果；工具调用与结果不会被拆开或静默截断。"
+            )
+        history = self._select_history(
+            max_rounds=self._max_rounds - 1,
+            max_chars=self._max_context_chars - current_chars,
+            max_tokens=(
+                None
+                if self._max_context_tokens is None
+                else self._max_context_tokens - current_tokens
+            ),
+        )
+        return [*history.messages, *current_chain]
 
     def _context_selection(
         self,
@@ -1081,6 +1153,7 @@ class Agent:
         call: ToolCall,
         *,
         parent_event_id: str | None = None,
+        instruction_digest: str | None = None,
     ) -> ToolResult:
         started_at = monotonic()
         requires_approval = (
@@ -1112,6 +1185,7 @@ class Agent:
                 requires_approval=requires_approval,
                 tool_span=tool_span,
                 quality_span=quality_span,
+                instruction_digest=instruction_digest,
             )
 
     def _execute_tool_call_body(
@@ -1123,6 +1197,7 @@ class Agent:
         requires_approval: bool,
         tool_span: RuntimeSpan | None,
         quality_span: RuntimeSpan | None,
+        instruction_digest: str | None,
     ) -> ToolResult:
         check_execution_budget()
         hook_result = self._before_tool_hook(call)
@@ -1137,7 +1212,18 @@ class Agent:
                 skipped=True,
                 skipped_reason="生命周期 hook 拒绝或失败，未执行",
             )
-        scope_result = self._refresh_instruction_scope(call)
+        scope_result = (
+            ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    "项目指令已更新，本批剩余工具操作未执行；"
+                    "请在下一轮模型请求中依据新规则重新决定。"
+                ),
+            )
+            if instruction_digest is not None
+            and instruction_digest != approval_context_digest(self._project_instructions)
+            else self._refresh_instruction_scope(call)
+        )
         if scope_result is not None:
             result = self._after_tool_hook(call, scope_result)
             self._finish_runtime_tool_spans(
@@ -1167,6 +1253,7 @@ class Agent:
             )
 
         if not requires_approval:
+            check_execution_budget()
             result = self._registry.execute(call)
             return self._finish_tool_call(
                 call,

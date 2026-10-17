@@ -32,6 +32,7 @@ from .context import (
 )
 from .checkpoint import PreparedFileRestore
 from .errors import NeilAgentError, ToolError
+from .execution_budget import execution_budget_scope
 from .events import EventBus, EventSubscription, RuntimeEvent
 from .projections import (
     ExecutionGraph,
@@ -1754,17 +1755,20 @@ class LiveCockpitApp(App[None]):
         cancelled = False
         succeeded = False
         try:
-            stream = self._agent.stream_chat(prompt)
-            for chunk in stream:
-                if self._cancel_requested.is_set():
-                    cancelled = True
-                    close = getattr(stream, "close", None)
-                    if callable(close):
-                        close()
-                    break
-                self.post_message(AssistantChunk(chunk))
-            else:
-                succeeded = True
+            with execution_budget_scope(
+                cancel=self._cancel_requested, cancelled_message="当前任务已取消。",
+            ):
+                stream = self._agent.stream_chat(prompt)
+                for chunk in stream:
+                    if self._cancel_requested.is_set():
+                        cancelled = True
+                        close = getattr(stream, "close", None)
+                        if callable(close):
+                            close()
+                        break
+                    self.post_message(AssistantChunk(chunk))
+                else:
+                    succeeded = True
         except NeilAgentError as error:
             self.post_message(
                 AssistantChunk(

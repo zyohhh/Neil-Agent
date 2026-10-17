@@ -7,10 +7,11 @@ from threading import Event
 import pytest
 
 from neil_agent.agent import COMPACTION_CHECKPOINT_USER, Agent
-from neil_agent.errors import AgentError, LLMError
+from neil_agent.errors import AgentError, LLMError, ToolError
+from neil_agent.execution_budget import execution_budget_scope
 from neil_agent.events import EventBus, RuntimeEvent
 from neil_agent.instructions import ProjectInstructionManager
-from neil_agent.providers.base import ProviderId, ProviderTurnState
+from neil_agent.providers.base import ProviderId, ProviderTurnState, StopReason
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -23,6 +24,13 @@ from neil_agent.schemas import (
 from neil_agent.task import TaskTracker
 from neil_agent.tools.filesystem import FileSystemTools
 from neil_agent.tools.registry import ToolRegistry
+from neil_agent.context import (
+    estimate_fixed_chars,
+    estimate_fixed_tokens,
+    estimate_messages_chars,
+    estimate_messages_tokens,
+)
+from neil_agent.hooks import HookResponse, LifecycleHooks
 
 
 class FakeChatModel:
@@ -66,6 +74,308 @@ class FakeChatModel:
             ]
         )
         yield from events
+
+
+@pytest.mark.parametrize("token_budget", [False, True])
+def test_tool_round_reselects_history_within_each_request_budget(
+    token_budget: bool,
+) -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_value",
+            description="Read a value.",
+            input_schema={"type": "object"},
+        ),
+        lambda: "v" * 700,
+    )
+    call = ToolCall(id="read-1", name="read_value")
+    history = (
+        Message(role="user", content="old goal"),
+        Message(role="assistant", content="x" * 600),
+    )
+    current = Message(role="user", content="inspect")
+    chain = (
+        current,
+        Message(role="assistant", tool_calls=(call,)),
+        Message(
+            role="user",
+            tool_results=(ToolResult(tool_call_id=call.id, content="v" * 700),),
+        ),
+    )
+    estimate_fixed = estimate_fixed_tokens if token_budget else estimate_fixed_chars
+    estimate_messages = (
+        estimate_messages_tokens if token_budget else estimate_messages_chars
+    )
+    fixed = estimate_fixed("test", registry.definitions)
+    budget = (
+        max(
+            fixed + estimate_messages((*history, current)),
+            fixed + estimate_messages(chain),
+        )
+        + 10
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(call,))],
+        ["done", ModelResponse(content="done")],
+    ]
+    agent = Agent(
+        model,
+        system_prompt="test",
+        registry=registry,
+        max_context_chars=100_000 if token_budget else budget,
+        max_context_tokens=budget if token_budget else None,
+    )
+    agent.restore_messages(history)
+
+    assert "".join(agent.stream_chat("inspect")) == "done"
+    assert model.requests[0][:2] == list(history)
+    assert model.requests[1] == list(chain)
+    assert all(
+        fixed + estimate_messages(request) <= budget for request in model.requests
+    )
+    assert agent.messages[:2] == history
+
+
+@pytest.mark.parametrize("token_budget", [False, True])
+def test_oversized_current_tool_chain_stops_before_next_model_request(
+    token_budget: bool,
+) -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_value",
+            description="Read a value.",
+            input_schema={"type": "object"},
+        ),
+        lambda: "x" * 5_000,
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(ToolCall(id="read-1", name="read_value"),))]
+    ]
+    agent = Agent(
+        model,
+        registry=registry,
+        max_context_chars=100_000 if token_budget else 1_000,
+        max_context_tokens=500 if token_budget else None,
+    )
+    with pytest.raises(AgentError, match="上下文超过本地请求预算"):
+        list(agent.stream_chat("inspect"))
+    assert len(model.requests) == 1
+    assert agent.messages == ()
+
+
+@pytest.mark.parametrize("context_source", ["hook_result", "updated_instructions"])
+def test_hook_context_is_included_in_request_budget(context_source: str) -> None:
+    hooks = LifecycleHooks()
+
+    def add_context(_):
+        if context_source == "updated_instructions":
+            agent.set_project_instructions("x" * 2_000)
+            return None
+        return HookResponse(additional_context="x" * 2_000)
+
+    hooks.register("before_model", add_context)
+    model = FakeChatModel()
+    agent = Agent(model, hooks=hooks, max_context_chars=1_000)
+    with pytest.raises(AgentError, match="上下文超过本地请求预算"):
+        list(agent.stream_chat("hello"))
+    assert model.requests == []
+
+
+def test_chat_rejects_oversized_current_input_before_model_request() -> None:
+    model = FakeChatModel()
+    with pytest.raises(AgentError, match="上下文超过本地请求预算"):
+        Agent(model, max_context_chars=100).chat("x" * 1_000)
+    assert model.requests == []
+
+
+@pytest.mark.parametrize("second_tool", ["read_file", "write_file"])
+def test_scoped_instruction_change_defers_remaining_batch_until_model_reconsiders(
+    tmp_path: Path,
+    second_tool: str,
+) -> None:
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / "AGENTS.md").write_text("NESTED-RULE", encoding="utf-8")
+    manager = ProjectInstructionManager(tmp_path)
+    model = FakeChatModel()
+    executions: list[int] = []
+    approvals: list[int] = []
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_file",
+            description="Read a file.",
+            input_schema={"type": "object"},
+        ),
+        lambda path: executions.append(len(model.requests)) or "contents",
+    )
+    registry.register(
+        ToolDefinition(
+            name="write_file",
+            description="Write a file.",
+            input_schema={"type": "object"},
+        ),
+        lambda path: executions.append(len(model.requests)) or "written",
+        requires_approval=True,
+        preview_handler=lambda path: "exact preview",
+    )
+
+    def call(identifier: str, name: str = "read_file") -> ToolCall:
+        return ToolCall(id=identifier, name=name, arguments={"path": "src/example.py"})
+
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(call("read-1"), call("call-2", second_tool)))],
+        [ModelResponse(tool_calls=(call("call-3", second_tool),))],
+        ["done", ModelResponse(content="done")],
+    ]
+    agent = Agent(
+        model,
+        registry=registry,
+        instruction_scope_handler=manager.resolve_tool_call,
+        approval_handler=lambda *_: approvals.append(len(model.requests)) or True,
+    )
+    assert "".join(agent.stream_chat("inspect")) == "done"
+    assert executions == [2]
+    assert approvals == ([2] if second_tool == "write_file" else [])
+    assert "NESTED-RULE" in model.system_prompts[1]
+    results = model.requests[1][-1].tool_results
+    assert len(results) == 2
+    assert "本次文件操作未执行" in results[0].content
+    assert "本批剩余工具操作未执行" in results[1].content
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        StopReason.MAX_TOKENS,
+        StopReason.CONTENT_FILTER,
+        StopReason.CANCELLED,
+        StopReason.ERROR,
+        StopReason.UNKNOWN,
+    ],
+)
+@pytest.mark.parametrize("with_tool", [False, True])
+def test_incomplete_terminal_response_never_commits_or_executes_tools(
+    reason: StopReason, with_tool: bool
+) -> None:
+    executions: list[str] = []
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="write_value",
+            description="Write a value.",
+            input_schema={"type": "object"},
+        ),
+        lambda: executions.append("executed") or "done",
+    )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [
+            "partial",
+            ModelResponse(
+                content="partial",
+                stop_reason=reason,
+                tool_calls=(ToolCall(id="write-1", name="write_value"),)
+                if with_tool
+                else (),
+            ),
+        ]
+    ]
+    agent = Agent(model, registry=registry)
+    with pytest.raises(AgentError):
+        list(agent.stream_chat("work"))
+    assert agent.messages == ()
+    assert executions == []
+    assert len(model.requests) == 1
+
+
+@pytest.mark.parametrize("cancel_at", ["approval", "preview_revalidation"])
+def test_cancellation_after_approval_prevents_execution(cancel_at: str) -> None:
+    cancel = Event()
+    executions: list[str] = []
+    registry = ToolRegistry()
+    previews = 0
+
+    def preview() -> str:
+        nonlocal previews
+        previews += 1
+        if cancel_at == "preview_revalidation" and previews == 2:
+            cancel.set()
+        return "exact preview"
+
+    registry.register(
+        ToolDefinition(
+            name="write_value",
+            description="Write a value.",
+            input_schema={"type": "object"},
+        ),
+        lambda: executions.append("executed") or "done",
+        requires_approval=True,
+        preview_handler=preview,
+    )
+
+    def approve(call: ToolCall, preview: str) -> bool:
+        if cancel_at == "approval":
+            cancel.set()
+        return True
+
+    model = FakeChatModel()
+    model.stream_responses = [
+        [ModelResponse(tool_calls=(ToolCall(id="write-1", name="write_value"),))]
+    ]
+    with execution_budget_scope(cancel=cancel):
+        with pytest.raises(ToolError, match="已取消"):
+            list(
+                Agent(model, registry=registry, approval_handler=approve).stream_chat(
+                    "work"
+                )
+            )
+    assert executions == []
+    assert len(model.requests) == 1
+
+
+def test_cancellation_during_tool_batch_prevents_remaining_tools_and_model_requests() -> (
+    None
+):
+    cancel = Event()
+    executions: list[str] = []
+    registry = ToolRegistry()
+
+    def read_value() -> str:
+        executions.append("read")
+        cancel.set()
+        return "read result"
+
+    for name, handler in (
+        ("read_value", read_value),
+        ("write_value", lambda: executions.append("write") or "done"),
+    ):
+        registry.register(
+            ToolDefinition(
+                name=name, description=name, input_schema={"type": "object"}
+            ),
+            handler,
+        )
+    model = FakeChatModel()
+    model.stream_responses = [
+        [
+            ModelResponse(
+                tool_calls=(
+                    ToolCall(id="read-1", name="read_value"),
+                    ToolCall(id="write-1", name="write_value"),
+                )
+            )
+        ]
+    ]
+    with execution_budget_scope(cancel=cancel):
+        with pytest.raises(ToolError, match="已取消"):
+            list(Agent(model, registry=registry).stream_chat("work"))
+    assert executions == ["read"]
+    assert len(model.requests) == 1
 
 
 def test_stream_chat_saves_complete_round() -> None:

@@ -189,6 +189,33 @@ def test_incomplete_response_maps_max_output_tokens_without_treating_as_success(
     assert result.stop_reason is StopReason.MAX_TOKENS
 
 
+def test_incomplete_response_with_complete_tool_arguments_remains_incomplete() -> None:
+    response = text_response("partial")
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": "max_output_tokens"}
+    response["output"] = [{
+        "type": "function_call", "id": "fc_1", "call_id": "call_1",
+        "name": "read_file", "arguments": '{"path":"note.txt"}', "status": "completed",
+    }]
+    result = parse_response(response, model="openai-test-model")
+    assert result.tool_calls
+    assert result.stop_reason is StopReason.MAX_TOKENS
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter", "unknown_reason"])
+def test_complete_rejects_incomplete_terminal_response(reason: str) -> None:
+    response = text_response("partial")
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": reason}
+    client = MagicMock(spec=OpenAI)
+    client.responses.create.return_value = response
+    with pytest.raises(ProviderProtocolError):
+        OpenAIProvider(openai_settings(), client=client).complete(
+            [Message(role="user", content="work")], system_prompt="test",
+        )
+    assert client.responses.create.call_count == 1
+
+
 def test_refusal_maps_content_filter_and_preserves_visible_explanation() -> None:
     response = text_response()
     response["status"] = "incomplete"

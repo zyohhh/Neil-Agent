@@ -137,6 +137,15 @@ def test_provider_turn_state_is_copied_frozen_and_model_bound() -> None:
         )
 
 
+@pytest.mark.parametrize("reason", ["max_tokens", "model_context_window_exceeded"])
+def test_anthropic_truncation_takes_precedence_over_tool_calls(reason: str) -> None:
+    assert normalize_stop_reason(reason, has_tool_calls=True) is StopReason.MAX_TOKENS
+
+
+def test_anthropic_unknown_terminal_reason_is_not_hidden_by_tool_calls() -> None:
+    assert normalize_stop_reason("unknown_reason", has_tool_calls=True) is StopReason.UNKNOWN
+
+
 def test_anthropic_stop_reason_mapping_fails_closed_for_unknown_values() -> None:
     assert (
         normalize_stop_reason("end_turn", has_tool_calls=False) is StopReason.END_TURN

@@ -25,6 +25,7 @@ from neil_agent.providers.errors import (
     ProviderConnectionError,
     ProviderInvalidRequestError,
     ProviderNotImplementedError,
+    ProviderProtocolError,
 )
 from neil_agent.schemas import (
     ActivityEvent,
@@ -46,6 +47,18 @@ def make_settings(*, thinking_enabled: bool = False) -> Settings:
         deepseek_model="deepseek-v4-flash",
         thinking_enabled=thinking_enabled,
     )
+
+
+@pytest.mark.parametrize("reason", ["max_tokens", "model_context_window_exceeded", "refusal", "unknown_reason"])
+def test_complete_rejects_incomplete_terminal_response(reason: str) -> None:
+    client = MagicMock(spec=Anthropic)
+    client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="partial")], stop_reason=reason,
+    )
+    model = LLMClient(make_settings(), client=client)
+    with pytest.raises(ProviderProtocolError):
+        model.complete([Message(role="user", content="work")], system_prompt="test")
+    assert client.messages.create.call_count == 1
 
 
 def test_complete_extracts_text_content() -> None:

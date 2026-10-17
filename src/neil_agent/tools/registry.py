@@ -9,6 +9,7 @@ from typing import Literal
 
 from ..approval import ApprovalBinding, ApprovalBindingResolver
 from ..errors import ToolError
+from ..execution_budget import check_execution_budget
 from ..schemas import ToolCall, ToolDefinition, ToolResult
 
 ToolHandler = Callable[..., str]
@@ -164,6 +165,7 @@ class ToolRegistry:
     def _invoke(self, call: ToolCall, handler: ToolHandler) -> ToolResult:
         """Validate arguments, invoke a handler, and normalize its result."""
 
+        check_execution_budget()
         try:
             signature(handler).bind(**call.arguments)
         except TypeError as error:

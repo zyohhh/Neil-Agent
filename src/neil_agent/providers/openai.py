@@ -9,8 +9,15 @@ from typing import Any
 from openai import APIError, OpenAI
 
 from ..config import Settings, get_settings
+from ..execution_budget import (
+    budgeted_sleep,
+    check_execution_budget,
+    interrupt_on_execution_budget,
+)
 from ..schemas import ActivityEvent, Message, ModelResponse, TokenUsage, ToolDefinition
-from .base import ProviderCapabilities, ProviderDescriptor, ProviderId, WireProtocol
+from .base import (
+    ProviderCapabilities, ProviderDescriptor, ProviderId, WireProtocol, completion_error,
+)
 from .errors import (
     ProviderAuthenticationError,
     ProviderConnectionError,
@@ -174,8 +181,10 @@ class OpenAIResponsesProvider:
         request = self._request_kwargs(messages, system_prompt=system_prompt)
         retries_done = 0
         while True:
+            check_execution_budget()
             try:
                 response = self._client.responses.create(**request)
+                check_execution_budget()
                 model_response = parse_response(
                     response,
                     model=self.settings.selected_model,
@@ -191,9 +200,15 @@ class OpenAIResponsesProvider:
                         "非流式完成返回了 function call。",
                         provider=self.provider_id,
                     )
+                terminal_error = completion_error(
+                    model_response.stop_reason, has_tool_calls=False,
+                )
+                if terminal_error is not None:
+                    raise ProviderProtocolError(terminal_error, provider=self.provider_id)
                 self._last_usage = model_response.usage
                 return model_response.content
             except Exception as sdk_error:
+                check_execution_budget()
                 error = self._normalize_runtime_error(sdk_error)
                 if not self._retry_policy.can_retry(error, retries_done):
                     if error is sdk_error:
@@ -220,6 +235,7 @@ class OpenAIResponsesProvider:
         )
         retries_done = 0
         while True:
+            check_execution_budget()
             output_started = False
             created = False
             terminal_response: object | None = None
@@ -230,8 +246,12 @@ class OpenAIResponsesProvider:
             argument_done: dict[str, str] = {}
             try:
                 raw_stream = self._client.responses.create(**request, stream=True)
-                with raw_stream as stream:
+                with (
+                    raw_stream as stream,
+                    interrupt_on_execution_budget(getattr(stream, "close", None)),
+                ):
                     for event in stream:
+                        check_execution_budget()
                         event_type = self._event_string(event, "type")
                         previous_sequence = self._validate_sequence(
                             event,
@@ -342,6 +362,7 @@ class OpenAIResponsesProvider:
                 yield model_response
                 return
             except Exception as sdk_error:
+                check_execution_budget()
                 error = self._normalize_runtime_error(sdk_error)
                 if not self._retry_policy.can_retry(
                     error,
@@ -527,7 +548,7 @@ class OpenAIResponsesProvider:
     def _wait_for_retry(self, error: ProviderError, retry_number: int) -> None:
         delay = self._retry_policy.delay(error, retry_number)
         self._emit_retry_activity(error, retry_number, delay)
-        self._sleeper(delay)
+        budgeted_sleep(delay, self._sleeper)
         if self._retry_handler is not None:
             self._retry_handler(
                 ActivityEvent(

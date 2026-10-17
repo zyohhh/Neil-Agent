@@ -529,18 +529,16 @@ def _stop_reason(
     has_tool_calls: bool,
     refused: bool,
 ) -> StopReason:
-    if has_tool_calls:
-        return StopReason.TOOL_CALL
     if refused:
         return StopReason.CONTENT_FILTER
-    if status == "completed":
-        return StopReason.END_TURN
-    reason = _field(incomplete_details, "reason")
-    if reason == "max_output_tokens":
-        return StopReason.MAX_TOKENS
-    if reason == "content_filter":
-        return StopReason.CONTENT_FILTER
-    return StopReason.UNKNOWN
+    if status == "incomplete":
+        reason = _field(incomplete_details, "reason")
+        if reason == "max_output_tokens":
+            return StopReason.MAX_TOKENS
+        if reason == "content_filter":
+            return StopReason.CONTENT_FILTER
+        return StopReason.UNKNOWN
+    return StopReason.TOOL_CALL if has_tool_calls else StopReason.END_TURN
 
 
 def _terminal_response_error(

@@ -63,6 +63,7 @@ from .session import (
     normalize_session_title,
 )
 from .subtask import SubtaskParentState, new_parent_run_id, subtask_parent_scope
+from .execution_budget import execution_budget_scope
 from .task import TaskTracker
 from .time_machine import (
     MAX_TIME_MACHINE_EVENTS,
@@ -604,12 +605,15 @@ def run(console: Console) -> None:
             continue
 
         turn_cancel = Event()
-        with subtask_parent_scope(
-            SubtaskParentState(
-                settings=settings,
-                model=llm,
-                parent_run_id=new_parent_run_id(),
-                cancel=turn_cancel,
+        with (
+            execution_budget_scope(cancel=turn_cancel, cancelled_message="当前任务已取消。"),
+            subtask_parent_scope(
+                SubtaskParentState(
+                    settings=settings,
+                    model=llm,
+                    parent_run_id=new_parent_run_id(),
+                    cancel=turn_cancel,
+                ),
             ),
         ):
             response_stream = agent.stream_chat(user_input)

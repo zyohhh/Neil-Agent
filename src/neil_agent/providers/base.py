@@ -40,6 +40,31 @@ class StopReason(StrEnum):
     UNKNOWN = "unknown"
 
 
+def completion_error(
+    reason: StopReason,
+    *,
+    has_tool_calls: bool,
+    allow_unknown: bool = False,
+) -> str | None:
+    """Reject incomplete terminal states before committing text or running tools."""
+
+    errors = {
+        StopReason.MAX_TOKENS: "模型输出达到 token 或上下文上限，响应未完成。",
+        StopReason.CONTENT_FILTER: "模型响应被内容过滤中止，任务未完成。",
+        StopReason.CANCELLED: "模型响应已取消，任务未完成。",
+        StopReason.ERROR: "模型响应以错误终止，任务未完成。",
+    }
+    if reason in errors:
+        return errors[reason]
+    if reason is StopReason.UNKNOWN and not allow_unknown:
+        return "模型返回了未知终止原因，不能确认任务已完成。"
+    if reason is StopReason.TOOL_CALL and not has_tool_calls:
+        return "模型以工具调用结束，但没有返回工具调用。"
+    if reason is StopReason.END_TURN and has_tool_calls:
+        return "模型完成状态与返回的工具调用不一致。"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilities:
     """One immutable snapshot of explicitly supported provider features."""

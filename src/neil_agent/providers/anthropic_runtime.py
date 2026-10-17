@@ -11,6 +11,11 @@ from anthropic.types import Message as AnthropicMessage
 from anthropic.types import ThinkingConfigParam
 
 from ..config import Settings, get_settings
+from ..execution_budget import (
+    budgeted_sleep,
+    check_execution_budget,
+    interrupt_on_execution_budget,
+)
 from ..schemas import (
     ActivityEvent,
     Message,
@@ -26,7 +31,7 @@ from .anthropic_messages import (
     normalize_anthropic_error,
     normalize_stop_reason,
 )
-from .base import ProviderDescriptor, ProviderId, ProviderTurnState
+from .base import ProviderDescriptor, ProviderId, ProviderTurnState, completion_error
 from .errors import (
     ProviderAuthenticationError,
     ProviderConnectionError,
@@ -135,10 +140,13 @@ class AnthropicMessagesProvider:
         request = self._request_kwargs(messages, system_prompt=system_prompt)
         retries_done = 0
         while True:
+            check_execution_budget()
             try:
                 response = self._client.messages.create(**request)
+                check_execution_budget()
                 break
             except APIError as sdk_error:
+                check_execution_budget()
                 error = normalize_anthropic_error(
                     sdk_error,
                     provider=self.provider_id,
@@ -155,6 +163,17 @@ class AnthropicMessagesProvider:
             raise ProviderProtocolError(
                 "模型返回了无效的 content 集合。",
                 provider=self.provider_id,
+            )
+        has_tool_calls = any(getattr(block, "type", None) == "tool_use" for block in raw_content)
+        raw_stop_reason = getattr(response, "stop_reason", None)
+        terminal_error = completion_error(
+            normalize_stop_reason(raw_stop_reason, has_tool_calls=has_tool_calls),
+            has_tool_calls=has_tool_calls,
+            allow_unknown=raw_stop_reason is None,
+        )
+        if terminal_error is not None or has_tool_calls:
+            raise ProviderProtocolError(
+                terminal_error or "非流式完成返回了 tool_use 工具调用。", provider=self.provider_id,
             )
         text = self._extract_text(raw_content)
         sdk_usage = getattr(response, "usage", None)
@@ -181,15 +200,23 @@ class AnthropicMessagesProvider:
         retries_done = 0
         emitted_text = False
         while True:
+            check_execution_budget()
             try:
-                with self._client.messages.stream(**request) as stream:
+                with (
+                    self._client.messages.stream(**request) as stream,
+                    interrupt_on_execution_budget(getattr(stream, "close", None)),
+                ):
                     for text in stream.text_stream:
+                        check_execution_budget()
                         if text:
                             emitted_text = True
                             yield text
+                    check_execution_budget()
                     final_message = stream.get_final_message()
+                    check_execution_budget()
                 break
             except APIError as sdk_error:
+                check_execution_budget()
                 error = normalize_anthropic_error(
                     sdk_error,
                     provider=self.provider_id,
@@ -251,7 +278,7 @@ class AnthropicMessagesProvider:
             retry_number,
             delay,
         )
-        self._sleeper(delay)
+        budgeted_sleep(delay, self._sleeper)
         if self._retry_handler is not None:
             self._retry_handler(
                 ActivityEvent(

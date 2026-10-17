@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..approval import GENERIC_APPROVAL_BINDING_KIND
 from ..config import Settings
+from ..execution_budget import execution_budget_scope
 from ..errors import SessionError
 from ..events import EventBus, RuntimeEvent
 from ..host_runtime import HostMode, HostRuntime, build_agent, build_host_runtime
@@ -152,14 +153,17 @@ class AgentTurnWorker:
                 task_tracker.restore(
                     session.restored_steps(), session.restored_quality_check()
                 )
-            with subtask_parent_scope(
-                SubtaskParentState(
-                    settings=settings,
-                    model=model,
-                    parent_run_id=parent_run_id,
-                    forward_runtime_event=on_runtime,
-                    cancel=cancel,
-                )
+            with (
+                execution_budget_scope(cancel=cancel, cancelled_message="当前任务已取消。"),
+                subtask_parent_scope(
+                    SubtaskParentState(
+                        settings=settings,
+                        model=model,
+                        parent_run_id=parent_run_id,
+                        forward_runtime_event=on_runtime,
+                        cancel=cancel,
+                    )
+                ),
             ):
                 stream = agent.stream_chat(prompt)
                 try:

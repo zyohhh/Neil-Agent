@@ -249,14 +249,14 @@ def normalize_stop_reason(
 ) -> StopReason:
     """Map Anthropic terminal values without treating unknown values as success."""
 
-    if has_tool_calls or value == "tool_use":
-        return StopReason.TOOL_CALL
-    if value in {"end_turn", "stop_sequence"}:
-        return StopReason.END_TURN
     if value in {"max_tokens", "model_context_window_exceeded"}:
         return StopReason.MAX_TOKENS
     if value == "refusal":
         return StopReason.CONTENT_FILTER
+    if value == "tool_use" or (value is None and has_tool_calls):
+        return StopReason.TOOL_CALL
+    if value in {"end_turn", "stop_sequence"}:
+        return StopReason.END_TURN
     return StopReason.UNKNOWN
 
 
