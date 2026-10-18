@@ -59,6 +59,17 @@ def check_execution_budget() -> None:
     _check_budget(_budget.get())
 
 
+def execution_is_cancelled() -> bool:
+    """Inspect cancellation without hiding a primary turn exception."""
+
+    budget = _budget.get()
+    while budget is not None:
+        if budget.cancel is not None and budget.cancel.is_set():
+            return True
+        budget = budget.parent
+    return False
+
+
 def _check_budget(budget: ExecutionBudget | None) -> None:
     while budget is not None:
         if budget.cancel is not None and budget.cancel.is_set():

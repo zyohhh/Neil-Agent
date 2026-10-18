@@ -27,6 +27,7 @@ from .config import Settings, get_settings
 from .diagnostics import run_diagnostics
 from .errors import AuditError, NeilAgentError, SessionError, ToolError
 from .event_store import JsonlEventStore
+from .execution_journal import ExecutionJournal
 from .events import EventBus, EventSubscription, RuntimeEvent
 from .host_runtime import (
     HostMode,
@@ -380,6 +381,7 @@ def run(console: Console) -> None:
     )
 
     while True:
+        agent.bind_session(current_session.session_id)
         try:
             user_input = console.input("\n[bold cyan]你[/bold cyan] > ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -400,6 +402,12 @@ def run(console: Console) -> None:
             continue
         if command in HELP_COMMANDS and not command_argument:
             _show_help(console)
+            continue
+        if command in {"/executions", "/ack-execution"}:
+            _show_executions(
+                console, host_runtime.execution_journal, command_argument.strip(),
+                acknowledge=command == "/ack-execution",
+            )
             continue
         if command in STATUS_COMMANDS and not command_argument:
             _show_status(console, task_tracker, shell_tools, current_session)
@@ -526,7 +534,7 @@ def run(console: Console) -> None:
                     instruction_manager.current = initialized
             continue
         if command in COMPACT_COMMANDS:
-            _compact_session(
+            current_session = _compact_session(
                 console,
                 renderer,
                 agent,
@@ -735,6 +743,7 @@ def _show_help(console: Console) -> None:
     console.print("  /reload-instructions 重新加载项目指令")
     console.print("  /init   预览并创建根 AGENTS.md（仅限不存在时）")
     console.print("  /compact [关注点] 压缩较早轮次并保留压缩前备份")
+    console.print("  /executions [ID] 查看执行日志；/ack-execution ID 确认已人工核对的操作")
     console.print("  /rewind-task 预览并恢复最近一次 Agent 任务的全部文件编辑")
     console.print("  /rewind-file /rewind-task 的兼容别名")
     console.print("  /sessions [选项] [关键词] 分页、排序或筛选本地会话")
@@ -941,6 +950,29 @@ def _try_show_live_cockpit(
         event_bus.close(1)
 
 
+def _show_executions(
+    console: Console, journal: ExecutionJournal | None, execution_id: str,
+    *, acknowledge: bool = False,
+) -> None:
+    if journal is None:
+        console.print("[yellow]当前运行时未启用执行日志。[/yellow]")
+        return
+    try:
+        if acknowledge:
+            journal.finish(execution_id, "acknowledged")
+            console.print("已记录人工核对确认。", markup=False)
+        elif execution_id:
+            console.print_json(journal.load(execution_id).model_dump_json())
+        else:
+            table = Table("Execution ID", "状态", "需核对", "会话")
+            for record in journal.records()[:20]:
+                table.add_row(record.execution_id, record.status,
+                              "是" if record.needs_reconciliation else "否", record.session_id or "—")
+            console.print(table)
+    except NeilAgentError as error:
+        console.print(f"执行日志操作失败：{error}", markup=False)
+
+
 def _save_current_session(
     console: Console,
     session_store: SessionStore,
@@ -958,10 +990,18 @@ def _save_current_session(
             task_tracker.latest_quality_check,
             last_usage=agent.last_usage,
         )
-        return session_store.handle_for(snapshot)
     except SessionError as error:
         console.print(f"[yellow]本地会话未保存：[/yellow]{error}")
+        try:
+            agent.mark_execution("save_failed")
+        except NeilAgentError as journal_error:
+            console.print(f"执行日志状态未更新：{journal_error}", markup=False)
         return current_session
+    try:
+        agent.mark_execution("committed")
+    except NeilAgentError as journal_error:
+        console.print(f"会话已保存，执行日志状态未更新：{journal_error}", markup=False)
+    return session_store.handle_for(snapshot)
 
 
 def _show_permissions(
@@ -1528,7 +1568,7 @@ def _compact_session(
     task_tracker: TaskTracker,
     *,
     focus: str = "",
-) -> None:
+) -> SessionHandle:
     """Prepare, persist, then atomically apply an explicit history compaction."""
 
     renderer.show_activity(
@@ -1544,7 +1584,7 @@ def _compact_session(
         renderer.show_activity(
             ActivityEvent(status="skipped", message="已取消对话压缩")
         )
-        return
+        return current_session
     except NeilAgentError as error:
         renderer.show_activity(
             ActivityEvent(
@@ -1553,7 +1593,7 @@ def _compact_session(
                 details=(f"原因：{error}", "原历史未改变"),
             )
         )
-        return
+        return current_session
 
     try:
         current_summary = session_store.get_summary(current_session.session_id)
@@ -1570,10 +1610,10 @@ def _compact_session(
                 details=(f"原因：{error}", "原历史未改变"),
             )
         )
-        return
+        return current_session
 
     try:
-        session_store.save(
+        saved = session_store.save(
             current_session,
             prepared.compacted_messages,
             task_tracker.steps,
@@ -1588,7 +1628,7 @@ def _compact_session(
                 details=(f"原因：{error}", "原历史未改变"),
             )
         )
-        return
+        return current_session
 
     agent.apply_compaction(prepared)
     saved_chars = max(prepared.old_message_chars - prepared.new_message_chars, 0)
@@ -1605,6 +1645,7 @@ def _compact_session(
             ),
         )
     )
+    return session_store.handle_for(saved)
 
 
 def _session_title_with_suffix(title: str, suffix: str) -> str:
@@ -1706,7 +1747,7 @@ def _delete_session(
         console.print("[yellow]已取消删除。[/yellow]")
         return
     try:
-        session_store.delete(session_id)
+        session_store.delete(session_id, expected_digest=summary.revision)
     except SessionError as error:
         console.print(f"[bold red]删除本地会话失败：[/bold red]{error}")
         return
@@ -1739,7 +1780,12 @@ def _rename_session(
         )
         return renamed
     try:
-        snapshot = session_store.rename(current_session.session_id, normalized)
+        if current_session.base_digest is None:
+            raise SessionError("会话已被其他进程创建，请重新加载。")
+        snapshot = session_store.rename(
+            current_session.session_id, normalized,
+            expected_digest=current_session.base_digest,
+        )
     except SessionError as error:
         console.print(f"[bold red]重命名会话失败：[/bold red]{error}")
         return None

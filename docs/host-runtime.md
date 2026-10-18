@@ -41,12 +41,13 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | `import_guest_export` | 认证后需暂存 | 写入模式 | 写入模式 | 写入模式 |
 | 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
 | 审计 hooks | 可选 | 可选 | 可选 | 可选 |
+| 持久执行记录 | ✅ 懒创建 | ❌ | ✅ 懒创建 | ✅ 懒创建 |
 | 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | ✅ 选择、恢复、成功后原子保存 |
 | 进程内模型切换 | ❌ 启动配置 | ❌ 启动配置 | ❌ 启动配置 | ✅ 同 Provider 显式白名单、idle + 空会话 |
 | Security Shield 投影 | ✅ `/cockpit` | ❌（无对应 UI） | ❌（无对应 UI） | ✅ 与 CLI 共用观察函数 |
 | ContextTomography 投影 | ✅ `/context`、驾驶舱 | ❌（无对应 UI） | ❌（无对应 UI） | ✅ 快照 `context` DTO（与 Agent 同源） |
 
-Web 与 CLI 的沙箱注册、指令 `cwd` 作用域、会话连续性和安全投影现已对齐。Guest 产物导出与二次批准导入在 CLI、非交互 v2 写入与 Web 共用同一工具链；详见 [`guest-export-import.md`](guest-export-import.md)。入口仍保留各自的交互语义：CLI 长驻一个 Agent；Web 每个 turn 构造隔离的 Agent，再从控制器选中的严格快照恢复，且只在成功完成后保存。P9 的模型选择是 Web Controller 能力，不进入共享工具装配：它只替换下一 turn 使用的不可变 `Settings` 与 `AgentTurnWorker`，而 `build_host_runtime()` 仍按该 turn 捕获的设置装配相同安全边界。
+Web 与 CLI 的沙箱注册、指令 `cwd` 作用域、会话连续性和安全投影现已对齐。Guest 产物导出与二次批准导入在 CLI、非交互 v2 写入与 Web 共用同一工具链；详见 [`guest-export-import.md`](guest-export-import.md)。CLI 长驻一个 Agent；Web 每个 turn 构造隔离的 Agent，从控制器选中的严格快照恢复，仅成功完成后保存，并拒绝覆盖其他进程写入的新版本。P9 模型选择由 Web Controller 协调：先准备新的 `Settings`、共享 `HostRuntime`、worker 和投影，复核状态后一起替换，再关闭旧运行时。准备失败保留旧实例。执行记录与并发边界见 [`execution-recovery.md`](execution-recovery.md)。
 
 ## 使用方式
 

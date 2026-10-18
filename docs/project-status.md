@@ -10,7 +10,7 @@
 | Python | ≥ 3.13；包管理 `uv` |
 | 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
-| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**932 passed**、11 skipped、16 deselected；Web 前端维持既有 22 项测试、5 项 Playwright 页面回归 |
+| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**979 passed**、12 skipped、16 deselected；Web 前端维持既有 22 项测试、5 项 Playwright 页面回归 |
 | 静态检查 | `uv run ruff check .` 与 `uv run mypy src` 为开发门禁（`pyproject.toml` 含 `[tool.ruff]` / `[tool.mypy]`） |
 | 安全加固 | 批次 1–7 **已完成** |
 | 运行时预设 | 批次 1–3、**5** 已完成；批次 4、6 可选未开始 |
@@ -31,6 +31,7 @@
 - **批次 2**：注册返回 disposer；`HostRuntime.close()` 逆序 teardown。
 - **批次 5**：`load_skill` 按需加载工作区 `skills/<name>/SKILL.md`；子运行时不注册。
 - **2026-10-17 执行循环维护**：每次模型请求执行本地预算门禁；指令作用域变化后延期同批剩余工具；CLI/TUI/Web 主任务与子任务共用取消检查，重试等待和已建立模型流可中断；非完整终态不记为成功。新增 39 项回归，ruff、mypy、完整离线门禁与 wheel 构建通过。
+- **2026-10-17 执行恢复维护**：持久执行状态、失败/重启核对提示与 CLI 人工结清；跨进程会话锁与版本比较；Web 模型切换完整候选准备、提交与清理隔离。新增 48 项回归（1 项因 Windows 符号链接权限跳过），完整离线门禁、ruff、mypy、wheel 构建与包内模块校验通过。详见 [`execution-recovery.md`](execution-recovery.md)。
 
 ### 其他已收口主线
 
@@ -43,8 +44,7 @@
 
 | 严重度 | 领域 | 问题 | 位置 / 说明 |
 | --- | --- | --- | --- |
-| **高** | 恢复 | 回合失败后已执行的文件副作用缺少持久执行日志；旧会话保存可覆盖并发更新 | 本轮未修改；进程内 checkpoint 仍可用 |
-| **高** | 运行时 / 分发 | Web 模型切换重建失败可留下关闭的旧 runtime；wheel 缺少默认 eval 任务资源 | 本轮未修改，后续单独修复 |
+| **高** | 分发 | wheel 缺少默认 eval 任务资源 | 后续单独修复 |
 | **低** | 产品 | Web 已注册 `run_readonly_subtask`，前端无独立子任务 UI | 后端能力；见 `web-workbench-development.md` |
 | **低** | CI | 当前 checkout 未包含通用 PR CI | 已有 Windows Sandbox 专用工作流；通用 ruff/mypy/pytest + Web lint/test/build 门禁待补齐 |
 
@@ -63,6 +63,7 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | P1 | **子任务超时/取消可中断** | `runtime-profile.md` 批次 3 补强 | ✅ 已完成 |
 | P1 | **子任务 CLI 取消与统一 `parent_run_id`** | 观测一致性 | ✅ 已完成 |
 | P1 | **请求预算、批量指令门禁、主任务取消与完成判定** | 2026-10-17 执行循环维护 | ✅ 已完成，见 `runtime-profile.md` 维护表；SDK 建连阶段仍受请求超时约束 |
+| P1 | **执行记录、会话并发保护与模型切换事务** | 2026-10-17 执行恢复维护 | ✅ 已完成，见 `execution-recovery.md`；冲突不自动合并，执行事实不自动重放 |
 | P2 | **子任务测试补强** | `tests/test_readonly_subtask.py` | ✅ 已完成（超时/中断/ schema） |
 | P2 | **Security Shield 子任务面** | `security.py` | ✅ 已完成 |
 | P3 | **文档与验收记录** | 本文 + 各专项 doc | ✅ 2026-09-01 同步（测试数、模块表、Git 脱敏 / `O_NOFOLLOW` / budget / CI） |

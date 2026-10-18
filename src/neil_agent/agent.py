@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from threading import Lock
 from time import monotonic
 from typing import Protocol, runtime_checkable
 
@@ -38,6 +40,7 @@ from .context import (
 )
 from .approval import approval_context_digest
 from .errors import AgentError, HookError, NeilAgentError
+from .execution_journal import ExecutionJournal, TurnStatus
 from .events import (
     ApprovalDecision,
     EventBus,
@@ -64,7 +67,7 @@ from .schemas import (
 )
 from .skills import redact_skill_bodies_from_messages
 from .subtask import note_parent_run_id, parent_tool_event_scope
-from .execution_budget import check_execution_budget
+from .execution_budget import check_execution_budget, execution_is_cancelled
 from .task import TaskTracker
 from .tools.registry import ToolRegistry
 
@@ -174,6 +177,7 @@ class Agent:
         event_bus: EventBus | None = None,
         event_factory: RuntimeEventFactory | None = None,
         file_checkpoints: FileCheckpointHistory | None = None,
+        execution_journal: ExecutionJournal | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -188,6 +192,15 @@ class Agent:
         self._base_system_prompt = system_prompt
         self._project_instructions = project_instructions
         self._registry = registry
+        self._execution_journal = execution_journal
+        self._execution_id: str | None = None
+        self._last_execution_id: str | None = None
+        self._uncommitted_executions: list[str] = []
+        self._session_id: str | None = None
+        self._journal_operation: int | None = None
+        self._operation_started = False
+        self._recovery_context = ""
+        self._turn_lock = Lock()
         self._system_prompt = self._build_system_prompt()
         self._max_rounds = max_rounds
         self._max_context_chars = max_context_chars
@@ -206,6 +219,67 @@ class Agent:
         self._file_checkpoints = file_checkpoints
         self._messages: list[Message] = []
         self._last_usage: TokenUsage | None = None
+
+    @property
+    def last_execution_id(self) -> str | None:
+        return self._last_execution_id
+
+    def bind_session(self, session_id: str | None) -> None:
+        """Bind future execution records to the entry point's selected session."""
+
+        if session_id != self._session_id:
+            self._uncommitted_executions.clear()
+        self._session_id = session_id
+
+    def mark_execution(self, status: TurnStatus) -> None:
+        """Settle successful turns included in the entry point's saved history."""
+
+        if self._execution_journal is not None:
+            self._execution_journal.settle(
+                self._uncommitted_executions, status, session_id=self._session_id,
+            )
+            if status in {"committed", "acknowledged"}:
+                self._uncommitted_executions.clear()
+
+    @contextmanager
+    def _execution_scope(self) -> Iterator[None]:
+        if not self._turn_lock.acquire(blocking=False):
+            raise AgentError("同一 Agent 已有正在执行的回合。")
+        self._last_execution_id = None
+        try:
+            if self._execution_journal is not None:
+                records = self._execution_journal.records()
+                retained_ids = {record.execution_id for record in records}
+                self._uncommitted_executions = [
+                    execution_id for execution_id in self._uncommitted_executions
+                    if execution_id in retained_ids
+                ]
+                self._recovery_context = self._execution_journal.recovery_context(records)
+                self._system_prompt = self._build_system_prompt()
+                self._execution_id = self._execution_journal.begin(self._session_id)
+                self._last_execution_id = self._execution_id
+            try:
+                yield
+            except BaseException as error:
+                if self._execution_journal is not None and self._execution_id is not None:
+                    status: TurnStatus = (
+                        "cancelled"
+                        if isinstance(error, (GeneratorExit, KeyboardInterrupt))
+                        or execution_is_cancelled()
+                        else "failed"
+                    )
+                    try:
+                        self._execution_journal.finish(self._execution_id, status)
+                    except NeilAgentError as journal_error:
+                        error.add_note(str(journal_error))
+                raise
+            else:
+                if self._execution_journal is not None and self._execution_id is not None:
+                    self._execution_journal.finish(self._execution_id, "completed")
+                    self._uncommitted_executions.append(self._execution_id)
+        finally:
+            self._execution_id = None
+            self._turn_lock.release()
 
     def set_event_bus(
         self,
@@ -257,6 +331,7 @@ class Agent:
         """Start a new conversation."""
 
         self._messages.clear()
+        self._uncommitted_executions.clear()
         self._last_usage = None
         if self._task_tracker is not None:
             self._task_tracker.clear()
@@ -269,6 +344,8 @@ class Agent:
             project_instructions,
         )
         rebuilt = self._with_tool_workflow(rebuilt, self._registry)
+        if self._recovery_context:
+            rebuilt = f"{rebuilt.rstrip()}\n\n{self._recovery_context}"
         self._project_instructions = project_instructions
         self._system_prompt = rebuilt
 
@@ -346,6 +423,7 @@ class Agent:
 
         validate_message_history(messages)
         self._messages = self._trim_history(messages)
+        self._uncommitted_executions.clear()
         self._last_usage = last_usage
 
     def prepare_compaction(
@@ -482,6 +560,10 @@ class Agent:
     def chat(self, user_input: str) -> str:
         """Send one user message and return the complete assistant response."""
 
+        with self._execution_scope():
+            return self._chat_turn(user_input)
+
+    def _chat_turn(self, user_input: str) -> str:
         user_message = self._make_user_message(user_input)
         request_messages = self._request_messages(user_message)
         turn_started_at = monotonic()
@@ -568,6 +650,10 @@ class Agent:
     def stream_chat(self, user_input: str) -> Generator[str, None, None]:
         """Yield one response as it arrives, then save the completed round."""
 
+        with self._execution_scope():
+            yield from self._stream_chat_turn(user_input)
+
+    def _stream_chat_turn(self, user_input: str) -> Generator[str, None, None]:
         user_message = self._make_user_message(user_input)
         request_messages = self._request_messages(user_message)
         turn_started_at = monotonic()
@@ -1124,7 +1210,10 @@ class Agent:
             self._base_system_prompt,
             self._project_instructions,
         )
-        return self._with_tool_workflow(prompt, self._registry)
+        prompt = self._with_tool_workflow(prompt, self._registry)
+        if self._recovery_context:
+            prompt = f"{prompt.rstrip()}\n\n{self._recovery_context}"
+        return prompt
 
     @staticmethod
     def _with_tool_workflow(
@@ -1177,15 +1266,47 @@ class Agent:
             if call.name == "run_quality_check"
             else None
         )
-        with parent_tool_event_scope(self._span_event_id(tool_span)):
-            return self._execute_tool_call_body(
-                call,
-                activity=describe_tool_call(call),
-                started_at=started_at,
-                requires_approval=requires_approval,
-                tool_span=tool_span,
-                quality_span=quality_span,
-                instruction_digest=instruction_digest,
+        self._operation_started = False
+        if self._execution_journal is not None and self._execution_id is not None:
+            self._journal_operation = self._execution_journal.request(
+                self._execution_id, call.name, requires_approval=requires_approval,
+                target=call.arguments.get("path"),
+            )
+        try:
+            with parent_tool_event_scope(self._span_event_id(tool_span)):
+                return self._execute_tool_call_body(
+                    call,
+                    activity=describe_tool_call(call),
+                    started_at=started_at,
+                    requires_approval=requires_approval,
+                    tool_span=tool_span,
+                    quality_span=quality_span,
+                    instruction_digest=instruction_digest,
+                )
+        finally:
+            self._journal_operation = None
+            self._operation_started = False
+
+    def _journal_start_operation(self) -> None:
+        check_execution_budget()
+        if (
+            self._execution_journal is not None and self._execution_id is not None
+            and self._journal_operation is not None
+        ):
+            self._execution_journal.operation(
+                self._execution_id, self._journal_operation, "started",
+            )
+        self._operation_started = True
+
+    def _journal_result(self, result: ToolResult) -> None:
+        if (
+            self._execution_journal is not None and self._execution_id is not None
+            and self._journal_operation is not None
+        ):
+            self._execution_journal.operation(
+                self._execution_id, self._journal_operation,
+                ("failed" if result.is_error else "succeeded")
+                if self._operation_started else "skipped",
             )
 
     def _execute_tool_call_body(
@@ -1225,6 +1346,7 @@ class Agent:
             else self._refresh_instruction_scope(call)
         )
         if scope_result is not None:
+            self._journal_result(scope_result)
             result = self._after_tool_hook(call, scope_result)
             self._finish_runtime_tool_spans(
                 call,
@@ -1254,6 +1376,7 @@ class Agent:
 
         if not requires_approval:
             check_execution_budget()
+            self._journal_start_operation()
             result = self._registry.execute(call)
             return self._finish_tool_call(
                 call,
@@ -1378,6 +1501,13 @@ class Agent:
                 "elapsed_ms": self._elapsed_ms(approval_started_at),
             },
         )
+        if (
+            self._execution_journal is not None and self._execution_id is not None
+            and self._journal_operation is not None
+        ):
+            self._execution_journal.operation(
+                self._execution_id, self._journal_operation, "approved",
+            )
         self._emit_activity(
             "running",
             f"执行：{activity.title}",
@@ -1405,6 +1535,7 @@ class Agent:
         approved_execution = self._registry.execute_approved(
             call,
             approved_preview=preview.content,
+            before_execute=self._journal_start_operation,
         )
         result = approved_execution.result
         return self._finish_tool_call(
@@ -1472,6 +1603,7 @@ class Agent:
     ) -> ToolResult:
         """Record observable task state and append safe workflow guidance."""
 
+        self._journal_result(result)
         result = self._after_tool_hook(call, result)
         if self._task_tracker is not None:
             self._task_tracker.record_tool_result(call, result)

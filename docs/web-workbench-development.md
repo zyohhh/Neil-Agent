@@ -2,11 +2,13 @@
 
 > 状态：P9 completed · idle-only same-provider runtime model switching
 >
-> 更新时间：2026-08-18
+> 更新时间：2026-10-17（执行恢复与模型切换事务维护）
 >
 > 适用范围：Neil-Agent 本地 Web 前端、Web 适配层与相关测试
 >
 > 参考界面：用户提供的 [`Expected web UI.png`](<Expected web UI.png>)（1586 × 992）
+
+2026-10-17 后端维护：成功 turn 保存增加跨进程版本冲突检测，冲突沿用 `save_failed` 闭锁；工具执行事实独立于成功历史保存，失败/重启后提示核对。模型切换先准备完整 HostRuntime、worker 与候选投影，提交前复核状态，提交后才释放旧运行时；通知或旧实例清理失败不回退。协议版本与前端命令不变；人工检查/结清执行记录使用 CLI，边界见 [`execution-recovery.md`](execution-recovery.md)。
 
 ## 1. 文档目的
 

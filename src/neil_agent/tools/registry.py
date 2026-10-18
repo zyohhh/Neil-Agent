@@ -138,6 +138,7 @@ class ToolRegistry:
         call: ToolCall,
         *,
         approved_preview: str,
+        before_execute: Callable[[], None] | None = None,
     ) -> ApprovedToolExecution:
         """Revalidate one approved preview and report binding without exposing it."""
 
@@ -160,6 +161,8 @@ class ToolRegistry:
                 self._error(call, "操作预览在确认后发生变化，请重新预览并确认。"),
                 "changed",
             )
+        if before_execute is not None:
+            before_execute()
         return ApprovedToolExecution(self._invoke(call, registered.handler), "valid")
 
     def _invoke(self, call: ToolCall, handler: ToolHandler) -> ToolResult:

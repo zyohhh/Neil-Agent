@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from .errors import SessionError
+from .file_lock import StateFileLock
 from .providers.base import ProviderId
 from .schemas import Message, TokenUsage, validate_message_history
 from .task import (
@@ -349,7 +350,7 @@ def _migrate_snapshot(
 
 @dataclass(frozen=True, slots=True)
 class SessionHandle:
-    """Identity and original creation time for the active session."""
+    """Identity, runtime binding and loaded revision for the active session."""
 
     session_id: str
     created_at: datetime
@@ -357,6 +358,7 @@ class SessionHandle:
     parent_session_id: str | None = None
     runtime_provider: ProviderId | None = None
     runtime_model: str | None = None
+    base_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +378,7 @@ class SessionSummary:
     parent_session_id: str | None = None
     runtime_provider: ProviderId | None = None
     runtime_model: str | None = None
+    revision: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,6 +455,7 @@ class SessionStore:
             parent_session_id=snapshot.parent_session_id,
             runtime_provider=snapshot.runtime_provider,
             runtime_model=snapshot.runtime_model,
+            base_digest=_snapshot_digest(snapshot),
         )
 
     def save(
@@ -466,7 +470,7 @@ class SessionStore:
         runtime_model: str | None = None,
         create_only: bool = False,
     ) -> SessionSnapshot:
-        """Atomically replace one versioned snapshot."""
+        """Compare the loaded revision, then atomically replace its snapshot."""
 
         self._validate_session_id(handle.session_id)
         created_at = self._normalize_time(handle.created_at)
@@ -509,17 +513,40 @@ class SessionStore:
         except ValueError as error:
             raise SessionError(f"无法保存无效会话：{error}") from error
 
-        if create_only:
-            self._write_new_snapshot(snapshot)
-        else:
+        root = self._resolved_root(create=True)
+        assert root is not None
+        with StateFileLock(root / ".sessions.lock", SessionError):
+            exists = self.has_saved(handle.session_id)
+            if create_only or handle.base_digest is None:
+                if exists:
+                    raise SessionError("会话已存在或已被其他进程保存，未执行覆盖；请重新加载。")
+            elif (
+                not exists
+                or _snapshot_digest(self.load(handle.session_id)) != handle.base_digest
+            ):
+                raise SessionError("会话已被其他进程修改或删除，未执行覆盖；请重新加载。")
+            # All writes use replace so a reader sees either complete version.
             self._write_snapshot(snapshot)
         return snapshot
 
-    def rename(self, session_id: str, title: str) -> SessionSnapshot:
+    def rename(
+        self, session_id: str, title: str, *, expected_digest: str | None = None,
+    ) -> SessionSnapshot:
         """Atomically rename one saved session without changing its contents."""
 
+        root = self._resolved_root(create=False)
+        if root is None:
+            raise SessionError("尚无已保存的本地会话。")
+        with StateFileLock(root / ".sessions.lock", SessionError):
+            return self._rename_locked(session_id, title, expected_digest=expected_digest)
+
+    def _rename_locked(
+        self, session_id: str, title: str, *, expected_digest: str | None,
+    ) -> SessionSnapshot:
         normalized = normalize_session_title(title)
         snapshot = self.load(session_id)
+        if expected_digest is not None and _snapshot_digest(snapshot) != expected_digest:
+            raise SessionError("会话已被其他进程修改，未执行重命名；请重新加载。")
         renamed = SessionSnapshot(
             session_id=snapshot.session_id,
             created_at=snapshot.created_at,
@@ -602,10 +629,23 @@ class SessionStore:
             raise SessionError(f"无法读取本地会话大小：{error}") from error
         return self._summary(snapshot, size_bytes=size_bytes)
 
-    def delete(self, session_id: str) -> SessionSummary:
+    def delete(
+        self, session_id: str, *, expected_digest: str | None = None,
+    ) -> SessionSummary:
         """Delete one exact, valid session after the caller obtains approval."""
 
+        root = self._resolved_root(create=False)
+        if root is None:
+            raise SessionError("尚无已保存的本地会话。")
+        with StateFileLock(root / ".sessions.lock", SessionError):
+            return self._delete_locked(session_id, expected_digest=expected_digest)
+
+    def _delete_locked(
+        self, session_id: str, *, expected_digest: str | None,
+    ) -> SessionSummary:
         summary = self.get_summary(session_id)
+        if expected_digest is not None and summary.revision != expected_digest:
+            raise SessionError("确认后会话已被修改，未执行删除；请重新预览。")
         path = self._root / f"{session_id}.json"
         try:
             path.unlink()
@@ -788,7 +828,8 @@ class SessionStore:
         snapshot_payload = (prepared.snapshot.model_dump_json(indent=2) + "\n").encode(
             "utf-8"
         )
-        self._write_exclusive(target, snapshot_payload, "会话导入")
+        with StateFileLock(root / ".sessions.lock", SessionError):
+            self._write_exclusive(target, snapshot_payload, "会话导入")
         return prepared.snapshot
 
     def _load_path(self, path: Path, *, expected_id: str) -> SessionSnapshot:
@@ -849,20 +890,13 @@ class SessionStore:
                 except OSError:
                     pass
 
-    def _write_new_snapshot(self, snapshot: SessionSnapshot) -> None:
-        payload = (snapshot.model_dump_json(indent=2) + "\n").encode("utf-8")
-        if len(payload) > MAX_SESSION_FILE_BYTES:
-            raise SessionError(
-                f"会话快照超过 {MAX_SESSION_FILE_BYTES} 字节，未执行保存。"
-            )
-        root = self._resolved_root(create=True)
-        assert root is not None
-        target = root / f"{snapshot.session_id}.json"
-        self._write_exclusive(target, payload, "新会话保存")
-
     def _resolved_root(self, *, create: bool) -> Path | None:
         try:
             if create:
+                parent = self._root.parent
+                parent.mkdir(exist_ok=True)
+                if parent.resolve(strict=True) != parent or not parent.is_dir():
+                    raise SessionError("本地会话目录必须是工作区内的真实目录。")
                 self._root.mkdir(parents=True, exist_ok=True)
             elif not self._root.exists():
                 return None
@@ -973,7 +1007,13 @@ class SessionStore:
             parent_session_id=snapshot.parent_session_id,
             runtime_provider=snapshot.runtime_provider,
             runtime_model=snapshot.runtime_model,
+            revision=_snapshot_digest(snapshot),
         )
+
+
+def _snapshot_digest(snapshot: SessionSnapshot) -> str:
+    # Hash the migrated model, so v1-v4 handles can participate without rewriting.
+    return sha256(snapshot.model_dump_json().encode("utf-8")).hexdigest()
 
 
 def normalize_session_title(value: str) -> str:

@@ -18,6 +18,7 @@ from .errors import (
     AgentError,
     ApprovalError,
     AuditError,
+    ExecutionJournalError,
     HookError,
     InstructionError,
     LLMError,
@@ -342,6 +343,7 @@ def run_noninteractive(
                 approval_handler=approval_broker,
                 activity_handler=writer.activity,
             )
+            agent.bind_session(session.session_id)
             writer.start(
                 session_id=session.session_id,
                 model=settings.selected_model,
@@ -368,15 +370,26 @@ def run_noninteractive(
                 raise ApprovalError("模型未请求与 approval ID 匹配的操作，未执行写入。")
             saved = False
             if save_session:
-                session_store.save(
-                    session,
-                    agent.messages,
-                    (),
-                    None,
-                    last_usage=agent.last_usage,
-                    create_only=True,
-                )
+                try:
+                    session_store.save(
+                        session,
+                        agent.messages,
+                        (),
+                        None,
+                        last_usage=agent.last_usage,
+                        create_only=True,
+                    )
+                except SessionError as error:
+                    try:
+                        agent.mark_execution("save_failed")
+                    except ExecutionJournalError as journal_error:
+                        error.add_note(str(journal_error))
+                    raise
                 saved = True
+                try:
+                    agent.mark_execution("committed")
+                except ExecutionJournalError:
+                    stderr.write("会话已保存，执行日志状态未更新；请核对本地执行记录。\n")
             writer.success(
                 session_id=session.session_id,
                 result=result,
@@ -388,6 +401,11 @@ def run_noninteractive(
                     else None
                 ),
             )
+            if not saved:
+                try:
+                    agent.mark_execution("acknowledged")
+                except ExecutionJournalError:
+                    stderr.write("回答已输出，执行日志状态未更新；请核对本地执行记录。\n")
             return 0
         finally:
             host_runtime.close()

@@ -96,11 +96,26 @@ class WorkbenchSnapshotService:
         self._host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
 
     def replace_host_runtime(self, settings: Settings) -> None:
-        """Close the current runtime and rebuild it for a prepared model switch."""
+        """Prepare before replacing, keeping the old runtime live on failure."""
 
-        self._host_runtime.close()
+        candidate = self.prepare_host_runtime(settings)
+        previous = self.activate_host_runtime(settings, candidate)
+        previous.close()
+
+    def prepare_host_runtime(self, settings: Settings) -> HostRuntime:
+        """Build a candidate without changing the active settings or tools."""
+
+        return build_host_runtime(settings, mode=HostMode.WEB)
+
+    def activate_host_runtime(
+        self, settings: Settings, candidate: HostRuntime,
+    ) -> HostRuntime:
+        """Swap prepared state under the controller lock; cleanup follows commit."""
+
+        previous = self._host_runtime
         self.settings = settings
-        self._host_runtime = build_host_runtime(settings, mode=HostMode.WEB)
+        self._host_runtime = candidate
+        return previous
 
     def close(self) -> None:
         """Release the shared host runtime when the workbench shuts down."""
@@ -296,10 +311,12 @@ class WorkbenchSnapshotService:
         *,
         fallback_to_latest: bool = True,
         runtime_settings: Settings | None = None,
+        host_runtime: HostRuntime | None = None,
     ) -> WorkbenchSnapshotDto:
         """Build one internally consistent, versioned first-screen snapshot."""
 
         settings = runtime_settings or self.settings
+        runtime = host_runtime or self._host_runtime
         sessions = self.sessions()
         selected = session
         if selected is None and fallback_to_latest:
@@ -311,10 +328,10 @@ class WorkbenchSnapshotService:
         capabilities = provider.capabilities
         security = observe_host_security(
             settings,
-            self._host_runtime.registry,
+            runtime.registry,
             audit_probe=(
-                self._host_runtime.audit_sink.inspect
-                if self._host_runtime.audit_sink is not None
+                runtime.audit_sink.inspect
+                if runtime.audit_sink is not None
                 else None
             ),
         )
@@ -345,12 +362,12 @@ class WorkbenchSnapshotService:
             sessions=sessions,
             files=self.files(depth=2),
             task=self._task(selected),
-            context=self.context_dto(selected, settings),
+            context=self.context_dto(selected, settings, host_runtime=runtime),
             review=review,
             security=SecurityDto.from_security_shield(
                 security,
                 sandbox_backend=settings.sandbox_backend,
-                runtime_profile=self._host_runtime.profile.runtime_profile.value,
+                runtime_profile=runtime.profile.runtime_profile.value,
             ),
         )
 
@@ -381,12 +398,14 @@ class WorkbenchSnapshotService:
         self,
         session: SessionSnapshot | None,
         settings: Settings,
+        *,
+        host_runtime: HostRuntime | None = None,
     ) -> ContextDto:
         messages = () if session is None else session.messages
         usage = None if session is None else session.last_usage
         tomography = build_host_context_tomography(
             settings,
-            self._host_runtime,
+            host_runtime or self._host_runtime,
             messages,
             last_server_usage=usage,
         )

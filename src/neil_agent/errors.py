@@ -21,6 +21,10 @@ class SessionError(NeilAgentError):
     """A local session storage or validation error."""
 
 
+class ExecutionJournalError(AgentError):
+    """Durable execution metadata could not be safely read or written."""
+
+
 class InstructionError(NeilAgentError):
     """A project-instruction load, initialization, or reload error."""
 

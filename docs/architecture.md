@@ -113,6 +113,8 @@ web/ (React + TypeScript)
 7. 只有整个请求成功完成，Agent 才将本轮消息写入历史。
 8. CLI 将成功历史、任务计划、最近检查和该回合服务端 `usage` 原子保存到当前本地会话。
 
+`ExecutionJournal` 在对话历史之外记录工具审批、实际开始与结果，写操作开始前必须落盘。失败/取消/进程中断后的写副作用在下一回合提示核对，不自动重放。`SessionStore` 在跨进程内核锁内比较已加载快照摘要再保存；过期句柄拒绝覆盖，成功后更新句柄。同一 Agent 实例拒绝重叠回合。日志隐私、容量和人工结清见 [`execution-recovery.md`](execution-recovery.md)。
+
 思考模式发生工具调用时，LLM 层会保留 Anthropic thinking block，并在后续工具结果请求中完整回传。
 
 可选 `EventBus` 会从同一执行路径旁路接收 `RuntimeEvent`。每个 Agent 回合、模型请求、工具调用、审批和质量检查各有稳定关联 ID；开始与结束事实拥有独立事件 ID，子阶段通过父事件 ID 形成可投影的层级。未配置事件总线时，该观察路径不分配这些 ID，也不增加观察线程。
@@ -192,7 +194,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - 浏览器可开始/取消单个 Agent turn、接收流式回答与活动、审批高风险工具；Review 使用固定只读 Git 命令，不向浏览器开放任意 shell 或 thinking 正文。
 - Web 每轮构造隔离的 `Agent`，随后恢复当前选中的严格 `SessionSnapshot`；成功 turn 原子保存，失败/取消不落盘，保存失败会闭锁后续 turn 直到显式新建或重选会话。
 - `new_session` / `select_session` 受控制租约、精确 revision 与 idle 状态约束；跨 Provider/模型私有状态在发网前拒绝，消息正文不进入浏览器快照或 `session_changed` 事件。
-- `switch_model` 只接受 `WEB_RUNTIME_MODEL_ALLOWLIST` 中同一启动 Provider 的精确模型 ID，并且仅在控制端、revision 匹配、无运行/审批且活动会话为空并未保存时生效。事务先重建并校验完整 `Settings` 与下一 turn worker，再一次性替换运行时；准备失败保持旧模型，切换本身不发送网络请求。
+- `switch_model` 只接受 `WEB_RUNTIME_MODEL_ALLOWLIST` 中同一启动 Provider 的精确模型 ID，并且仅在控制端、revision 匹配、无运行/审批且活动会话为空并未保存时生效。事务先准备完整 `Settings`、HostRuntime、下一 turn worker 与投影，复核状态后一起替换，再释放旧实例；准备失败保持旧模型和可用工具，提交后通知/清理失败不回退。切换本身不发送网络请求。
 - 会话版本 5 保存可选 Provider/模型绑定。Web 成功 turn 必须写入绑定；已绑定会话只能由完全相同的运行时恢复和续写。进程内发生过模型切换后，含历史但没有绑定的旧会话 fail closed，不能借 `select_session` 绕过空会话门禁。
 - Web 与 CLI 共用 `observe_host_security()`；条件 `run_command`、应用工具边界、OS 沙箱和审计状态使用同一注册与观察语义。Web 快照通过 `build_host_context_tomography()` 投影与 Agent `/context` 同源的 `ContextTomography` 元数据。详见 [`host-runtime.md`](host-runtime.md)。
 

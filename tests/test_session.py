@@ -94,7 +94,7 @@ def test_atomic_replace_failure_preserves_previous_session(
     monkeypatch.setattr(session_module.os, "replace", fail_replace)
 
     with pytest.raises(SessionError, match="保存失败"):
-        store.save(handle, _messages("changed"), (), None)
+        store.save(store.handle_for(original), _messages("changed"), (), None)
 
     assert store.load(handle.session_id) == original
     assert list(store.root.glob("*.tmp")) == []

@@ -74,6 +74,18 @@
 
 新增 39 项离线回归，完整门禁 932 passed、11 skipped、16 deselected；ruff、mypy 和离线 wheel 构建通过。子预算继承父级取消与 deadline；已有流句柄可主动关闭，SDK 建连和非流式阻塞请求仍遵循 `REQUEST_TIMEOUT`。本轮不自动压缩、不静默截断工具结果，也不扩大工具面。
 
+### 2026-10-17：执行恢复与运行时事务
+
+| 项 | 状态 | 完成标准 |
+| --- | --- | --- |
+| 持久执行记录 | 已完成 | 写操作开始前落盘；失败/重启提供有界核对上下文，人工检查与结清；不自动重放 |
+| 会话并发保护 | 已完成 | 内核锁与快照摘要比较；旧句柄拒绝覆盖，保存后刷新句柄；同一 Agent 拒绝重叠回合 |
+| 模型切换事务 | 已完成 | 完整候选运行时/worker/投影先准备，提交前复核状态；失败保留旧实例，提交后才清理旧实例 |
+
+执行记录经 `HostRuntime` 懒装配并纳入 close；非交互只读和子运行时不创建记录、不扩大工具面。实现、容量限制、CLI 操作与事务边界见 [`execution-recovery.md`](execution-recovery.md)。
+
+新增 48 项回归（1 项符号链接权限跳过）；完整离线门禁 979 passed、12 skipped、16 deselected，ruff、mypy 与离线 wheel 构建通过。核对 12 个包内模块哈希并从 wheel 导入执行日志、锁、运行时与 Web 控制器。前端未改动，未重复页面回归，未调用真实模型 API。
+
 ## 批次 1：RuntimeProfile + benchmark-minimal
 
 **问题：** 入口能力由 `HostMode` 隐式决定；eval 使用与日常 Agent 相近的工具面，模型分数无法声明 harness。DeepSeek 官方 benchmark 明确跑在 Minimal 上。

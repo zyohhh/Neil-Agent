@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from .audit import AuditLogStatus, JsonlAuditSink
 from .config import Settings
+from .execution_journal import ExecutionJournal
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
 from .task import PlanChangeHandler, TaskTracker
@@ -92,6 +93,7 @@ class HostRuntime:
     task_tracker: TaskTracker | None
     guest_import: GuestExportImportTools | None
     profile: HostProfile
+    execution_journal: ExecutionJournal | None = None
     _disposers: list[RuntimeDisposer] = field(default_factory=list, repr=False)
     _closed: bool = field(default=False, repr=False)
 
@@ -105,8 +107,14 @@ class HostRuntime:
         if self._closed:
             return
         self._closed = True
+        failures: list[Exception] = []
         while self._disposers:
-            self._disposers.pop()()
+            try:
+                self._disposers.pop()()
+            except Exception as error:  # noqa: BLE001 - finish the remaining teardown.
+                failures.append(error)
+        if failures:
+            raise ExceptionGroup("Host runtime cleanup failed", failures)
 
 
 def resolve_runtime_profile(
@@ -338,6 +346,13 @@ def build_host_runtime(
         task_tools_enabled=task_tracker is not None,
         audit_enabled=settings.audit_log_enabled,
     )
+    journal: ExecutionJournal | None = None
+    if (
+        mode is not HostMode.NONINTERACTIVE_READONLY
+        and runtime_profile is not RuntimeProfile.READONLY_SUBTASK
+    ):
+        journal = ExecutionJournal(filesystem.root)
+        disposers.append(journal.close)
     return HostRuntime(
         filesystem=filesystem,
         shell=shell,
@@ -348,6 +363,7 @@ def build_host_runtime(
         task_tracker=task_tracker,
         guest_import=guest_import,
         profile=host_profile,
+        execution_journal=journal,
         _disposers=disposers,
     )
 
@@ -424,4 +440,5 @@ def build_agent(
         file_checkpoints=(
             host_runtime.filesystem.checkpoints if attach_checkpoints else None
         ),
+        execution_journal=host_runtime.execution_journal,
     )

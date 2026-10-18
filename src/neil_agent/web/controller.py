@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..approval import GENERIC_APPROVAL_BINDING_KIND
 from ..config import Settings
 from ..execution_budget import execution_budget_scope
-from ..errors import SessionError
+from ..errors import ExecutionJournalError, SessionError
 from ..events import EventBus, RuntimeEvent
 from ..host_runtime import HostMode, HostRuntime, build_agent, build_host_runtime
 from ..providers.factory import create_provider
@@ -70,6 +70,7 @@ class CompletedTurnState:
     steps: tuple[TaskStep, ...]
     latest_quality_check: QualityCheckRecord | None
     last_usage: TokenUsage | None
+    execution_id: str | None = None
 
 
 class TurnWorker(Protocol):
@@ -148,6 +149,7 @@ class AgentTurnWorker:
                 activity_handler=on_activity,
                 event_bus=bus,
             )
+            agent.bind_session(None if session is None else session.session_id)
             if session is not None:
                 agent.restore_messages(session.messages, session.last_usage)
                 task_tracker.restore(
@@ -180,6 +182,7 @@ class AgentTurnWorker:
                         steps=task_tracker.steps,
                         latest_quality_check=task_tracker.latest_quality_check,
                         last_usage=agent.last_usage,
+                        execution_id=agent.last_execution_id,
                     )
                 finally:
                     subscription.close()
@@ -572,44 +575,73 @@ class WorkbenchController:
             ) from error
         if not prepared.changes_model:
             return self._result(command, "accepted", "Model already selected")
+        candidate_runtime: HostRuntime | None = None
         try:
+            candidate_runtime = self._service.prepare_host_runtime(prepared.settings)
             candidate_worker = worker_factory(prepared.settings)
-        except Exception as error:  # noqa: BLE001 - isolated factory boundary.
-            raise CommandError(
-                "model_switch_failed",
-                "The requested model could not be prepared",
-            ) from error
-        try:
             candidate_projection = self._service.snapshot(
                 None,
                 fallback_to_latest=False,
                 runtime_settings=prepared.settings,
+                host_runtime=candidate_runtime,
             )
-        except Exception as error:  # noqa: BLE001 - projection isolation boundary.
-            raise CommandError(
-                "model_switch_failed",
-                "The requested model could not be prepared",
-            ) from error
-        with self._lock:
-            self._require_control(client_id)
-            self._require_revision(command.expected_revision)
-            self._require_model_switch_available_locked()
-            if (
-                self._runtime_settings is not current_settings
-                or self._active_handle.session_id != active_session_id
-            ):
-                raise CommandError(
-                    "model_switch_conflict",
-                    "Runtime state changed while preparing the model",
+            with self._lock:
+                self._require_control(client_id)
+                self._require_revision(command.expected_revision)
+                self._require_model_switch_available_locked()
+                if (
+                    self._runtime_settings is not current_settings
+                    or self._active_handle.session_id != active_session_id
+                ):
+                    raise CommandError(
+                        "model_switch_conflict",
+                        "Runtime state changed while preparing the model",
+                    )
+                model_payload = self._model_changed_payload_locked(candidate_projection)
+                previous_runtime = self._service.activate_host_runtime(
+                    prepared.settings, candidate_runtime
                 )
-            self._runtime_settings = prepared.settings
-            self._worker = candidate_worker
-            self._runtime_has_switched = True
-            self._service.replace_host_runtime(prepared.settings)
-            self._publish(
-                "model_changed",
-                self._model_changed_payload_locked(candidate_projection),
-            )
+                self._runtime_settings = prepared.settings
+                self._worker = candidate_worker
+                self._runtime_has_switched = True
+                candidate_runtime = None  # ownership transferred at commit
+                revision_at_commit = self._revision
+                try:
+                    self._publish("model_changed", model_payload)
+                except Exception:  # noqa: BLE001 - transport is outside the transaction.
+                    if self._revision == revision_at_commit:
+                        self._revision += 1
+                    self._output.append(OutputEntryDto(
+                        kind="warning", text="Model switched; reconnect to refresh runtime state.",
+                        timestamp=self._now(),
+                    ))
+        except CommandError:
+            raise
+        except Exception as error:  # noqa: BLE001 - preparation isolation boundary.
+            raise CommandError(
+                "model_switch_failed", "The requested model could not be prepared"
+            ) from error
+        finally:
+            if candidate_runtime is not None:
+                try:
+                    candidate_runtime.close()
+                except Exception:  # noqa: BLE001 - preserve the preparation error.
+                    with self._lock:
+                        self._output.append(OutputEntryDto(
+                            kind="warning", text="Unused model runtime cleanup failed.",
+                            timestamp=self._now(),
+                        ))
+        try:
+            previous_runtime.close()
+        except Exception:  # noqa: BLE001 - committed state must remain usable.
+            with self._lock:
+                self._output.append(
+                    OutputEntryDto(
+                        kind="warning",
+                        text="Model switched, but the previous runtime cleanup failed.",
+                        timestamp=self._now(),
+                    )
+                )
         return self._result(command, "accepted", "Runtime model switched")
 
     def _select_session(self, client_id: str, command: ClientCommand) -> dict[str, Any]:
@@ -800,6 +832,19 @@ class WorkbenchController:
                 self._history_revision += 1
                 self._active_handle = self._session_store.handle_for(saved)
                 self._session_persistence = "saved"
+            journal = self._service.host_runtime.execution_journal
+            if journal is not None and completed.execution_id is not None:
+                try:
+                    journal.settle(
+                        (completed.execution_id,),
+                        "save_failed" if self._session_persistence == "save_failed" else "committed",
+                        session_id=handle.session_id,
+                    )
+                except ExecutionJournalError:
+                    self._output.append(OutputEntryDto(
+                        kind="warning", text="Execution journal settlement failed; inspect local execution records.",
+                        timestamp=self._now(),
+                    ))
         if self._session_persistence == "save_failed":
             self._publish_session_changed(reset_runtime=False)
             self._finish_run(
