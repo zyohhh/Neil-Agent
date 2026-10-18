@@ -12,8 +12,13 @@ import pytest
 from neil_agent.errors import ToolError
 from neil_agent.schemas import ToolCall
 from neil_agent.tools.registry import ToolRegistry
+from neil_agent.processes import ProcessResult
 from neil_agent.tools.shell import ShellTools
 
+
+
+def _process_result(command, returncode, stdout, stderr=""):
+    return ProcessResult(returncode, stdout, stderr=stderr)
 
 def _git(root: Path, *arguments: str) -> str:
     result = subprocess.run(
@@ -227,12 +232,12 @@ def test_failed_git_diff_does_not_leak_partial_sensitive_output(
 
     def failed(
         command: list[str], **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> ProcessResult:
         if failure == "timeout":
-            raise subprocess.TimeoutExpired(command, 1, output=raw)
-        return subprocess.CompletedProcess(command, 1, raw, "")
+            return ProcessResult(-1, raw, "timeout")
+        return _process_result(command, 1, raw, "")
 
-    monkeypatch.setattr(subprocess, "run", failed)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", failed)
     with pytest.raises(ToolError) as error:
         ShellTools(tmp_path).git_diff()
     assert "SYNTHETIC_SECRET" not in str(error.value)

@@ -12,7 +12,7 @@ from neil_agent.config import Settings
 from neil_agent.errors import LLMError
 from neil_agent.evaluation import coding as coding_module
 from neil_agent.evaluation.coding import _ReferenceModel, run_coding_evals
-from neil_agent.evaluation.coding_catalog import CodingTask, load_coding_tasks
+from neil_agent.evaluation.coding_catalog import CodingTask, FunctionCase, load_coding_tasks
 from neil_agent.host_runtime import BENCHMARK_MINIMAL_WRITE_TOOLS
 from neil_agent.schemas import ModelResponse, TokenUsage, ToolCall
 
@@ -58,6 +58,45 @@ def test_completion_claim_without_changes_fails_grading() -> None:
     result = report.results[0]
     assert not report.success and result.status == "grade_failed"
     assert result.changed_files == () and result.grader_exit_code != 0
+
+
+@pytest.mark.parametrize("source", [
+    'print("NEIL_GRADER_COMPLETED")\nraise SystemExit(0)\n',
+    'import os\nprint("NEIL_GRADER_COMPLETED", flush=True)\nos._exit(0)\n',
+    'print("functional_checks_passed")\nraise SystemExit(0)\n',
+    'import os\nos.write(1, b\'{"challenge":"fake","calls":[]}\')\nos._exit(0)\n',
+    'def paginate(*args):\n    print("NEIL_GRADER_COMPLETED")\n    return []\n',
+])
+def test_source_cannot_issue_its_own_passing_receipt(source: str) -> None:
+    def factory(task, *_):
+        return _ReferenceModel(task.model_copy(update={"reference_files": {"pager.py": source}}))
+
+    result = run_coding_evals(
+        _settings(), task_ids=("pagination-boundaries",),
+        simulated=True, model_factory=factory,
+    ).results[0]
+    assert result.baseline_failed and result.changed_files == ("pager.py",)
+    assert result.status == "grade_failed"
+
+
+@pytest.mark.parametrize("kind", ["mutation", "alias"])
+def test_parent_grader_checks_mutation_and_nested_aliases(kind: str) -> None:
+    def factory(task, *_):
+        sources = dict(task.reference_files)
+        if kind == "mutation":
+            sources["config_reader.py"] = sources["config_reader.py"].replace(
+                "result = deepcopy(defaults)", "result = defaults"
+            )
+        else:
+            sources["config_reader.py"] = sources["config_reader.py"].replace(
+                "result = deepcopy(defaults)", "result = dict(defaults)"
+            )
+        return _ReferenceModel(task.model_copy(update={"reference_files": sources}))
+
+    report = run_coding_evals(
+        _settings(), task_ids=("config-precedence",), simulated=True, model_factory=factory
+    )
+    assert report.results[0].status == "grade_failed"
 
 
 def test_server_usage_and_actual_profile_are_recorded_and_workspaces_deleted() -> None:
@@ -201,8 +240,8 @@ def test_reported_token_threshold_prevents_next_model_request() -> None:
 
 
 def test_invalid_baseline_never_constructs_a_paid_model(monkeypatch) -> None:
-    task = load_coding_tasks()[0].model_copy(
-        update={"grader": 'print("NEIL_GRADER_COMPLETED")'}
+    task = next(task for task in load_coding_tasks() if task.id == "pagination-boundaries").model_copy(
+        update={"cases": (FunctionCase(module="pager", function="paginate", args=([1, 2], 1, 1), expected=[2]),)}
     )
     monkeypatch.setattr(coding_module, "load_coding_tasks", lambda: (task,))
 

@@ -42,6 +42,7 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | 指令作用域 | 启动目录 `cwd` | `cwd` | `cwd` | `cwd`（已与 CLI 对齐） |
 | 审计 hooks | 可选 | 可选 | 可选 | 可选 |
 | 持久执行记录 | ✅ 懒创建 | ❌ | ✅ 懒创建 | ✅ 懒创建 |
+| 工作区执行独占 | ✅ 回合至保存 | ❌ | ✅ 回合至输出/保存 | ✅ 回合至保存 |
 | 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | ✅ 选择、恢复、成功后原子保存 |
 | 进程内模型切换 | ❌ 启动配置 | ❌ 启动配置 | ❌ 启动配置 | ✅ 同 Provider 显式白名单、idle + 空会话 |
 | Security Shield 投影 | ✅ `/cockpit` | ❌（无对应 UI） | ❌（无对应 UI） | ✅ 与 CLI 共用观察函数 |
@@ -99,6 +100,8 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | Web worker 与控制器分离 | ✅ `web/turn_worker.py` 执行 Agent；控制器保留控制权、审批协调与持久化 |
 
 当前无已知 host_runtime 迁移缺口；后续新能力应优先经 `build_host_runtime()` 接入三入口。
+
+`WorkspaceExecutionLock` 与执行记录按相同入口条件装配并纳入 disposer。Agent 自动保护执行，宿主持久化作用域可重入；关闭运行时不提前释放活动任务。`build_agent()` 的 `before_turn_handler` 与 `completed_turn_handler` 为宿主会话检查/保存使用，不是模型工具或可由项目指令替换的策略。并发保护见 [`execution-recovery.md`](execution-recovery.md)，命令取消和子进程清理见 [`host-processes.md`](host-processes.md)。
 
 `HostMode` 只描述入口差异。与入口正交的能力预设（`standard` / `benchmark-minimal` / `web-safe` / `readonly-subtask`）、可逆注册、只读子任务与 Skills 见 [`runtime-profile.md`](runtime-profile.md)（批次 1–3、5 已完成；批次 4、6 Session goals / Plan DSL 仍为可选）。Web 默认 `web-safe`（与 `standard` 工具面一致）；`neil-agent-eval` 默认 `benchmark-minimal`。`run_readonly_subtask` 与 `load_skill` 仅在 CLI/Web 的 `standard` / `web-safe` 面注册；子运行时使用 `readonly-subtask` profile，不注册二者。CLI 与 Web 每 turn 使用 `new_parent_run_id()` 与 `subtask_parent_scope`（含 `cancel`）；协作取消/超时见 `execution_budget.py`。Web **后端**支持子任务，前端无独立子任务面板。CLI / 非交互进程结束、Web `replace_host_runtime()`（模型切换）与 Workbench 关闭时调用 `HostRuntime.close()` 逆序卸载。Web **turn 结束不再**关闭共享 runtime。`WorkbenchSnapshotService` 持有会话级实例；`AgentTurnWorker` 经 `host_runtime_provider` 复用。已知缺口见 [`project-status.md`](project-status.md)。
 

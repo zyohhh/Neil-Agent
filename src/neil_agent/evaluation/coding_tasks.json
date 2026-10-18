@@ -12,7 +12,178 @@
     "reference_files": {
       "pager.py": "def paginate(items, page, page_size):\n    if page < 1 or page_size < 1:\n        raise ValueError(\"page and page_size must be positive\")\n    start = (page - 1) * page_size\n    return items[start:start + page_size]\n"
     },
-    "grader": "import sys\nsys.path.insert(0, sys.argv[1])\nfrom pager import paginate\n\nitems = [0, 1, 2, 3, 4]\nassert paginate(items, 1, 2) == [0, 1]\nassert paginate(items, 2, 2) == [2, 3]\nassert paginate(items, 3, 2) == [4]\nassert paginate(items, 4, 2) == []\nassert paginate([], 1, 2) == []\nassert items == [0, 1, 2, 3, 4]\nassert paginate(items, 1, 10) is not items\nfor page, size in ((0, 1), (-1, 1), (1, 0), (1, -1)):\n    try:\n        paginate(items, page, size)\n    except ValueError:\n        pass\n    else:\n        raise AssertionError(\"invalid pagination accepted\")\nprint(\"NEIL_GRADER_COMPLETED\")\n"
+    "cases": [
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          1,
+          2
+        ],
+        "expected": [
+          0,
+          1
+        ],
+        "identity": "new"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          2,
+          2
+        ],
+        "expected": [
+          2,
+          3
+        ],
+        "identity": "new"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          3,
+          2
+        ],
+        "expected": [
+          4
+        ],
+        "identity": "new"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          4,
+          2
+        ],
+        "expected": [],
+        "identity": "new"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [],
+          1,
+          2
+        ],
+        "expected": [],
+        "identity": "new"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          1,
+          10
+        ],
+        "expected": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "identity": "new"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1
+          ],
+          0,
+          1
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1
+          ],
+          -1,
+          1
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1
+          ],
+          1,
+          0
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "pager",
+        "function": "paginate",
+        "args": [
+          [
+            0,
+            1
+          ],
+          1,
+          -1
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      }
+    ]
   },
   {
     "id": "slug-collision",
@@ -27,7 +198,113 @@
     "reference_files": {
       "slugs.py": "import re\n\n\ndef unique_slug(title, existing):\n    base = re.sub(r\"[^a-z0-9]+\", \"-\", title.lower()).strip(\"-\") or \"item\"\n    if base not in existing:\n        return base\n    suffix = 2\n    while f\"{base}-{suffix}\" in existing:\n        suffix += 1\n    return f\"{base}-{suffix}\"\n"
     },
-    "grader": "import sys\nsys.path.insert(0, sys.argv[1])\nfrom slugs import unique_slug\n\nassert unique_slug(\"Hello World!\", set()) == \"hello-world\"\nassert unique_slug(\"Post\", {\"post\", \"post-2\", \"other\"}) == \"post-3\"\nassert unique_slug(\"Post\", {\"post\", \"post-3\", \"post-99\"}) == \"post-2\"\nassert unique_slug(\"...\", {\"item\", \"item-2\"}) == \"item-3\"\nexisting = {\"post\", \"post-2\", \"post-3\"}\nassert unique_slug(\"Post\", existing) == \"post-4\"\nassert existing == {\"post\", \"post-2\", \"post-3\"}\nassert unique_slug(\"Fresh\", {\"fresh-2\"}) == \"fresh\"\nprint(\"NEIL_GRADER_COMPLETED\")\n"
+    "cases": [
+      {
+        "module": "slugs",
+        "function": "unique_slug",
+        "args": [
+          "Hello World!",
+          {
+            "$set": []
+          }
+        ],
+        "expected": "hello-world",
+        "identity": "any"
+      },
+      {
+        "module": "slugs",
+        "function": "unique_slug",
+        "args": [
+          "Post",
+          {
+            "$set": [
+              "other",
+              "post",
+              "post-2"
+            ]
+          }
+        ],
+        "expected": "post-3",
+        "identity": "any"
+      },
+      {
+        "module": "slugs",
+        "function": "unique_slug",
+        "args": [
+          "Post",
+          {
+            "$set": [
+              "post",
+              "post-3",
+              "post-99"
+            ]
+          }
+        ],
+        "expected": "post-2",
+        "identity": "any"
+      },
+      {
+        "module": "slugs",
+        "function": "unique_slug",
+        "args": [
+          "...",
+          {
+            "$set": [
+              "item",
+              "item-2"
+            ]
+          }
+        ],
+        "expected": "item-3",
+        "identity": "any"
+      },
+      {
+        "module": "slugs",
+        "function": "unique_slug",
+        "args": [
+          "Post",
+          {
+            "$set": [
+              "post",
+              "post-2",
+              "post-3"
+            ]
+          }
+        ],
+        "expected": "post-4",
+        "identity": "any"
+      },
+      {
+        "module": "slugs",
+        "function": "unique_slug",
+        "args": [
+          "Fresh",
+          {
+            "$set": [
+              "fresh-2"
+            ]
+          }
+        ],
+        "expected": "fresh",
+        "identity": "any"
+      },
+      {
+        "module": "slugs",
+        "function": "unique_slug",
+        "args": [
+          "POST",
+          {
+            "$set": [
+              "post",
+              "post-2",
+              "post-4"
+            ]
+          }
+        ],
+        "expected": "post-3",
+        "identity": "any"
+      }
+    ]
   },
   {
     "id": "config-precedence",
@@ -45,6 +322,191 @@
       "config_reader.py": "from copy import deepcopy\n\n\ndef merge_config(defaults, overrides):\n    result = deepcopy(defaults)\n    for key, value in overrides.items():\n        if isinstance(value, dict) and isinstance(result.get(key), dict):\n            result[key] = merge_config(result[key], value)\n        else:\n            result[key] = deepcopy(value)\n    return result\n",
       "cli_options.py": "def apply_cli(config, args):\n    result = dict(config)\n    for key, value in args.items():\n        if value is not None:\n            result[key] = value\n    return result\n"
     },
-    "grader": "import sys\nsys.path.insert(0, sys.argv[1])\nfrom config_reader import merge_config\nfrom cli_options import apply_cli\nfrom copy import deepcopy\n\ndefaults = {\"server\": {\"port\": 80, \"tls\": {\"enabled\": True, \"ca\": \"root\"}}, \"tags\": [\"a\"]}\noverrides = {\"server\": {\"port\": 8080, \"tls\": {\"enabled\": False}}, \"new\": [1]}\nbefore_defaults, before_overrides = deepcopy(defaults), deepcopy(overrides)\nmerged = merge_config(defaults, overrides)\nassert merged[\"server\"] == {\"port\": 8080, \"tls\": {\"enabled\": False, \"ca\": \"root\"}}\nassert defaults == before_defaults and overrides == before_overrides\nmerged[\"tags\"].append(\"b\")\nmerged[\"new\"].append(2)\nmerged[\"server\"][\"tls\"][\"ca\"] = \"changed\"\nassert defaults == before_defaults and overrides == before_overrides\nassert merge_config({\"a\": {\"x\": 1}}, {\"a\": 0}) == {\"a\": 0}\nassert merge_config({\"a\": 0}, {\"a\": {\"x\": 1}}) == {\"a\": {\"x\": 1}}\nconfig = {\"verbose\": True, \"retries\": 3, \"name\": \"old\", \"port\": 80}\nassert apply_cli(config, {\"verbose\": False, \"retries\": 0, \"name\": \"\", \"port\": None}) == {\"verbose\": False, \"retries\": 0, \"name\": \"\", \"port\": 80}\nassert config == {\"verbose\": True, \"retries\": 3, \"name\": \"old\", \"port\": 80}\nprint(\"NEIL_GRADER_COMPLETED\")\n"
+    "cases": [
+      {
+        "module": "config_reader",
+        "function": "merge_config",
+        "args": [
+          {
+            "server": {
+              "port": 80,
+              "tls": {
+                "enabled": true,
+                "ca": "root"
+              }
+            },
+            "tags": [
+              "a"
+            ]
+          },
+          {
+            "server": {
+              "port": 8080,
+              "tls": {
+                "enabled": false
+              }
+            },
+            "new": [
+              1
+            ]
+          }
+        ],
+        "expected": {
+          "server": {
+            "port": 8080,
+            "tls": {
+              "enabled": false,
+              "ca": "root"
+            }
+          },
+          "tags": [
+            "a"
+          ],
+          "new": [
+            1
+          ]
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "config_reader",
+        "function": "merge_config",
+        "args": [
+          {
+            "a": {
+              "x": 1
+            }
+          },
+          {
+            "a": 0
+          }
+        ],
+        "expected": {
+          "a": 0
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "config_reader",
+        "function": "merge_config",
+        "args": [
+          {
+            "a": 0
+          },
+          {
+            "a": {
+              "x": 1
+            }
+          }
+        ],
+        "expected": {
+          "a": {
+            "x": 1
+          }
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "config_reader",
+        "function": "merge_config",
+        "args": [
+          {
+            "a": [
+              1
+            ]
+          },
+          {}
+        ],
+        "expected": {
+          "a": [
+            1
+          ]
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "config_reader",
+        "function": "merge_config",
+        "args": [
+          {},
+          {
+            "a": [
+              1
+            ]
+          }
+        ],
+        "expected": {
+          "a": [
+            1
+          ]
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "cli_options",
+        "function": "apply_cli",
+        "args": [
+          {
+            "verbose": true,
+            "retries": 3,
+            "name": "old",
+            "port": 80
+          },
+          {
+            "verbose": false,
+            "retries": 0,
+            "name": "",
+            "port": null
+          }
+        ],
+        "expected": {
+          "verbose": false,
+          "retries": 0,
+          "name": "",
+          "port": 80
+        },
+        "identity": "new"
+      },
+      {
+        "module": "cli_options",
+        "function": "apply_cli",
+        "args": [
+          {
+            "a": 1
+          },
+          {}
+        ],
+        "expected": {
+          "a": 1
+        },
+        "identity": "new"
+      },
+      {
+        "module": "cli_options",
+        "function": "apply_cli",
+        "args": [
+          {},
+          {
+            "a": false
+          }
+        ],
+        "expected": {
+          "a": false
+        },
+        "identity": "new"
+      },
+      {
+        "module": "cli_options",
+        "function": "apply_cli",
+        "args": [
+          {},
+          {
+            "a": null
+          }
+        ],
+        "expected": {},
+        "identity": "new"
+      }
+    ]
   }
 ]

@@ -355,6 +355,13 @@ def run(console: Console) -> None:
     except NeilAgentError as error:
         console.print(f"[bold red]Provider 启动失败：[/bold red]{error}")
         raise SystemExit(1) from None
+
+    def persist_completed_turn() -> None:
+        nonlocal current_session
+        current_session = _save_current_session(
+            console, session_store, current_session, agent, task_tracker
+        )
+
     agent = build_agent(
         settings,
         host_runtime,
@@ -365,6 +372,8 @@ def run(console: Console) -> None:
             preview,
         ),
         activity_handler=renderer.show_activity,
+        before_turn_handler=lambda: session_store.require_current(current_session),
+        completed_turn_handler=persist_completed_turn,
     )
     _show_welcome(
         console,
@@ -444,13 +453,14 @@ def run(console: Console) -> None:
                         audit_sink=audit_sink,
                     )
                 elif completed_turns:
-                    current_session = _save_current_session(
-                        console,
-                        session_store,
-                        current_session,
-                        agent,
-                        task_tracker,
-                    )
+                    try:
+                        with agent.execution_scope():
+                            session_store.require_current(current_session)
+                            current_session = _save_current_session(
+                                console, session_store, current_session, agent, task_tracker
+                            )
+                    except NeilAgentError as error:
+                        console.print(str(error), markup=False)
             else:
                 _show_cockpit(
                     console,
@@ -522,33 +532,38 @@ def run(console: Console) -> None:
             if command_argument:
                 console.print("[yellow]用法：/init[/yellow]")
             else:
-                initialized = _initialize_instructions(
-                    console,
-                    agent,
-                    filesystem_tools.root,
-                    instruction_manager.current.target,
-                    project_instructions,
-                )
-                if initialized is not None:
-                    project_instructions = initialized
-                    instruction_manager.current = initialized
+                try:
+                    with agent.execution_scope():
+                        initialized = _initialize_instructions(
+                            console, agent, filesystem_tools.root,
+                            instruction_manager.current.target, project_instructions,
+                        )
+                        if initialized is not None:
+                            project_instructions = initialized
+                            instruction_manager.current = initialized
+                except NeilAgentError as error:
+                    console.print(str(error), markup=False)
             continue
         if command in COMPACT_COMMANDS:
-            current_session = _compact_session(
-                console,
-                renderer,
-                agent,
-                session_store,
-                current_session,
-                task_tracker,
-                focus=command_argument.strip(),
-            )
+            try:
+                with agent.execution_scope():
+                    session_store.require_current(current_session)
+                    current_session = _compact_session(
+                        console, renderer, agent, session_store, current_session,
+                        task_tracker, focus=command_argument.strip(),
+                    )
+            except NeilAgentError as error:
+                console.print(str(error), markup=False)
             continue
         if command in REWIND_FILE_COMMANDS:
             if command_argument:
                 console.print("[yellow]用法：/rewind-task[/yellow]")
             else:
-                _rewind_latest_task(console, filesystem_tools)
+                try:
+                    with agent.execution_scope():
+                        _rewind_latest_task(console, filesystem_tools)
+                except NeilAgentError as error:
+                    console.print(str(error), markup=False)
             continue
         if command in SESSIONS_COMMANDS:
             _show_sessions(
@@ -638,13 +653,6 @@ def run(console: Console) -> None:
                 console.print(f"[bold red]请求失败：[/bold red]{error}")
             else:
                 renderer.finish_answer()
-                current_session = _save_current_session(
-                    console,
-                    session_store,
-                    current_session,
-                    agent,
-                    task_tracker,
-                )
 
 
 def _show_welcome(

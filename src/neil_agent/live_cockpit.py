@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event, Lock
@@ -1695,8 +1696,9 @@ class LiveCockpitApp(App[None]):
         if tools is None:
             return
         try:
-            result = tools.apply_latest_restore(prepared)
-        except ToolError as error:
+            with getattr(self._agent, "execution_scope", nullcontext)():
+                result = tools.apply_latest_restore(prepared)
+        except NeilAgentError as error:
             self.notify(str(error), severity="error")
             return
         self.notify(result, severity="information")

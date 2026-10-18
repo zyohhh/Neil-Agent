@@ -516,18 +516,30 @@ class SessionStore:
         root = self._resolved_root(create=True)
         assert root is not None
         with StateFileLock(root / ".sessions.lock", SessionError):
-            exists = self.has_saved(handle.session_id)
-            if create_only or handle.base_digest is None:
-                if exists:
-                    raise SessionError("会话已存在或已被其他进程保存，未执行覆盖；请重新加载。")
-            elif (
-                not exists
-                or _snapshot_digest(self.load(handle.session_id)) != handle.base_digest
-            ):
-                raise SessionError("会话已被其他进程修改或删除，未执行覆盖；请重新加载。")
+            self._require_current(handle, create_only=create_only)
             # All writes use replace so a reader sees either complete version.
             self._write_snapshot(snapshot)
         return snapshot
+
+    def require_current(self, handle: SessionHandle) -> None:
+        """Reject stale conversation state before model requests or file effects."""
+
+        self._validate_session_id(handle.session_id)
+        root = self._resolved_root(create=False)
+        if root is None:
+            if handle.base_digest is not None:
+                raise SessionError("会话已被删除，请重新加载。")
+            return
+        with StateFileLock(root / ".sessions.lock", SessionError):
+            self._require_current(handle)
+
+    def _require_current(self, handle: SessionHandle, *, create_only: bool = False) -> None:
+        exists = self.has_saved(handle.session_id)
+        if create_only or handle.base_digest is None:
+            if exists:
+                raise SessionError("会话已存在或已被其他进程保存，未执行覆盖；请重新加载。")
+        elif not exists or _snapshot_digest(self.load(handle.session_id)) != handle.base_digest:
+            raise SessionError("会话已被其他进程修改或删除，未执行覆盖；请重新加载。")
 
     def rename(
         self, session_id: str, title: str, *, expected_digest: str | None = None,

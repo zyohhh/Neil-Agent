@@ -8,6 +8,8 @@
 
 2026-10-17 维护补强已完成：模型请求绑定当时的项目指令摘要；作用域更新后延期同批剩余调用。主任务取消在审批返回和预览重校验后继续检查，阻止取消后启动后续工具。读写批量门禁、审批后取消及预览重校验期间取消均有回归，完整离线门禁 932 passed。安全内核、工具面及审批绑定保持原有约束。
 
+2026-10-18 后续维护：修复代码评分以 stdout 标记和退出码直接判断通过的问题，改为父进程功能断言与独立调用 worker；宿主质量检查/Git/验收统一有界执行器，取消、超时及正常结束均清理所拥有的进程树；writable runtime 增加执行至保存的工作区独占和发网前会话版本复核。进程树管理和评分 worker 均不提供 OS 沙箱，范围见 [`host-processes.md`](host-processes.md)、[`coding-evaluations.md`](coding-evaluations.md)、[`execution-recovery.md`](execution-recovery.md)。安全批次编号和工具权限面不变。
+
 1. **权限由代码执行**，`AGENTS.md` / 模型输出不能放宽 denylist 或跳过审批。
 2. **一份名单**：凭据目录与文件名只在 `sensitive_paths.py` 维护；host 文件工具、Git 暂存、Web 文件树/diff 路径、guest export、sandbox snapshot 与 WSB 校验共用。
 3. **不把 loopback 当成对抗本机同用户恶意进程的隔离**；Web 加固针对协议完整性，不假装防 malware。

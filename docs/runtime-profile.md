@@ -92,6 +92,18 @@
 
 内置任务作为包资源分发；`neil-agent-install-check` 在全新环境安装实际 wheel，核对所有入口、默认评测和真实 loopback 服务。15 项安装检查与 3 项模拟代码任务通过；离线门禁 1011 passed、12 skipped、16 deselected，ruff、mypy 和 wheel 构建通过。真实模型入口保留费用门禁，本轮无在线成绩。方法与记录见 [`installation-acceptance.md`](installation-acceptance.md)、[`coding-evaluations.md`](coding-evaluations.md)。
 
+### 2026-10-18：评分与执行边界维护
+
+| 项 | 状态 | 完成标准 |
+| --- | --- | --- |
+| 评分完成证据 | 已完成 | 被测代码不决定通过；父进程检查完整结构化调用证据、功能结果、参数保持与别名 |
+| 宿主进程生命周期 | 已完成 | 质量检查/Git/验收响应预算取消；正常结束、超时和输出超限均清理拥有的子进程树 |
+| 运行期并发保护 | 已完成 | writable runtime 跨进程独占工作区，覆盖模型、工具与会话保存；旧版本在模型调用前拒绝 |
+
+`HostMode`/profile 工具面和审批内核不变；执行锁懒创建并纳入 close，只读入口/子运行时不创建。运行锁不阻止外部编辑器和同用户恶意代码；进程树管理不提供 OS 沙箱。完整边界分别见 [`execution-recovery.md`](execution-recovery.md)、[`host-processes.md`](host-processes.md) 和 [`coding-evaluations.md`](coding-evaluations.md)。
+
+新增 28 项回归，完整离线门禁 1039 passed、12 skipped、16 deselected。后续整任务累计预算、评测 OS 隔离与通用 PR CI 仍在项目状态中明确保留，不视为本批完成。
+
 ## 批次 1：RuntimeProfile + benchmark-minimal
 
 **问题：** 入口能力由 `HostMode` 隐式决定；eval 使用与日常 Agent 相近的工具面，模型分数无法声明 harness。DeepSeek 官方 benchmark 明确跑在 Minimal 上。

@@ -10,6 +10,8 @@ from difflib import unified_diff
 from hashlib import sha256
 from pathlib import Path
 
+from ..processes import run_bounded
+
 from ..errors import ToolError
 from ..git_output_filter import redact_git_diff_text, redact_git_status_text
 from ..schemas import ToolDefinition
@@ -450,35 +452,33 @@ class ShellTools:
             if self._git_subcommand(command) is not None and (self.root / ".git").exists():
                 overrides = self._readonly_filter_overrides(environment, effective_timeout)
                 command = [command[0], *overrides, *command[1:]]
-        try:
-            return subprocess.run(
-                command,
-                cwd=self.root,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=effective_timeout,
-                check=False,
-                shell=False,
-                creationflags=self._creation_flags(),
+        result = run_bounded(
+            command,
+            cwd=self.root,
+            environment=environment,
+            timeout=effective_timeout,
+            max_output_bytes=8_388_608 if command[0] == "git" else max(65_536, self.max_output_chars * 4),
+            merge_stderr=False,
+        )
+        if result.reason != "completed":
+            output = self._combined_output(
+                self._sanitize_git_output(command, result.output), result.stderr
             )
-        except subprocess.TimeoutExpired as error:
-            output = self._sanitize_git_output(command, self._timeout_output(error))
+            detail = {
+                "timeout": f"命令执行超过 {effective_timeout:g} 秒，已停止。",
+                "output_limit": "命令输出超过安全上限，已停止。",
+                "unavailable": "命令启动或进程树管理失败，未继续执行。",
+            }.get(result.reason, "命令执行失败。")
             message = (
                 f"Command: {subprocess.list2cmdline(command)}\n"
                 f"Working directory: {self.root}\n"
-                f"命令执行超过 {effective_timeout:g} 秒，已停止。"
+                f"{detail}"
             )
             if output:
                 message += f"\n{output}"
-            raise ToolError(message) from error
-        except FileNotFoundError as error:
-            raise ToolError(f"找不到命令：{command[0]}") from error
-        except OSError as error:
-            raise ToolError("命令启动失败。") from error
+            raise ToolError(message)
+        assert result.returncode is not None
+        return subprocess.CompletedProcess(command, result.returncode, result.output, result.stderr)
 
     def _format_process_result(
         self,
@@ -527,29 +527,24 @@ class ShellTools:
         """Disable external conversion drivers before inspection, including previews."""
 
         try:
-            result = subprocess.run(
+            result = run_bounded(
                 self._git_command(
                     "config", "--null", "--name-only", "--get-regexp",
                     r"^filter\..*\.(clean|process|required)$",
                 ),
                 cwd=self.root,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
+                environment=environment,
                 timeout=timeout,
-                check=False,
-                shell=False,
-                creationflags=self._creation_flags(),
+                max_output_bytes=16_000,
+                merge_stderr=False,
+                encoding_errors="strict",
             )
-        except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
+        except (OSError, UnicodeError) as error:
             raise ToolError("无法安全检查 Git filter 配置，已停止只读检查。") from error
-        if result.returncode not in {0, 1} or len(result.stdout) > 16_000:
+        if result.reason != "completed" or result.returncode not in {0, 1}:
             raise ToolError("无法安全检查 Git filter 配置，已停止只读检查。")
         drivers = sorted(
-            {key.rsplit(".", 1)[0] for key in result.stdout.split("\0") if key}
+            {key.rsplit(".", 1)[0] for key in result.output.split("\0") if key}
         )
         overrides: list[str] = []
         for driver in drivers:
@@ -735,19 +730,6 @@ class ShellTools:
         truncated = body[:half] + marker + body[-keep_tail:]
         return truncated + footer
 
-    def _timeout_output(self, error: subprocess.TimeoutExpired) -> str:
-        stdout = self._decode_timeout_stream(error.stdout)
-        stderr = self._decode_timeout_stream(error.stderr)
-        return self._combined_output(stdout, stderr)
-
-    @staticmethod
-    def _decode_timeout_stream(value: str | bytes | None) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        return value
-
     @staticmethod
     def _safe_environment() -> dict[str, str]:
         environment = {
@@ -765,13 +747,6 @@ class ShellTools:
             }
         )
         return environment
-
-    @staticmethod
-    def _creation_flags() -> int:
-        if os.name != "nt":
-            return 0
-        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-
 
 RUN_QUALITY_CHECK = ToolDefinition(
     name="run_quality_check",

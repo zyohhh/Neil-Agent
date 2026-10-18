@@ -168,6 +168,44 @@ def test_run_routes_explicit_live_cockpit_mode(
     assert live_calls == [tmp_path.resolve()]
 
 
+def test_live_turn_is_saved_under_execution_lock_before_ui_exit(tmp_path: Path, monkeypatch) -> None:
+    from threading import Thread
+
+    from neil_agent.errors import AgentError
+    from neil_agent.execution_lock import WorkspaceExecutionLock
+
+    settings = Settings(_env_file=None, deepseek_api_key="unused-fixture", workspace_root=tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "create_provider", lambda *_args, **_kwargs: FakeLLMClient(settings))
+    original_save = SessionStore.save
+    saves = []
+
+    def save(store, *args, **kwargs):
+        with pytest.raises(AgentError):
+            with WorkspaceExecutionLock(tmp_path).scope():
+                pytest.fail("CLI released workspace before saving")
+        saves.append(True)
+        return original_save(store, *args, **kwargs)
+
+    monkeypatch.setattr(SessionStore, "save", save)
+
+    def live(_console, _settings, agent, *_args, **_kwargs):
+        results = []
+        thread = Thread(target=lambda: results.extend(agent.stream_chat("live request")))
+        thread.start()
+        thread.join(10)
+        assert not thread.is_alive() and results == ["saved reply"]
+        assert len(saves) == 1
+        assert len(SessionStore(tmp_path).list_sessions().sessions) == 1
+        return 1
+
+    monkeypatch.setattr(cli, "_try_show_live_cockpit", live)
+    console = MagicMock(spec=Console)
+    console.input.side_effect = ["/cockpit --live", "/exit"]
+    cli.run(cast(Console, console))
+    assert len(saves) == 2  # Per-turn persistence and the final UI state snapshot.
+
+
 def test_live_cockpit_degrades_to_snapshot_without_a_terminal(
     tmp_path: Path,
 ) -> None:

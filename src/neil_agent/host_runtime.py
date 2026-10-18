@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 from .audit import AuditLogStatus, JsonlAuditSink
 from .config import Settings
 from .execution_journal import ExecutionJournal
+from .execution_lock import WorkspaceExecutionLock
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
 from .task import PlanChangeHandler, TaskTracker
@@ -94,6 +95,7 @@ class HostRuntime:
     guest_import: GuestExportImportTools | None
     profile: HostProfile
     execution_journal: ExecutionJournal | None = None
+    execution_lock: WorkspaceExecutionLock | None = None
     _disposers: list[RuntimeDisposer] = field(default_factory=list, repr=False)
     _closed: bool = field(default=False, repr=False)
 
@@ -347,12 +349,15 @@ def build_host_runtime(
         audit_enabled=settings.audit_log_enabled,
     )
     journal: ExecutionJournal | None = None
+    execution_lock: WorkspaceExecutionLock | None = None
     if (
         mode is not HostMode.NONINTERACTIVE_READONLY
         and runtime_profile is not RuntimeProfile.READONLY_SUBTASK
     ):
         journal = ExecutionJournal(filesystem.root)
         disposers.append(journal.close)
+        execution_lock = WorkspaceExecutionLock(filesystem.root)
+        disposers.append(execution_lock.close)
     return HostRuntime(
         filesystem=filesystem,
         shell=shell,
@@ -364,6 +369,7 @@ def build_host_runtime(
         guest_import=guest_import,
         profile=host_profile,
         execution_journal=journal,
+        execution_lock=execution_lock,
         _disposers=disposers,
     )
 
@@ -387,6 +393,8 @@ def build_agent(
     attach_hooks: bool = True,
     attach_checkpoints: bool = True,
     attach_instruction_scope: bool = True,
+    before_turn_handler: Callable[[], None] | None = None,
+    completed_turn_handler: Callable[[], None] | None = None,
 ) -> Agent:
     """Construct an Agent bound to one assembled host runtime."""
 
@@ -441,4 +449,7 @@ def build_agent(
             host_runtime.filesystem.checkpoints if attach_checkpoints else None
         ),
         execution_journal=host_runtime.execution_journal,
+        execution_lock=host_runtime.execution_lock,
+        before_turn_handler=before_turn_handler,
+        completed_turn_handler=completed_turn_handler,
     )

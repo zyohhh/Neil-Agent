@@ -34,10 +34,14 @@ def runtime_provenance() -> RuntimeProvenance:
         "execution_budget.py",
         "instructions.py",
         "processes.py",
+        "process_tree.py",
+        "execution_lock.py",
         "tools/filesystem.py",
         "tools/registry.py",
         "evaluation/coding.py",
         "evaluation/grading.py",
+        "evaluation/grading_worker.py",
+        "evaluation/coding_catalog.py",
     ]
     names.extend(
         f"providers/{entry.name}"

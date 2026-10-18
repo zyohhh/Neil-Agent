@@ -8,7 +8,7 @@
 
 调用记录先保存 `requested`；写工具获批后记录 `approved`，批准后预览再次匹配才保存 `started`，随后才进入实际 handler。日志写入失败时停止调用。handler 的成功/失败事实在后置 hook 之前记录，避免后置审计失败抹去已经发生的操作。
 
-整个回合结束后记录 `completed`、`failed` 或 `cancelled`。`completed` 仍等待入口保存会话；保存成功标记 `committed`，保存失败标记 `save_failed`。CLI 实时驾驶舱的成功回合在退出驾驶舱后随历史一起保存、结清；中途退出进程仍保留执行记录。非交互写模式未要求保存会话时，在成功输出结果后标记 `acknowledged`。
+整个回合结束后记录 `completed`、`failed` 或 `cancelled`。`completed` 仍等待入口保存会话；保存成功标记 `committed`，保存失败标记 `save_failed`。CLI 和实时驾驶舱每个成功回合均在释放执行锁前保存、结清；退出驾驶舱时另存最终 UI 状态。中途退出进程仍保留执行记录。非交互写模式未要求保存会话时，在成功输出结果后标记 `acknowledged`。
 
 每次更新使用同目录临时文件、flush/fsync、原子替换和跨进程内核锁。单文件最多 128 KiB、每回合最多 256 次工具调用、最多 256 个回合文件；容量不足时优先清理已结或无写副作用的终态记录，不自动淘汰未核对的写操作。未结记录占满容量、损坏记录或目录越界时停止新回合。
 
@@ -34,7 +34,17 @@
 
 每次成功保存都要从返回快照取得新句柄；CLI 的普通保存、恢复、改名和压缩，以及 Web 成功 turn 已遵循此约定。v1–v4 旧快照加载后参与相同比较，在下次保存时迁移。改名、删除与导入同样使用该锁；CLI 删除绑定用户预览过的版本，当前会话改名绑定已加载版本。
 
-冲突不自动合并：CLI 提示重新加载；Web 标记 `save_failed`，要求显式选择或新建会话后继续。该机制保护协作进程的快照保存，不锁住整个模型请求或工作区文件操作。同一 Agent 实例也拒绝重叠执行两个回合。
+冲突不自动合并：CLI 提示重新加载；Web 保存冲突标记 `save_failed`，要求显式选择或新建会话后继续。同一 Agent 实例也拒绝重叠执行两个回合。
+
+## 运行期独占
+
+`build_host_runtime()` 为 CLI、非交互写模式与 Web 装配 `WorkspaceExecutionLock`，由 `HostRuntime.close()` 关闭。首次执行才创建 `.neil-agent/.execution.lock`，使用跨进程内核锁，获取不到立即失败。只读入口与 `READONLY_SUBTASK` 不创建执行锁目录、不扩大工具面。
+
+Agent 在模型请求、工具执行与执行记录更新期间持锁；宿主入口将作用域延伸到会话保存和结清。CLI 的成功持久化回调在同一锁内执行，实时驾驶舱后台线程也使用该路径；Web 和非交互写模式在宿主外层持锁。CLI 初始化指令、压缩、文件恢复及驾驶舱检查点恢复也协调该锁。同一运行时仅允许拥有者线程重入，其他线程/进程及不同 writable runtime 均拒绝并发进入。
+
+CLI/Web 在获得执行权后、调用模型前通过 `SessionStore.require_current()` 再检查已加载版本，旧会话不能先执行写操作再等到保存才发现冲突。只读子任务沿父任务已有执行边界运行。运行时 close 只拒绝新作用域，不释放尚在执行的拥有者；正常退出、取消和异常释放内核锁，进程死亡由 OS 自动释放，无需按 PID 删除锁文件。
+
+该锁协调 Neil writable runtime 的执行；不同会话共享同一工作区时也串行执行。不阻止外部编辑器、旧版程序、直接 SessionStore 元数据操作或同用户恶意代码修改文件；保存时的快照版本比较和写审批重校验仍保留。它不提供工作区事务回滚。
 
 ## 模型切换事务
 
@@ -42,4 +52,4 @@ Web 仍只允许控制端在 idle、无审批、空且未保存的会话中切�
 
 准备失败或状态冲突会释放候选运行时，旧 Settings、worker 和工具保持可用。提交后一次替换配置与运行时，再清理旧实例；通知或旧实例清理失败只报告警告，不回退到已关闭的实例。`HostRuntime.close()` 尝试执行全部 disposer，最后汇总失败。切换不发送网络请求，不保证目标模型服务在线。
 
-主要回归见 `tests/test_execution_journal.py`、`tests/test_session_concurrency.py` 与 `tests/test_runtime_transactions.py`。
+主要回归见 `tests/test_execution_journal.py`、`tests/test_session_concurrency.py`、`tests/test_execution_lock.py` 与 `tests/test_runtime_transactions.py`，以及 CLI/Web/非交互的保存边界测试。

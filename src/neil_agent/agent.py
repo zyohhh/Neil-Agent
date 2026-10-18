@@ -41,6 +41,7 @@ from .context import (
 from .approval import approval_context_digest
 from .errors import AgentError, HookError, NeilAgentError
 from .execution_journal import ExecutionJournal, TurnStatus
+from .execution_lock import WorkspaceExecutionLock
 from .events import (
     ApprovalDecision,
     EventBus,
@@ -178,6 +179,9 @@ class Agent:
         event_factory: RuntimeEventFactory | None = None,
         file_checkpoints: FileCheckpointHistory | None = None,
         execution_journal: ExecutionJournal | None = None,
+        execution_lock: WorkspaceExecutionLock | None = None,
+        before_turn_handler: Callable[[], None] | None = None,
+        completed_turn_handler: Callable[[], None] | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -193,6 +197,9 @@ class Agent:
         self._project_instructions = project_instructions
         self._registry = registry
         self._execution_journal = execution_journal
+        self._execution_lock = execution_lock
+        self._before_turn_handler = before_turn_handler
+        self._completed_turn_handler = completed_turn_handler
         self._execution_id: str | None = None
         self._last_execution_id: str | None = None
         self._uncommitted_executions: list[str] = []
@@ -247,6 +254,30 @@ class Agent:
             raise AgentError("同一 Agent 已有正在执行的回合。")
         self._last_execution_id = None
         try:
+            with self.execution_scope():
+                if self._before_turn_handler is not None:
+                    self._before_turn_handler()
+                with self._journal_scope():
+                    yield
+                if self._completed_turn_handler is not None:
+                    self._completed_turn_handler()
+        finally:
+            self._execution_id = None
+            self._turn_lock.release()
+
+    @contextmanager
+    def execution_scope(self) -> Iterator[None]:
+        """Let a host keep execution ownership until its session save finishes."""
+
+        if self._execution_lock is None:
+            yield
+        else:
+            with self._execution_lock.scope():
+                yield
+
+    @contextmanager
+    def _journal_scope(self) -> Iterator[None]:
+        try:
             if self._execution_journal is not None:
                 records = self._execution_journal.records()
                 retained_ids = {record.execution_id for record in records}
@@ -279,7 +310,6 @@ class Agent:
                     self._uncommitted_executions.append(self._execution_id)
         finally:
             self._execution_id = None
-            self._turn_lock.release()
 
     def set_event_bus(
         self,

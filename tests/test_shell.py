@@ -12,8 +12,13 @@ import pytest
 
 from neil_agent.schemas import ToolCall
 from neil_agent.tools.registry import ToolRegistry
+from neil_agent.processes import ProcessResult
 from neil_agent.tools.shell import ShellTools
 
+
+
+def _process_result(command, returncode, stdout, stderr=""):
+    return ProcessResult(returncode, stdout, stderr=stderr)
 
 def test_quality_check_requires_preview_and_approval(
     monkeypatch: pytest.MonkeyPatch,
@@ -21,13 +26,13 @@ def test_quality_check_requires_preview_and_approval(
 ) -> None:
     calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **kwargs: Any) -> ProcessResult:
         calls.append((command, kwargs))
-        return subprocess.CompletedProcess(command, 0, "3 passed\n", "")
+        return _process_result(command, 0, "3 passed\n", "")
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "must-not-be-inherited")
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-be-inherited")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
     registry = ToolRegistry()
     ShellTools(tmp_path, timeout=15).register(registry)
     call = ToolCall(
@@ -60,10 +65,9 @@ def test_quality_check_requires_preview_and_approval(
     assert command == [sys.executable, "-m", "pytest", "-q"]
     assert options["cwd"] == tmp_path.resolve()
     assert options["timeout"] == 15
-    assert options["shell"] is False
-    assert options["stdin"] == subprocess.DEVNULL
-    assert "DEEPSEEK_API_KEY" not in options["env"]
-    assert "GITHUB_TOKEN" not in options["env"]
+    assert options["merge_stderr"] is False
+    assert "DEEPSEEK_API_KEY" not in options["environment"]
+    assert "GITHUB_TOKEN" not in options["environment"]
 
 
 def test_quality_check_rejects_commands_outside_allowlist(tmp_path: Path) -> None:
@@ -101,11 +105,11 @@ def test_git_inspection_commands_do_not_require_approval(
 ) -> None:
     commands: list[list[str]] = []
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **_: Any) -> ProcessResult:
         commands.append(command)
-        return subprocess.CompletedProcess(command, 0, "clean\n", "")
+        return _process_result(command, 0, "clean\n", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
     registry = ToolRegistry()
     ShellTools(tmp_path).register(registry)
 
@@ -163,10 +167,10 @@ def test_command_timeout_becomes_tool_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    def time_out(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired(command, 3, output=b"partial output")
+    def time_out(command: list[str], **_: Any) -> ProcessResult:
+        return ProcessResult(-1, "partial output", "timeout")
 
-    monkeypatch.setattr(subprocess, "run", time_out)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", time_out)
     registry = ToolRegistry()
     ShellTools(tmp_path, timeout=3).register(registry)
 
@@ -183,11 +187,11 @@ def test_cli_git_status_snapshot_uses_short_timeout(
 ) -> None:
     options: dict[str, Any] = {}
 
-    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **kwargs: Any) -> ProcessResult:
         options.update(kwargs)
-        return subprocess.CompletedProcess(command, 0, "## main\n", "")
+        return _process_result(command, 0, "## main\n", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
 
     snapshot = ShellTools(tmp_path, timeout=120).git_status_snapshot()
 
@@ -201,10 +205,10 @@ def test_failed_command_output_is_capped(
 ) -> None:
     output = "BEGIN-" + ("x" * 2_000) + "-END"
 
-    def fail(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 1, output, "")
+    def fail(command: list[str], **_: Any) -> ProcessResult:
+        return _process_result(command, 1, output, "")
 
-    monkeypatch.setattr(subprocess, "run", fail)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fail)
     registry = ToolRegistry()
     ShellTools(tmp_path, max_output_chars=1_000).register(registry)
 
@@ -227,22 +231,22 @@ def test_git_stage_previews_and_stages_only_explicit_paths(
     source.write_text("print('new')\n", encoding="utf-8")
     commands: list[list[str]] = []
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **_: Any) -> ProcessResult:
         commands.append(command)
         if "status" in command:
-            return subprocess.CompletedProcess(command, 0, " M src/app.py\n", "")
+            return _process_result(command, 0, " M src/app.py\n", "")
         if "ls-files" in command:
-            return subprocess.CompletedProcess(command, 0, "src/app.py\n", "")
+            return _process_result(command, 0, "src/app.py\n", "")
         if "diff" in command and "--stat" in command:
-            return subprocess.CompletedProcess(command, 0, "src/app.py | 1 +\n", "")
+            return _process_result(command, 0, "src/app.py | 1 +\n", "")
         if "diff" in command and "--cached" in command:
-            return subprocess.CompletedProcess(command, 0, "", "")
+            return _process_result(command, 0, "", "")
         if "diff" in command:
             diff = "--- a/src/app.py\n+++ b/src/app.py\n+print('new')\n"
-            return subprocess.CompletedProcess(command, 0, diff, "")
-        return subprocess.CompletedProcess(command, 0, "", "")
+            return _process_result(command, 0, diff, "")
+        return _process_result(command, 0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
     registry = ToolRegistry()
     ShellTools(tmp_path).register(registry)
     call = ToolCall(
@@ -286,14 +290,14 @@ def test_git_stage_previews_untracked_text_content(
 ) -> None:
     (tmp_path / "new.py").write_text("value = 1\n", encoding="utf-8")
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **_: Any) -> ProcessResult:
         if "status" in command:
-            return subprocess.CompletedProcess(command, 0, "?? new.py\n", "")
+            return _process_result(command, 0, "?? new.py\n", "")
         if "ls-files" in command:
-            return subprocess.CompletedProcess(command, 1, "", "not tracked")
-        return subprocess.CompletedProcess(command, 0, "", "")
+            return _process_result(command, 1, "", "not tracked")
+        return _process_result(command, 0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
     registry = ToolRegistry()
     ShellTools(tmp_path).register(registry)
 
@@ -328,8 +332,7 @@ def test_git_stage_rejects_broad_sensitive_or_outside_paths(
     path: str,
 ) -> None:
     monkeypatch.setattr(
-        subprocess,
-        "run",
+        "neil_agent.tools.shell.run_bounded",
         lambda *args, **kwargs: pytest.fail("Git must not run for rejected paths"),
     )
     registry = ToolRegistry()
@@ -354,17 +357,17 @@ def test_git_stage_rejects_stale_preview_when_file_changes(
     target.write_text("first\n", encoding="utf-8")
     commands: list[list[str]] = []
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **_: Any) -> ProcessResult:
         commands.append(command)
         if "status" in command:
-            return subprocess.CompletedProcess(command, 0, " M app.py\n", "")
+            return _process_result(command, 0, " M app.py\n", "")
         if "ls-files" in command:
-            return subprocess.CompletedProcess(command, 0, "app.py\n", "")
+            return _process_result(command, 0, "app.py\n", "")
         if "diff" in command:
-            return subprocess.CompletedProcess(command, 0, "fixed diff\n", "")
-        return subprocess.CompletedProcess(command, 0, "", "")
+            return _process_result(command, 0, "fixed diff\n", "")
+        return _process_result(command, 0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
     registry = ToolRegistry()
     ShellTools(tmp_path).register(registry)
     call = ToolCall(
@@ -392,20 +395,20 @@ def test_git_commit_previews_staged_diff_and_creates_only_local_commit(
 ) -> None:
     commands: list[list[str]] = []
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **_: Any) -> ProcessResult:
         commands.append(command)
         if "diff" in command and "--stat" in command:
-            return subprocess.CompletedProcess(command, 0, "app.py | 1 +\n", "")
+            return _process_result(command, 0, "app.py | 1 +\n", "")
         if "diff" in command:
             diff = "--- a/app.py\n+++ b/app.py\n+print('new')\n"
-            return subprocess.CompletedProcess(command, 0, diff, "")
+            return _process_result(command, 0, diff, "")
         if "commit" in command:
-            return subprocess.CompletedProcess(
+            return _process_result(
                 command, 0, "[main abc1234] Update app\n", ""
             )
-        return subprocess.CompletedProcess(command, 0, "", "")
+        return _process_result(command, 0, "", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
     registry = ToolRegistry()
     ShellTools(tmp_path).register(registry)
     call = ToolCall(
@@ -450,9 +453,8 @@ def test_git_commit_rejects_empty_staging_area(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+        "neil_agent.tools.shell.run_bounded",
+        lambda command, **kwargs: _process_result(command, 0, "", ""),
     )
     registry = ToolRegistry()
     ShellTools(tmp_path).register(registry)
@@ -476,16 +478,16 @@ def test_git_commit_rejects_stale_truncated_diff_preview(
     middle = ["first"]
     commands: list[list[str]] = []
 
-    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **_: Any) -> ProcessResult:
         commands.append(command)
         if "diff" in command and "--stat" in command:
-            return subprocess.CompletedProcess(command, 0, "app.py | 1 +\n", "")
+            return _process_result(command, 0, "app.py | 1 +\n", "")
         if "diff" in command:
             diff = ("a" * 1_500) + middle[0] + ("z" * 1_500)
-            return subprocess.CompletedProcess(command, 0, diff, "")
-        return subprocess.CompletedProcess(command, 0, "committed", "")
+            return _process_result(command, 0, diff, "")
+        return _process_result(command, 0, "committed", "")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("neil_agent.tools.shell.run_bounded", fake_run)
     registry = ToolRegistry()
     ShellTools(tmp_path, max_output_chars=1_000).register(registry)
     call = ToolCall(

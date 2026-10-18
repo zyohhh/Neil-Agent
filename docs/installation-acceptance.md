@@ -35,3 +35,5 @@ uv run neil-agent-install-check --wheel .\dist\neil_agent-0.1.0-py3-none-any.whl
 评测清单位于 `neil_agent/evaluation/` 包内，通过 `importlib.resources` 读取。`evals/tasks.json` 已迁移为 `src/neil_agent/evaluation/tasks.json`，安装后的默认命令无需仓库目录。质量检查调用的 `python -m neil_agent.evals` 与控制台脚本执行同一入口。
 
 本轮实际安装验收记录见 [`acceptance/2026-10-18-installation.json`](acceptance/2026-10-18-installation.json)。代码任务方法与真实运行方式见 [`coding-evaluations.md`](coding-evaluations.md)。
+
+评分、子进程生命周期和执行独占修复后的新 wheel 验收记录见 [`acceptance/2026-10-18-execution-hardening-installation.json`](acceptance/2026-10-18-execution-hardening-installation.json)。验收调用的固定命令使用 [`host-processes.md`](host-processes.md) 中的进程树执行器，生成代码的 OS 隔离仍待补齐。

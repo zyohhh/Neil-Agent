@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Literal, TextIO
 from unicodedata import category
@@ -319,94 +320,95 @@ def run_noninteractive(
             base_hooks=hooks,
         )
         try:
-            filesystem = host_runtime.filesystem
-            registry = host_runtime.registry
-            instruction_manager = host_runtime.instruction_manager
-            approval_broker: NoninteractiveApprovalBroker | None = None
-            if permission_mode != "read-only":
-                approval_broker = NoninteractiveApprovalBroker(
-                    ApprovalStore(filesystem.root),
-                    mode=permission_mode,
-                    prompt=prompt,
-                    instructions=lambda: instruction_manager.current.prompt_section(),
-                    request_handler=writer.approval_request,
-                    approval_id=approval_id,
-                    binding_resolver=registry.resolve_approval_binding,
+            with (host_runtime.execution_lock.scope() if host_runtime.execution_lock is not None else nullcontext()):
+                filesystem = host_runtime.filesystem
+                registry = host_runtime.registry
+                instruction_manager = host_runtime.instruction_manager
+                approval_broker: NoninteractiveApprovalBroker | None = None
+                if permission_mode != "read-only":
+                    approval_broker = NoninteractiveApprovalBroker(
+                        ApprovalStore(filesystem.root),
+                        mode=permission_mode,
+                        prompt=prompt,
+                        instructions=lambda: instruction_manager.current.prompt_section(),
+                        request_handler=writer.approval_request,
+                        approval_id=approval_id,
+                        binding_resolver=registry.resolve_approval_binding,
+                    )
+                session_store = SessionStore(filesystem.root)
+                session = session_store.new_session()
+                model = llm or create_provider(settings, retry_handler=writer.activity)
+                agent = build_agent(
+                    settings,
+                    host_runtime,
+                    model,
+                    approval_handler=approval_broker,
+                    activity_handler=writer.activity,
                 )
-            session_store = SessionStore(filesystem.root)
-            session = session_store.new_session()
-            model = llm or create_provider(settings, retry_handler=writer.activity)
-            agent = build_agent(
-                settings,
-                host_runtime,
-                model,
-                approval_handler=approval_broker,
-                activity_handler=writer.activity,
-            )
-            agent.bind_session(session.session_id)
-            writer.start(
-                session_id=session.session_id,
-                model=settings.selected_model,
-                workspace=filesystem.root,
-                tools=tuple(definition.name for definition in registry.definitions),
-                runtime_profile=host_runtime.profile.runtime_profile,
-            )
-            for chunk in agent.stream_chat(prompt):
-                writer.text_delta(chunk)
-            result = agent.messages[-1].content
-            if approval_broker is not None and approval_broker.requests:
-                writer.approval_required(
+                agent.bind_session(session.session_id)
+                writer.start(
+                    session_id=session.session_id,
+                    model=settings.selected_model,
+                    workspace=filesystem.root,
+                    tools=tuple(definition.name for definition in registry.definitions),
+                    runtime_profile=host_runtime.profile.runtime_profile,
+                )
+                for chunk in agent.stream_chat(prompt):
+                    writer.text_delta(chunk)
+                result = agent.messages[-1].content
+                if approval_broker is not None and approval_broker.requests:
+                    writer.approval_required(
+                        session_id=session.session_id,
+                        result=result,
+                        usage=agent.last_usage,
+                        approved_request_id=approval_broker.consumed_request_id,
+                    )
+                    return APPROVAL_REQUIRED_EXIT_CODE
+                if (
+                    permission_mode == "approve"
+                    and approval_broker is not None
+                    and approval_broker.consumed_request_id is None
+                ):
+                    raise ApprovalError("模型未请求与 approval ID 匹配的操作，未执行写入。")
+                saved = False
+                if save_session:
+                    try:
+                        session_store.save(
+                            session,
+                            agent.messages,
+                            (),
+                            None,
+                            last_usage=agent.last_usage,
+                            create_only=True,
+                        )
+                    except SessionError as error:
+                        try:
+                            agent.mark_execution("save_failed")
+                        except ExecutionJournalError as journal_error:
+                            error.add_note(str(journal_error))
+                        raise
+                    saved = True
+                    try:
+                        agent.mark_execution("committed")
+                    except ExecutionJournalError:
+                        stderr.write("会话已保存，执行日志状态未更新；请核对本地执行记录。\n")
+                writer.success(
                     session_id=session.session_id,
                     result=result,
+                    saved=saved,
                     usage=agent.last_usage,
-                    approved_request_id=approval_broker.consumed_request_id,
+                    approved_request_id=(
+                        approval_broker.consumed_request_id
+                        if approval_broker is not None
+                        else None
+                    ),
                 )
-                return APPROVAL_REQUIRED_EXIT_CODE
-            if (
-                permission_mode == "approve"
-                and approval_broker is not None
-                and approval_broker.consumed_request_id is None
-            ):
-                raise ApprovalError("模型未请求与 approval ID 匹配的操作，未执行写入。")
-            saved = False
-            if save_session:
-                try:
-                    session_store.save(
-                        session,
-                        agent.messages,
-                        (),
-                        None,
-                        last_usage=agent.last_usage,
-                        create_only=True,
-                    )
-                except SessionError as error:
+                if not saved:
                     try:
-                        agent.mark_execution("save_failed")
-                    except ExecutionJournalError as journal_error:
-                        error.add_note(str(journal_error))
-                    raise
-                saved = True
-                try:
-                    agent.mark_execution("committed")
-                except ExecutionJournalError:
-                    stderr.write("会话已保存，执行日志状态未更新；请核对本地执行记录。\n")
-            writer.success(
-                session_id=session.session_id,
-                result=result,
-                saved=saved,
-                usage=agent.last_usage,
-                approved_request_id=(
-                    approval_broker.consumed_request_id
-                    if approval_broker is not None
-                    else None
-                ),
-            )
-            if not saved:
-                try:
-                    agent.mark_execution("acknowledged")
-                except ExecutionJournalError:
-                    stderr.write("回答已输出，执行日志状态未更新；请核对本地执行记录。\n")
-            return 0
+                        agent.mark_execution("acknowledged")
+                    except ExecutionJournalError:
+                        stderr.write("回答已输出，执行日志状态未更新；请核对本地执行记录。\n")
+                return 0
         finally:
             host_runtime.close()
     except KeyboardInterrupt:

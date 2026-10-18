@@ -617,6 +617,23 @@ class WorkbenchController:
         runtime_settings: Settings,
     ) -> None:
         try:
+            runtime = self._service.host_runtime
+            assert runtime.execution_lock is not None
+            with runtime.execution_lock.scope():
+                self._session_store.require_current(handle)
+                self._execute_owned_turn(run_id, prompt, handle, session, cancel, worker, runtime_settings)
+        except BaseException as error:  # noqa: BLE001 - worker isolation boundary.
+            self._finish_run(
+                run_id, "cancelled" if cancel.is_set() else "failed",
+                error_type=type(error).__name__,
+            )
+
+    def _execute_owned_turn(
+        self, run_id: str, prompt: str, handle: SessionHandle,
+        session: SessionSnapshot | None, cancel: Event,
+        worker: TurnWorker, runtime_settings: Settings,
+    ) -> None:
+        try:
             completed = worker.run(
                 prompt,
                 session,

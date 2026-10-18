@@ -1050,6 +1050,70 @@ def _wait_for_run(
     )
 
 
+def test_workspace_owner_rejects_web_before_worker_runs(tmp_path: Path) -> None:
+    from neil_agent.execution_lock import WorkspaceExecutionLock
+
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW)
+    worker = SessionWorker()
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    try:
+        control = controller.handle_command("owner", ClientCommand.model_validate(_command("execution-own", "acquire_control", 0)))
+        with WorkspaceExecutionLock(tmp_path).scope():
+            controller.handle_command("owner", ClientCommand.model_validate(_command("execution-run", "start_turn", control["revision"], {"prompt": "request"})))
+            _wait_for_run(controller, "failed")
+        assert worker.restored_session_ids == []
+    finally:
+        controller.close()
+
+
+def test_stale_web_selection_fails_before_worker_runs(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    saved = store.save(store.new_session(), (
+        Message(role="user", content="q"), Message(role="assistant", content="a"),
+    ), (), None)
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW, session_store=store)
+    worker = SessionWorker()
+    controller = WorkbenchController(service, worker, clock=lambda: NOW)
+    try:
+        control = controller.handle_command("owner", ClientCommand.model_validate(_command("execution-own", "acquire_control", 0)))
+        selected = controller.handle_command("owner", ClientCommand.model_validate(_command("execution-select", "select_session", control["revision"], {"session_id": saved.session_id})))
+        store.rename(saved.session_id, "changed elsewhere")
+        controller.handle_command("owner", ClientCommand.model_validate(_command("execution-run", "start_turn", selected["revision"], {"prompt": "request"})))
+        _wait_for_run(controller, "failed")
+        assert worker.restored_session_ids == []
+        assert store.load(saved.session_id).title == "changed elsewhere"
+    finally:
+        controller.close()
+
+
+def test_web_save_still_owns_workspace(tmp_path: Path, monkeypatch) -> None:
+    from neil_agent.errors import AgentError
+    from neil_agent.execution_lock import WorkspaceExecutionLock
+
+    store = SessionStore(tmp_path)
+    original_save = store.save
+    checked = []
+
+    def save(*args, **kwargs):
+        with pytest.raises(AgentError):
+            with WorkspaceExecutionLock(tmp_path).scope():
+                pytest.fail("Web released execution ownership before saving")
+        checked.append(True)
+        return original_save(*args, **kwargs)
+
+    monkeypatch.setattr(store, "save", save)
+    service = WorkbenchSnapshotService(_settings(tmp_path), clock=lambda: NOW, session_store=store)
+    controller = WorkbenchController(service, SessionWorker(), clock=lambda: NOW)
+    try:
+        control = controller.handle_command("owner", ClientCommand.model_validate(_command("execution-own", "acquire_control", 0)))
+        controller.handle_command("owner", ClientCommand.model_validate(_command("execution-run", "start_turn", control["revision"], {"prompt": "request"})))
+        _wait_for_run(controller, "completed")
+        assert checked == [True]
+        assert controller.snapshot().active_session.persistence_status == "saved"
+    finally:
+        controller.close()
+
+
 def test_ws_ticket_is_single_use_and_origin_is_required(tmp_path: Path) -> None:
     client = _client(tmp_path)
     _authenticate(client)

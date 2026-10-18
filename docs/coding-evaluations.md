@@ -4,7 +4,7 @@
 
 ## 任务与运行
 
-目前内置三个固定小型 Python 任务，所有输入、参考补丁和评分代码随 wheel 分发：
+目前内置三个固定小型 Python 任务，所有输入、参考补丁和声明式功能用例随 wheel 分发：
 
 | ID | 目标 | 可修改源码 |
 | --- | --- | --- |
@@ -29,13 +29,15 @@ uv run neil-agent-eval --coding-tasks --confirm-api-cost --task config-precedenc
 
 ## 评分依据
 
-1. 在一次性工作区写入初始源码与约束；评分脚本保存在模型工作区之外。
-2. 先运行固定评分脚本，确认原始代码确实失败；基线异常不会创建 Provider 或消耗模型调用。
+1. 在一次性工作区写入初始源码与约束；功能用例的期望值保留在父进程。
+2. 先调用独立 worker，确认原始代码产生完整调用证据且不满足功能断言；worker 崩溃、缺少证据或原始代码已通过均不会创建 Provider 或消耗模型调用。
 3. 模型只获得读工具和 `replace_text`。自动批准仅限该任务预先列出的既有源码，仍经过安全内核、指令门禁、审批预览和批准后重校验。评分脚本、项目指令与工作区外文件不获写权限。
-4. 模型完成后核对实际文件变化，并运行外部评分脚本；只有允许范围内确有修改且全部功能检查通过才得分。助手声称“已完成/测试通过”不能作为证据。
+4. 模型完成后核对实际文件变化，worker 仅调用目标函数并回传结构化结果；父进程检查本次 challenge、完整用例数量、返回值、预期异常、参数保持及结果与输入的可变对象别名。只有允许范围内确有修改且全部断言通过才得分。
 5. 再检查工作区完整性，记录结果并删除临时工作区。模型失败后仍统计已发生的源码修改。
 
-评分在宿主 Python 子进程执行生成的代码，移除继承凭据和 Python 注入配置，关闭第三方包加载，限制时间与输出。它提供进程级检查边界，**没有 OS 沙箱或网络隔离**；运行真实任务意味着允许在宿主验证生成代码。模型本身没有 shell、质量检查或嵌套子任务工具。
+完成标记和进程退出码不再直接决定通过：源码只打印 `NEIL_GRADER_COMPLETED`、伪造标记或提前退出会因调用证据缺失而失败。断言和最终通过结果由父进程生成，不导入模型生成的源码。参考补丁验收覆盖相同用例，且保持 `mode=simulated`。
+
+worker 在宿主 Python 子进程执行生成代码，移除继承凭据和 Python 注入配置，关闭第三方包加载，限制时间与输出，并清理子进程树，见 [`host-processes.md`](host-processes.md)。它**没有 OS 沙箱或网络隔离**；同用户恶意代码仍可访问宿主资源，结构化证据不能替代 OS 安全隔离。运行真实任务意味着允许在宿主验证生成代码。模型本身没有 shell、质量检查或嵌套子任务工具。
 
 ## 资源与结果
 
@@ -52,8 +54,10 @@ usage 缺失时为 `null` 或 `usage_complete=false`，不填充估算值冒充�
 
 本轮模拟执行记录见 [`acceptance/2026-10-18-coding-simulated.json`](acceptance/2026-10-18-coding-simulated.json)，未记录付费模型成绩。安装后执行链另由 [`installation-acceptance.md`](installation-acceptance.md) 验证。
 
+评分与执行边界修复后的模拟记录见 [`acceptance/2026-10-18-execution-hardening-coding-simulated.json`](acceptance/2026-10-18-execution-hardening-coding-simulated.json)，采用新的任务与 harness 指纹，仍不表示真实模型成绩。
+
 ## 模块边界
 
-`evals.py` 只负责命令模式、费用门禁和输出，保留原有公开入口。`evaluation/catalog.py` 负责离线任务资源，`offline.py` 负责六项协议检查，`acceptance.py` 负责真实 DeepSeek 协议验收，`coding_catalog.py`/`coding.py`/`grading.py` 分别负责代码语料、模型执行和外部评分，`common.py` 共享结果、协议解析与来源指纹，`fixtures.py` 提供旧协议的确定性模型。
+`evals.py` 只负责命令模式、费用门禁和输出，保留原有公开入口。`evaluation/catalog.py` 负责离线任务资源，`offline.py` 负责六项协议检查，`acceptance.py` 负责真实 DeepSeek 协议验收，`coding_catalog.py`/`coding.py`/`grading.py` 分别负责代码语料、模型执行和父进程评分；`grading_worker.py` 只执行函数调用并报告结果。`common.py` 共享结果、协议解析与来源指纹，`fixtures.py` 提供旧协议的确定性模型。
 
 Web 的 Agent turn 执行迁入 `web/turn_worker.py`，控制器保留控制租约、命令、审批协调和会话保存职责；原有 `controller.AgentTurnWorker`、`CompletedTurnState` 和 `TurnCancelled` 导入保持兼容。工具装配仍统一由 `host_runtime` 管理。

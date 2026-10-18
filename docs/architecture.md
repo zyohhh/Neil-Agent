@@ -118,6 +118,8 @@ web/ (React + TypeScript)
 
 `ExecutionJournal` 在对话历史之外记录工具审批、实际开始与结果，写操作开始前必须落盘。失败/取消/进程中断后的写副作用在下一回合提示核对，不自动重放。`SessionStore` 在跨进程内核锁内比较已加载快照摘要再保存；过期句柄拒绝覆盖，成功后更新句柄。同一 Agent 实例拒绝重叠回合。日志隐私、容量和人工结清见 [`execution-recovery.md`](execution-recovery.md)。
 
+具有写能力的 runtime 还经 `host_runtime` 装配懒创建的 `WorkspaceExecutionLock`，在模型调用至会话保存期间独占工作区；CLI/Web 获锁后先检查会话版本。只读入口和子 runtime 不创建执行锁。宿主命令经 `processes.run_bounded()` 管理取消、输出和所拥有的进程树，Windows 命令在 Job Object 绑定后才启动，POSIX 使用独立进程组；它不提供 OS 沙箱，详见 [`host-processes.md`](host-processes.md)。
+
 思考模式发生工具调用时，LLM 层会保留 Anthropic thinking block，并在后续工具结果请求中完整回传。
 
 可选 `EventBus` 会从同一执行路径旁路接收 `RuntimeEvent`。每个 Agent 回合、模型请求、工具调用、审批和质量检查各有稳定关联 ID；开始与结束事实拥有独立事件 ID，子阶段通过父事件 ID 形成可投影的层级。未配置事件总线时，该观察路径不分配这些 ID，也不增加观察线程。
@@ -377,7 +379,7 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 - `--real-deepseek` 单独使用不会发送请求；必须同时提供 `--confirm-api-cost` 才会运行真实验收。
 - 真实协议模式把工作区固定到自动删除的临时目录，验收设置固定关闭 thinking、单轮工具上限、1024 输出 token、40000 字符上下文、60 秒超时和最多一次瞬时失败重试。它验证 v1 默认 `benchmark-minimal` 的三个只读工具、精确 `read_file`、项目指令、服务端 `usage`、显式会话保存、压缩恢复，以及 v2 request/approve 和消费后重放拒绝。
 - v2 的唯一写入只发生在临时目录；审批 ID、预览和原始模型响应不进入报告。v1 前置失败时不会继续发起压缩和 v2 请求。自然重试只观察真实发生次数，不主动制造限流或网络故障。
-- `--coding-tasks` 对固定源码任务执行受限模型编辑，再运行工作区外的功能评分；真实模式明确确认 API 费用，`--simulate` 仅验收参考补丁执行链。报告包含来源指纹、失败、实际修改、usage 与资源指标。评分在宿主子进程执行生成代码，无 OS 沙箱；详见 [`coding-evaluations.md`](coding-evaluations.md)。
+- `--coding-tasks` 对固定源码任务执行受限模型编辑，独立 worker 只返回目标函数调用结果，由父进程检查声明式功能用例、参数保持和别名；子进程打印完成标记或提前退出不能直接得分。真实模式明确确认 API 费用，`--simulate` 仅验收参考补丁执行链。报告包含来源指纹、失败、实际修改、usage 与资源指标。生成代码在宿主执行，无 OS 沙箱；详见 [`coding-evaluations.md`](coding-evaluations.md)。
 - `neil-agent-install-check` 默认离线创建全新环境安装指定 wheel，核对非空评测结果和真实本地服务，详见 [`installation-acceptance.md`](installation-acceptance.md)。
 
 ## 异常边界

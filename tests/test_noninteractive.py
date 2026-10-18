@@ -110,6 +110,31 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+def test_writable_noninteractive_run_holds_lock_through_save(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+
+    from neil_agent.errors import AgentError
+    from neil_agent.execution_lock import WorkspaceExecutionLock
+    from neil_agent.session import SessionStore
+
+    original_save = SessionStore.save
+    checked = []
+
+    def save(store, *args, **kwargs):
+        with pytest.raises(AgentError):
+            with WorkspaceExecutionLock(tmp_path).scope():
+                pytest.fail("Noninteractive run released ownership before saving")
+        checked.append(True)
+        return original_save(store, *args, **kwargs)
+
+    monkeypatch.setattr(SessionStore, "save", save)
+    code = run_noninteractive(
+        _settings(tmp_path), "request", output_format="json", stdout=StringIO(), stderr=StringIO(),
+        protocol_version=2, permission_mode="ask", save_session=True, llm=OneShotFakeModel(),
+    )
+    assert code == 0 and checked == [True]
+
+
 def _protocol_contract() -> dict[str, object]:
     fixture_path = (
         Path(__file__).parent / "fixtures" / "noninteractive_protocol_v1.json"

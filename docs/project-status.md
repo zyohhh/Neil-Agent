@@ -10,7 +10,7 @@
 | Python | ≥ 3.13；包管理 `uv` |
 | 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web`、`neil-agent-install-check` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
-| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**1011 passed**、12 skipped、16 deselected；Web 前端维持既有 22 项测试、5 项 Playwright 页面回归 |
+| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**1039 passed**、12 skipped、16 deselected；Web 前端维持既有 22 项测试、5 项 Playwright 页面回归 |
 | 静态检查 | `uv run ruff check .` 与 `uv run mypy src` 为开发门禁（`pyproject.toml` 含 `[tool.ruff]` / `[tool.mypy]`） |
 | 安全加固 | 批次 1–7 **已完成** |
 | 运行时预设 | 批次 1–3、**5** 已完成；批次 4、6 可选未开始 |
@@ -36,6 +36,7 @@
 ### 其他已收口主线
 
 - **2026-10-18 安装 / 代码任务维护**：任务资源随 wheel 分发，补齐模块执行入口；全新环境安装实际 wheel 的 15 项验收通过。新增三项固定代码任务、独立功能评分、预算/usage/来源报告与模拟模式；真实运行保留费用门禁，本轮未调用模型 API。评测按职责拆为 `evaluation/`，Web turn 执行拆到 `web/turn_worker.py`。新增 32 项回归，详见 [`installation-acceptance.md`](installation-acceptance.md) 与 [`coding-evaluations.md`](coding-evaluations.md)。
+- **2026-10-18 评分 / 执行边界维护**：修复完成标记与提前退出的评分绕过，父进程核对声明式功能用例；宿主命令响应取消并清理子进程树；writable runtime 获得执行至会话保存的跨进程独占，CLI/Web 旧版本在模型请求前拒绝。详见 [`host-processes.md`](host-processes.md) 与 [`execution-recovery.md`](execution-recovery.md)。
 - 多 Provider 适配（Phase 5）、Web Workbench P0–P9、TUI 可视化 Phase 0A–4、三入口 `host_runtime` 共享装配、Windows Sandbox 契约与认证路径。
 - 2026-09-15 Web 维护：修复本地清空后隐藏新回答、分片逐条换行与长回答开头丢失；正文连续排版并优先保留，新 turn 重置上一轮运行投影。选中 session 后显示保存的问答，长历史可继续加载；仅投影用户问题和助手正文。离线门禁、20 项前端测试、5 项页面回归及桌面/手机可读性、会话切换检查通过。
 
@@ -45,12 +46,15 @@
 
 | 严重度 | 领域 | 问题 | 位置 / 说明 |
 | --- | --- | --- | --- |
+| **中** | 预算 | 主任务、子任务与重试尚未共享整任务累计请求/token/时限预算 | 单请求上下文、轮次和子任务次数已有上限；后续应统一累计记账 |
+| **中** | 评测 | 生成代码仍在宿主执行；语料只有三个小型 Python 任务 | 进程树管理不是 OS 隔离；真实执行仍显式确认费用，后续补隔离及更多离线任务 |
+| **中** | CI | 当前 checkout 未包含通用 PR CI | 已有 Windows Sandbox 专用工作流；通用静态检查、离线测试、Web 与安装门禁待补齐 |
 | **低** | 产品 | Web 已注册 `run_readonly_subtask`，前端无独立子任务 UI | 后端能力；见 `web-workbench-development.md` |
-| **低** | CI | 当前 checkout 未包含通用 PR CI | 已有 Windows Sandbox 专用工作流；通用 ruff/mypy/pytest + Web lint/test/build 门禁待补齐 |
+| **低** | 维护 | CLI、Agent、实时驾驶舱等模块仍较大 | 后续沿状态与显示职责拆分，排在执行正确性和安全边界之后 |
 
 CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装配 `Agent`。Web turn 复用 `WorkbenchSnapshotService.host_runtime`，不再每轮 `build_host_runtime()`。
 
-**非缺陷说明：** `test_web_workbench.py` 体量大（61 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
+**非缺陷说明：** `test_web_workbench.py` 体量大（64 项），需 mock worker 接受 `parent_run_id`。`test_real_runner_*` 标为 `windows_sandbox_security`，不进入普通离线门禁。在线 Provider smoke 为 `@pytest.mark.online`。
 
 ## 必做后续（按优先级）
 
@@ -65,6 +69,10 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | P1 | **请求预算、批量指令门禁、主任务取消与完成判定** | 2026-10-17 执行循环维护 | ✅ 已完成，见 `runtime-profile.md` 维护表；SDK 建连阶段仍受请求超时约束 |
 | P1 | **执行记录、会话并发保护与模型切换事务** | 2026-10-17 执行恢复维护 | ✅ 已完成，见 `execution-recovery.md`；冲突不自动合并，执行事实不自动重放 |
 | P1 | **wheel 安装验收、代码任务评测与模块拆分** | 2026-10-18 分发 / 评测维护 | ✅ 已完成；15 项真实安装验收、3 项模拟任务通过，真实模型入口显式确认费用 |
+| P1 | **评分防伪造、子进程清理与运行期独占** | 2026-10-18 执行边界维护 | ✅ 已完成；父进程功能断言、有界进程树和执行至保存的工作区锁 |
+| P2 | **整任务累计预算** | 执行预算 / 子任务 | 待完成；父子调用与重试统一计数、usage 与时限 |
+| P2 | **评测隔离与任务覆盖** | `coding-evaluations.md` | 待完成；OS 隔离与更多多文件/回归/恢复任务，真实 API 运行继续显式开启 |
+| P2 | **通用 PR CI** | 工程门禁 | 待完成；推送 workflow 前需用户确认 token 的 `workflow` 权限 |
 | P2 | **子任务测试补强** | `tests/test_readonly_subtask.py` | ✅ 已完成（超时/中断/ schema） |
 | P2 | **Security Shield 子任务面** | `security.py` | ✅ 已完成 |
 | P3 | **文档与验收记录** | 本文 + 各专项 doc | ✅ 2026-09-01 同步（测试数、模块表、Git 脱敏 / `O_NOFOLLOW` / budget / CI） |
@@ -77,7 +85,6 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | Session goals | 跨回合、可暂停的用户目标（会话事件）；区别于当前回合的 `set_task_plan` | [`runtime-profile.md`](runtime-profile.md) 批次 4 |
 | Skills 目录 + `load_skill` | ✅ 用户工作区 `skills/<name>/SKILL.md` 按需加载；**不是**始终注入的 `AGENTS.md` | [`runtime-profile.md`](runtime-profile.md) 批次 5 |
 | 受限 Plan DSL | JSON 步骤由 runtime 串行执行并走审批；不 eval 脚本 | 同上，批次 6 |
-| 子任务聚合 token 上限 | 每回合调用次数已有 `subtask_max_invocations`（默认 3）；跨子任务 token 加总仍可选 | `config.py` / 批次 3 |
 | Web 独立子任务面板 | 路径元数据已在 `runtime_step` 折成目录；前端仍无子树 UI | [`web-workbench-development.md`](web-workbench-development.md) |
 | 本仓库 `AGENTS.md` 扩充 | **Cursor 协作约束**（本文件仓库根），与运行时用户工作区 `AGENTS.md` 链无关 | 根目录 [`AGENTS.md`](../AGENTS.md) |
 
@@ -102,6 +109,8 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | [`host-runtime.md`](host-runtime.md) | 三入口装配与能力矩阵 |
 | [`installation-acceptance.md`](installation-acceptance.md) | 全新环境实际 wheel 安装验收 |
 | [`coding-evaluations.md`](coding-evaluations.md) | 代码任务、功能评分、资源与真实运行边界 |
+| [`host-processes.md`](host-processes.md) | 宿主命令取消、输出限额与子进程树清理 |
+| [`execution-recovery.md`](execution-recovery.md) | 执行记录、工作区运行锁与会话冲突 |
 | [`security-hardening.md`](security-hardening.md) | 安全加固批次清单 |
 | [`security-review-2026-09-22.md`](security-review-2026-09-22.md) | Git 与 Web 审计发现、复现条件、修复及验证范围 |
 | [`runtime-profile.md`](runtime-profile.md) | 运行时预设与只读子任务 |

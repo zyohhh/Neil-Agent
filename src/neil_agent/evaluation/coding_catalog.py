@@ -4,12 +4,25 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import PurePosixPath
-from typing import Self
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
 
 from ..sensitive_paths import is_sensitive_relative_path
 from .catalog import TASK_ID_PATTERN, read_catalog
+
+
+class FunctionCase(BaseModel):
+    """Trusted inputs and expectations; expectations never enter the worker."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    module: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    function: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    args: tuple[JsonValue, ...] = Field(max_length=8)
+    expected: JsonValue = None
+    raises: Literal["ValueError"] | None = None
+    identity: Literal["any", "new", "disjoint"] = "any"
 
 
 class CodingTask(BaseModel):
@@ -21,7 +34,7 @@ class CodingTask(BaseModel):
     files: dict[str, str]
     editable_files: tuple[str, ...] = Field(min_length=1, max_length=8)
     reference_files: dict[str, str]
-    grader: str = Field(min_length=1, max_length=20_000)
+    cases: tuple[FunctionCase, ...] = Field(min_length=1, max_length=32)
 
     @model_validator(mode="after")
     def validate_workspace(self) -> Self:
@@ -51,6 +64,10 @@ class CodingTask(BaseModel):
             raise ValueError("reference patch exceeds editable files")
         if sum(map(len, self.reference_files.values())) > 40_000:
             raise ValueError("reference patch exceeds limits")
+        if any(f"{case.module}.py" not in self.files for case in self.cases):
+            raise ValueError("case module must be a provided source file")
+        if sum(len(case.model_dump_json()) for case in self.cases) > 40_000:
+            raise ValueError("grading cases exceed limits")
         return self
 
     @property
