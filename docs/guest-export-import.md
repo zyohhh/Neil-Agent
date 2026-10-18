@@ -134,7 +134,7 @@ Guest runner 侧对声明路径的强制校验尚未实现；host 收集已是 f
 
 ## 离线评测
 
-`evals/tasks.json` 中的 `guest-export-import-approval` 在临时工作区暂存 manifest，验证非交互 v2 request → approve 全流程与 `guest-export-import` 绑定元数据。不调用真实 WSB。
+随包分发的 `evaluation/tasks.json` 中的 `guest-export-import-approval` 在临时工作区暂存 manifest，验证非交互 v2 request → approve 全流程与 `guest-export-import` 绑定元数据。不调用真实 WSB。
 
 ```text
 uv run neil-agent-eval --task guest-export-import-approval

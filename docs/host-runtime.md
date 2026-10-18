@@ -96,6 +96,7 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | CLI / Web 共用 Security Shield 观察 | ✅ |
 | Web ContextTomography 快照投影 | ✅ |
 | 跨入口 parity 回归测试 | ✅ `tests/test_host_runtime.py` |
+| Web worker 与控制器分离 | ✅ `web/turn_worker.py` 执行 Agent；控制器保留控制权、审批协调与持久化 |
 
 当前无已知 host_runtime 迁移缺口；后续新能力应优先经 `build_host_runtime()` 接入三入口。
 

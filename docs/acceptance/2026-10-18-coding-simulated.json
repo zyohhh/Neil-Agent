@@ -1,0 +1,87 @@
+{
+  "agent_version": "0.1.0",
+  "harness_sha256": "b689ef7d95e41db4a3882de91c9998de9f55c62b8c6ce3486392ac41e5819405",
+  "max_model_requests_per_trial": 7,
+  "max_output_tokens_per_request": 2048,
+  "max_tool_calls_per_trial": 32,
+  "max_tool_rounds": 6,
+  "mode": "simulated",
+  "model": "reference-patch",
+  "pass_rate": 1.0,
+  "passed": 3,
+  "provider": "fixture",
+  "python": "3.13.13",
+  "reported_token_stop_threshold": 30000,
+  "reported_usage": null,
+  "results": [
+    {
+      "approved_writes": 1,
+      "baseline_failed": true,
+      "changed_files": [
+        "pager.py"
+      ],
+      "denied_writes": 0,
+      "duration_ms": 206,
+      "grader_exit_code": 0,
+      "model_requests": 3,
+      "retry_count": 0,
+      "status": "passed",
+      "task_id": "pagination-boundaries",
+      "task_sha256": "6ec066a9c6e2e32202852c30d6b2fb60285a1ca453c4ef26b2464fe7986bfc0e",
+      "tool_calls": 2,
+      "trial": 1,
+      "usage": null,
+      "usage_complete": false
+    },
+    {
+      "approved_writes": 1,
+      "baseline_failed": true,
+      "changed_files": [
+        "slugs.py"
+      ],
+      "denied_writes": 0,
+      "duration_ms": 209,
+      "grader_exit_code": 0,
+      "model_requests": 3,
+      "retry_count": 0,
+      "status": "passed",
+      "task_id": "slug-collision",
+      "task_sha256": "3c7d2b20e7a58ea1bed8e24b3da384a8566be1fa3fe8a0e28d4bb61733ede68b",
+      "tool_calls": 2,
+      "trial": 1,
+      "usage": null,
+      "usage_complete": false
+    },
+    {
+      "approved_writes": 2,
+      "baseline_failed": true,
+      "changed_files": [
+        "config_reader.py",
+        "cli_options.py"
+      ],
+      "denied_writes": 0,
+      "duration_ms": 245,
+      "grader_exit_code": 0,
+      "model_requests": 3,
+      "retry_count": 0,
+      "status": "passed",
+      "task_id": "config-precedence",
+      "task_sha256": "dcb7f3bc6bdd7b264dc26e16b1fa2959029f19fbb572516e7329db7ce9cc8472",
+      "tool_calls": 4,
+      "trial": 1,
+      "usage": null,
+      "usage_complete": false
+    }
+  ],
+  "runtime_profile": "benchmark-minimal",
+  "schema_version": 1,
+  "sdk_versions": {
+    "anthropic": "0.116.0",
+    "openai": "2.53.0"
+  },
+  "success": true,
+  "task_count": 3,
+  "total": 3,
+  "trials_per_task": 1,
+  "usage_complete": false
+}

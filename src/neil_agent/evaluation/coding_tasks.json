@@ -1,0 +1,50 @@
+[
+  {
+    "id": "pagination-boundaries",
+    "title": "Fix one-based pagination boundaries",
+    "prompt": "The paginate API uses one-based page numbers. Fix the implementation so the first page, later pages, partial last pages and pages beyond the end work correctly. Preserve validation of positive page and page_size, return a new list, and do not mutate input. Change only pager.py.",
+    "files": {
+      "pager.py": "def paginate(items, page, page_size):\n    if page < 1 or page_size < 1:\n        raise ValueError(\"page and page_size must be positive\")\n    start = page * page_size\n    return items[start:start + page_size]\n"
+    },
+    "editable_files": [
+      "pager.py"
+    ],
+    "reference_files": {
+      "pager.py": "def paginate(items, page, page_size):\n    if page < 1 or page_size < 1:\n        raise ValueError(\"page and page_size must be positive\")\n    start = (page - 1) * page_size\n    return items[start:start + page_size]\n"
+    },
+    "grader": "import sys\nsys.path.insert(0, sys.argv[1])\nfrom pager import paginate\n\nitems = [0, 1, 2, 3, 4]\nassert paginate(items, 1, 2) == [0, 1]\nassert paginate(items, 2, 2) == [2, 3]\nassert paginate(items, 3, 2) == [4]\nassert paginate(items, 4, 2) == []\nassert paginate([], 1, 2) == []\nassert items == [0, 1, 2, 3, 4]\nassert paginate(items, 1, 10) is not items\nfor page, size in ((0, 1), (-1, 1), (1, 0), (1, -1)):\n    try:\n        paginate(items, page, size)\n    except ValueError:\n        pass\n    else:\n        raise AssertionError(\"invalid pagination accepted\")\nprint(\"NEIL_GRADER_COMPLETED\")\n"
+  },
+  {
+    "id": "slug-collision",
+    "title": "Allocate the first available slug suffix",
+    "prompt": "Fix unique_slug so an occupied base slug gets the lowest available numeric suffix starting at 2. Existing names may contain gaps, irrelevant names or high suffixes. Normalize titles with the current lowercase ASCII slug rules, use item for empty normalized titles, and leave the existing collection unchanged. Change only slugs.py.",
+    "files": {
+      "slugs.py": "import re\n\n\ndef unique_slug(title, existing):\n    base = re.sub(r\"[^a-z0-9]+\", \"-\", title.lower()).strip(\"-\") or \"item\"\n    if base not in existing:\n        return base\n    return f\"{base}-{len(existing) + 1}\"\n"
+    },
+    "editable_files": [
+      "slugs.py"
+    ],
+    "reference_files": {
+      "slugs.py": "import re\n\n\ndef unique_slug(title, existing):\n    base = re.sub(r\"[^a-z0-9]+\", \"-\", title.lower()).strip(\"-\") or \"item\"\n    if base not in existing:\n        return base\n    suffix = 2\n    while f\"{base}-{suffix}\" in existing:\n        suffix += 1\n    return f\"{base}-{suffix}\"\n"
+    },
+    "grader": "import sys\nsys.path.insert(0, sys.argv[1])\nfrom slugs import unique_slug\n\nassert unique_slug(\"Hello World!\", set()) == \"hello-world\"\nassert unique_slug(\"Post\", {\"post\", \"post-2\", \"other\"}) == \"post-3\"\nassert unique_slug(\"Post\", {\"post\", \"post-3\", \"post-99\"}) == \"post-2\"\nassert unique_slug(\"...\", {\"item\", \"item-2\"}) == \"item-3\"\nexisting = {\"post\", \"post-2\", \"post-3\"}\nassert unique_slug(\"Post\", existing) == \"post-4\"\nassert existing == {\"post\", \"post-2\", \"post-3\"}\nassert unique_slug(\"Fresh\", {\"fresh-2\"}) == \"fresh\"\nprint(\"NEIL_GRADER_COMPLETED\")\n"
+  },
+  {
+    "id": "config-precedence",
+    "title": "Preserve nested defaults and false CLI values",
+    "prompt": "Fix configuration precedence across config_reader.py and cli_options.py. merge_config must recursively merge mapping overrides into defaults without mutating or aliasing either input, preserving untouched nested values and replacing non-mapping values. apply_cli must override with explicit False, 0 and empty string values, while None means omitted. Preserve the public function signatures and use only the standard library. Change only these two files.",
+    "files": {
+      "config_reader.py": "def merge_config(defaults, overrides):\n    result = defaults\n    for key, value in overrides.items():\n        if isinstance(value, dict) and isinstance(result.get(key), dict):\n            result[key].update(value)\n        else:\n            result[key] = value\n    return result\n",
+      "cli_options.py": "def apply_cli(config, args):\n    result = dict(config)\n    for key, value in args.items():\n        if value:\n            result[key] = value\n    return result\n"
+    },
+    "editable_files": [
+      "config_reader.py",
+      "cli_options.py"
+    ],
+    "reference_files": {
+      "config_reader.py": "from copy import deepcopy\n\n\ndef merge_config(defaults, overrides):\n    result = deepcopy(defaults)\n    for key, value in overrides.items():\n        if isinstance(value, dict) and isinstance(result.get(key), dict):\n            result[key] = merge_config(result[key], value)\n        else:\n            result[key] = deepcopy(value)\n    return result\n",
+      "cli_options.py": "def apply_cli(config, args):\n    result = dict(config)\n    for key, value in args.items():\n        if value is not None:\n            result[key] = value\n    return result\n"
+    },
+    "grader": "import sys\nsys.path.insert(0, sys.argv[1])\nfrom config_reader import merge_config\nfrom cli_options import apply_cli\nfrom copy import deepcopy\n\ndefaults = {\"server\": {\"port\": 80, \"tls\": {\"enabled\": True, \"ca\": \"root\"}}, \"tags\": [\"a\"]}\noverrides = {\"server\": {\"port\": 8080, \"tls\": {\"enabled\": False}}, \"new\": [1]}\nbefore_defaults, before_overrides = deepcopy(defaults), deepcopy(overrides)\nmerged = merge_config(defaults, overrides)\nassert merged[\"server\"] == {\"port\": 8080, \"tls\": {\"enabled\": False, \"ca\": \"root\"}}\nassert defaults == before_defaults and overrides == before_overrides\nmerged[\"tags\"].append(\"b\")\nmerged[\"new\"].append(2)\nmerged[\"server\"][\"tls\"][\"ca\"] = \"changed\"\nassert defaults == before_defaults and overrides == before_overrides\nassert merge_config({\"a\": {\"x\": 1}}, {\"a\": 0}) == {\"a\": 0}\nassert merge_config({\"a\": 0}, {\"a\": {\"x\": 1}}) == {\"a\": {\"x\": 1}}\nconfig = {\"verbose\": True, \"retries\": 3, \"name\": \"old\", \"port\": 80}\nassert apply_cli(config, {\"verbose\": False, \"retries\": 0, \"name\": \"\", \"port\": None}) == {\"verbose\": False, \"retries\": 0, \"name\": \"\", \"port\": 80}\nassert config == {\"verbose\": True, \"retries\": 3, \"name\": \"old\", \"port\": 80}\nprint(\"NEIL_GRADER_COMPLETED\")\n"
+  }
+]

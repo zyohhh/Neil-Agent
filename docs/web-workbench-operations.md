@@ -18,6 +18,8 @@ uv build --wheel
 
 `npm run build` 会先做 TypeScript 类型检查，再把 Vite 生产产物写入 Python 包目录，并生成确定性的 `asset-manifest.json`。Python 启动器会在监听端口前核对清单、文件集合和每个 SHA-256。
 
+构建后使用 `uv run neil-agent-install-check --wheel .\dist\neil_agent-0.1.0-py3-none-any.whl --format json` 验收实际安装包，包含全新虚拟环境、所有命令入口、内置评测、真实 Web 健康/安全头/认证与正常停止。默认不下载依赖，也不调用模型 API；缓存索引和详细步骤见 [`installation-acceptance.md`](installation-acceptance.md)。
+
 ## 2. Windows 安装与启动
 
 推荐作为独立工具安装本地 wheel：

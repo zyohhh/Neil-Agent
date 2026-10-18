@@ -296,7 +296,7 @@ def test_agent_turn_worker_reuses_injected_host_runtime(tmp_path: Path) -> None:
     worker = AgentTurnWorker(settings, host_runtime=runtime)
     try:
         with patch(
-            "neil_agent.web.controller.create_provider",
+            "neil_agent.web.turn_worker.create_provider",
             return_value=_EchoModel(),
         ):
             first = worker.run(

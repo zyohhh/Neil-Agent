@@ -1,6 +1,6 @@
 # 项目状态与后续路线
 
-本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-10-17 更新）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
+本文是 **Neil Agent 当前状态、已知缺口与必做后续** 的单一事实来源（2026-10-18 更新）。批次路线图仍以 [`security-hardening.md`](security-hardening.md) 与 [`runtime-profile.md`](runtime-profile.md) 为准；本文汇总二者完成度、交叉缺口与工程优先级，不替代专项文档中的交付细节。
 
 ## 当前快照
 
@@ -8,9 +8,9 @@
 | --- | --- |
 | 版本 | **`v0.1.0`**（功能收口 / 维护期起点，Git tag [`v0.1.0`](https://github.com/zyohhh/Neil-Agent/releases/tag/v0.1.0)；说明 [`releases/v0.1.0.md`](releases/v0.1.0.md)） |
 | Python | ≥ 3.13；包管理 `uv` |
-| 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web` |
+| 入口 | `neil-agent`（CLI）、`neil-agent -p`（非交互）、`neil-agent-eval`、`neil-agent-web`、`neil-agent-install-check` |
 | Provider | DeepSeek、Claude、OpenAI、Ollama、vLLM |
-| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**979 passed**、12 skipped、16 deselected；Web 前端维持既有 22 项测试、5 项 Playwright 页面回归 |
+| 测试 | 离线门禁 `pytest -m "not online and not windows_sandbox_security"`：**1011 passed**、12 skipped、16 deselected；Web 前端维持既有 22 项测试、5 项 Playwright 页面回归 |
 | 静态检查 | `uv run ruff check .` 与 `uv run mypy src` 为开发门禁（`pyproject.toml` 含 `[tool.ruff]` / `[tool.mypy]`） |
 | 安全加固 | 批次 1–7 **已完成** |
 | 运行时预设 | 批次 1–3、**5** 已完成；批次 4、6 可选未开始 |
@@ -35,6 +35,7 @@
 
 ### 其他已收口主线
 
+- **2026-10-18 安装 / 代码任务维护**：任务资源随 wheel 分发，补齐模块执行入口；全新环境安装实际 wheel 的 15 项验收通过。新增三项固定代码任务、独立功能评分、预算/usage/来源报告与模拟模式；真实运行保留费用门禁，本轮未调用模型 API。评测按职责拆为 `evaluation/`，Web turn 执行拆到 `web/turn_worker.py`。新增 32 项回归，详见 [`installation-acceptance.md`](installation-acceptance.md) 与 [`coding-evaluations.md`](coding-evaluations.md)。
 - 多 Provider 适配（Phase 5）、Web Workbench P0–P9、TUI 可视化 Phase 0A–4、三入口 `host_runtime` 共享装配、Windows Sandbox 契约与认证路径。
 - 2026-09-15 Web 维护：修复本地清空后隐藏新回答、分片逐条换行与长回答开头丢失；正文连续排版并优先保留，新 turn 重置上一轮运行投影。选中 session 后显示保存的问答，长历史可继续加载；仅投影用户问题和助手正文。离线门禁、20 项前端测试、5 项页面回归及桌面/手机可读性、会话切换检查通过。
 
@@ -44,7 +45,6 @@
 
 | 严重度 | 领域 | 问题 | 位置 / 说明 |
 | --- | --- | --- | --- |
-| **高** | 分发 | wheel 缺少默认 eval 任务资源 | 后续单独修复 |
 | **低** | 产品 | Web 已注册 `run_readonly_subtask`，前端无独立子任务 UI | 后端能力；见 `web-workbench-development.md` |
 | **低** | CI | 当前 checkout 未包含通用 PR CI | 已有 Windows Sandbox 专用工作流；通用 ruff/mypy/pytest + Web lint/test/build 门禁待补齐 |
 
@@ -64,6 +64,7 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | P1 | **子任务 CLI 取消与统一 `parent_run_id`** | 观测一致性 | ✅ 已完成 |
 | P1 | **请求预算、批量指令门禁、主任务取消与完成判定** | 2026-10-17 执行循环维护 | ✅ 已完成，见 `runtime-profile.md` 维护表；SDK 建连阶段仍受请求超时约束 |
 | P1 | **执行记录、会话并发保护与模型切换事务** | 2026-10-17 执行恢复维护 | ✅ 已完成，见 `execution-recovery.md`；冲突不自动合并，执行事实不自动重放 |
+| P1 | **wheel 安装验收、代码任务评测与模块拆分** | 2026-10-18 分发 / 评测维护 | ✅ 已完成；15 项真实安装验收、3 项模拟任务通过，真实模型入口显式确认费用 |
 | P2 | **子任务测试补强** | `tests/test_readonly_subtask.py` | ✅ 已完成（超时/中断/ schema） |
 | P2 | **Security Shield 子任务面** | `security.py` | ✅ 已完成 |
 | P3 | **文档与验收记录** | 本文 + 各专项 doc | ✅ 2026-09-01 同步（测试数、模块表、Git 脱敏 / `O_NOFOLLOW` / budget / CI） |
@@ -99,6 +100,8 @@ CLI / 非交互 / Web / 只读子任务通过 `host_runtime.build_agent()` 装�
 | --- | --- |
 | [`architecture.md`](architecture.md) | 分层架构与模块职责 |
 | [`host-runtime.md`](host-runtime.md) | 三入口装配与能力矩阵 |
+| [`installation-acceptance.md`](installation-acceptance.md) | 全新环境实际 wheel 安装验收 |
+| [`coding-evaluations.md`](coding-evaluations.md) | 代码任务、功能评分、资源与真实运行边界 |
 | [`security-hardening.md`](security-hardening.md) | 安全加固批次清单 |
 | [`security-review-2026-09-22.md`](security-review-2026-09-22.md) | Git 与 Web 审计发现、复现条件、修复及验证范围 |
 | [`runtime-profile.md`](runtime-profile.md) | 运行时预设与只读子任务 |

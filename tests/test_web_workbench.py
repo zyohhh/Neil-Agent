@@ -2640,7 +2640,7 @@ def test_agent_worker_revalidates_preview_before_approved_write(
 
     from unittest.mock import patch
 
-    with patch("neil_agent.web.controller.create_provider", return_value=model):
+    with patch("neil_agent.web.turn_worker.create_provider", return_value=model):
         worker.run(
             "Create approved.txt",
             None,
@@ -2671,7 +2671,7 @@ def test_agent_worker_fails_closed_when_preview_changes_after_approval(
         target.write_text("concurrent change", encoding="utf-8")
         return True
 
-    with patch("neil_agent.web.controller.create_provider", return_value=model):
+    with patch("neil_agent.web.turn_worker.create_provider", return_value=model):
         worker.run(
             "Update approved.txt",
             None,

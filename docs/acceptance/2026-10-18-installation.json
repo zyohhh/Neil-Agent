@@ -1,0 +1,94 @@
+{
+  "checks": [
+    {
+      "exit_code": null,
+      "id": "wheel_metadata",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "fresh_environment",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "install_dependencies",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "dependency_check",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "cli_help",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "eval_help",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "web_help",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "install_help",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "installed_resources",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "offline_evals",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "module_evals",
+      "status": "passed"
+    },
+    {
+      "exit_code": 0,
+      "id": "coding_harness",
+      "status": "passed"
+    },
+    {
+      "exit_code": 2,
+      "id": "api_cost_gate",
+      "status": "passed"
+    },
+    {
+      "exit_code": 2,
+      "id": "coding_cost_gate",
+      "status": "passed"
+    },
+    {
+      "exit_code": null,
+      "id": "web_loopback",
+      "status": "passed"
+    }
+  ],
+  "dependency_versions": {
+    "anthropic": "0.122.0",
+    "fastapi": "0.141.1",
+    "openai": "2.53.0",
+    "pydantic": "2.13.4",
+    "textual": "8.2.8",
+    "uvicorn": "0.52.3",
+    "websockets": "17.0.1"
+  },
+  "offline_install": true,
+  "python_version": "3.13.13",
+  "schema_version": 1,
+  "success": true,
+  "version": "0.1.0",
+  "wheel_sha256": "b0eca5f9fdbef1f1668db38ff82267e6dc77e3e9698c2f277990ce0f52129aef"
+}

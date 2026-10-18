@@ -86,6 +86,12 @@
 
 新增 48 项回归（1 项符号链接权限跳过）；完整离线门禁 979 passed、12 skipped、16 deselected，ruff、mypy 与离线 wheel 构建通过。核对 12 个包内模块哈希并从 wheel 导入执行日志、锁、运行时与 Web 控制器。前端未改动，未重复页面回归，未调用真实模型 API。
 
+### 2026-10-18：代码任务与安装验收
+
+代码任务通过 `build_host_runtime(NONINTERACTIVE_WRITE, BENCHMARK_MINIMAL)` 与 `build_agent()` 执行，固定为三项既有源码任务和有界工具/请求配额；审批只允许临时工作区的目标源码，不新增 shell、写工具或嵌套子任务。模型执行、语料、评分、协议验收和命令分开维护，Web worker 同时从控制器抽离，工具装配仍唯一经过 host runtime。
+
+内置任务作为包资源分发；`neil-agent-install-check` 在全新环境安装实际 wheel，核对所有入口、默认评测和真实 loopback 服务。15 项安装检查与 3 项模拟代码任务通过；离线门禁 1011 passed、12 skipped、16 deselected，ruff、mypy 和 wheel 构建通过。真实模型入口保留费用门禁，本轮无在线成绩。方法与记录见 [`installation-acceptance.md`](installation-acceptance.md)、[`coding-evaluations.md`](coding-evaluations.md)。
+
 ## 批次 1：RuntimeProfile + benchmark-minimal
 
 **问题：** 入口能力由 `HostMode` 隐式决定；eval 使用与日常 Agent 相近的工具面，模型分数无法声明 harness。DeepSeek 官方 benchmark 明确跑在 Minimal 上。

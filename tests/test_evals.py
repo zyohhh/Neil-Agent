@@ -3,13 +3,12 @@
 import json
 import sys
 from collections.abc import Callable, Iterator, Sequence
-from pathlib import Path
 
 import pytest
 
 from neil_agent import evals as eval_module
 from neil_agent.config import Settings
-from neil_agent.evals import run_offline_evals
+from neil_agent.evals import DEFAULT_TASKS_PATH, run_offline_evals
 from neil_agent.schemas import (
     ActivityEvent,
     Message,
@@ -152,7 +151,7 @@ def _settings() -> Settings:
 
 
 def test_eval_tasks_have_unique_ids_and_actionable_expectations() -> None:
-    path = Path(__file__).parents[1] / "evals" / "tasks.json"
+    path = DEFAULT_TASKS_PATH
     tasks = json.loads(path.read_text(encoding="utf-8"))
 
     assert len(tasks) >= 5
@@ -164,7 +163,7 @@ def test_eval_tasks_have_unique_ids_and_actionable_expectations() -> None:
 
 
 def test_all_declared_offline_evals_pass_without_network_access() -> None:
-    path = Path(__file__).parents[1] / "evals" / "tasks.json"
+    path = DEFAULT_TASKS_PATH
 
     results = run_offline_evals(path)
 
@@ -320,7 +319,7 @@ def test_real_acceptance_requires_server_usage_for_compaction() -> None:
 
 
 def test_offline_eval_supports_single_task_and_stable_duration() -> None:
-    path = Path(__file__).parents[1] / "evals" / "tasks.json"
+    path = DEFAULT_TASKS_PATH
     times = iter((10.0, 10.125))
 
     results = run_offline_evals(
@@ -335,7 +334,7 @@ def test_offline_eval_supports_single_task_and_stable_duration() -> None:
 
 
 def test_offline_eval_rejects_unknown_task() -> None:
-    path = Path(__file__).parents[1] / "evals" / "tasks.json"
+    path = DEFAULT_TASKS_PATH
 
     with pytest.raises(ValueError, match="未知评测任务"):
         run_offline_evals(path, task_ids=("missing",))

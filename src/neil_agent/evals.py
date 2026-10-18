@@ -1,1004 +1,27 @@
-"""Explicit offline and opt-in real DeepSeek acceptance evaluations."""
+"""CLI facade for offline checks, real protocol acceptance and coding tasks."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
-from io import StringIO
+from collections.abc import Sequence
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from time import perf_counter
-from types import SimpleNamespace
-from typing import cast
 
-import httpx
-from anthropic import APIConnectionError, Anthropic
 from rich.console import Console
 
-from .agent import (
-    Agent,
-    COMPACTION_CHECKPOINT_USER,
-    ChatModel,
-    UsageReportingChatModel,
+from .config import get_settings
+from .errors import NeilAgentError
+from .host_runtime import RuntimeProfile
+from .evaluation.catalog import DEFAULT_TASKS_PATH as DEFAULT_TASKS_PATH
+from .evaluation.common import EvalResult as EvalResult
+from .evaluation.offline import run_offline_evals as run_offline_evals
+from .evaluation.coding import run_coding_evals
+from .evaluation.acceptance import (
+    REAL_SYSTEM_PROMPT as REAL_SYSTEM_PROMPT,
+    REAL_V1_TOOLS as REAL_V1_TOOLS,
+    REAL_V2_PROMPT as REAL_V2_PROMPT,
+    run_real_deepseek_acceptance as run_real_deepseek_acceptance,
 )
-from .config import Settings, get_settings
-from .errors import AgentError, NeilAgentError
-from .instructions import (
-    MAX_INSTRUCTIONS_FILE_BYTES,
-    load_project_instructions,
-)
-from .providers.deepseek import DeepSeekProvider
-from .providers.factory import create_provider
-from .noninteractive import run_noninteractive
-from .schemas import (
-    ActivityEvent,
-    Message,
-    ModelResponse,
-    TokenUsage,
-    ToolCall,
-    ToolDefinition,
-)
-from .session import SessionStore
-from .host_runtime import (
-    BENCHMARK_MINIMAL_READONLY_TOOLS,
-    HostMode,
-    RuntimeProfile,
-    build_host_runtime,
-)
-from .tools import FileSystemTools, ToolRegistry
-from .tools.filesystem import READ_FILE
-
-DEFAULT_TASKS_PATH = Path(__file__).resolve().parents[2] / "evals" / "tasks.json"
-REAL_V1_PROMPT = (
-    'Call read_file exactly once with path "evidence.txt". Then return the file '
-    "contents and the verification token required by the project instructions, "
-    "with no explanation."
-)
-REAL_V2_PROMPT = (
-    'You must call write_file exactly once with path "v2-approved.txt" and content '
-    '"NEIL_V2_APPROVED". Do not call any other tool. After receiving any tool result, '
-    "do not call a tool again; return a short completion message."
-)
-REAL_SYSTEM_PROMPT = (
-    "You are running a bounded acceptance check. Follow the exact user request, "
-    "use only the requested tool, and do not perform unrelated work."
-)
-REAL_V1_TOOLS = BENCHMARK_MINIMAL_READONLY_TOOLS
-RealModelFactory = Callable[
-    [str, Settings, Callable[[ActivityEvent], None]],
-    ChatModel,
-]
-
-
-@dataclass(frozen=True, slots=True)
-class EvalResult:
-    """One bounded evaluation outcome suitable for terminal reporting."""
-
-    task_id: str
-    passed: bool
-    detail: str
-    duration_ms: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class _RealV1Outcome:
-    instruction_result: EvalResult
-    protocol_result: EvalResult
-    messages: tuple[Message, ...] | None
-
-
-class OfflineModel:
-    """Deterministic in-process model used by offline evaluations."""
-
-    def __init__(self, response: str = "offline response") -> None:
-        self.response = response
-        self.system_prompts: list[str] = []
-
-    def complete(
-        self,
-        messages: Sequence[Message],
-        *,
-        system_prompt: str,
-    ) -> str:
-        self.system_prompts.append(system_prompt)
-        return self.response
-
-    def stream(
-        self,
-        messages: Sequence[Message],
-        *,
-        system_prompt: str,
-        tools: Sequence[ToolDefinition] = (),
-    ) -> Iterator[str | ModelResponse]:
-        self.system_prompts.append(system_prompt)
-        yield self.response
-        yield ModelResponse(content=self.response)
-
-
-class FailingCompactionModel(OfflineModel):
-    def complete(
-        self,
-        messages: Sequence[Message],
-        *,
-        system_prompt: str,
-    ) -> str:
-        raise AgentError("simulated compaction failure")
-
-
-class ApprovalWorkflowModel(OfflineModel):
-    """Request a guarded write and then finish after its denied result."""
-
-    def __init__(self) -> None:
-        super().__init__("workflow complete")
-        self.calls = 0
-
-    def stream(
-        self,
-        messages: Sequence[Message],
-        *,
-        system_prompt: str,
-        tools: Sequence[ToolDefinition] = (),
-    ) -> Iterator[str | ModelResponse]:
-        self.calls += 1
-        if self.calls == 1:
-            yield ModelResponse(
-                tool_calls=(
-                    ToolCall(
-                        id="offline-write",
-                        name="write_file",
-                        arguments={"path": "result.txt", "content": "blocked"},
-                    ),
-                )
-            )
-            return
-        yield self.response
-        yield ModelResponse(content=self.response)
-
-
-def run_offline_evals(
-    tasks_path: Path = DEFAULT_TASKS_PATH,
-    *,
-    task_ids: Sequence[str] | None = None,
-    runtime_profile: RuntimeProfile = RuntimeProfile.BENCHMARK_MINIMAL,
-    clock: Callable[[], float] = perf_counter,
-) -> tuple[EvalResult, ...]:
-    """Run every declared task using fake models and temporary workspaces."""
-
-    declared_task_ids = _load_task_ids(tasks_path)
-    selected_task_ids = _select_task_ids(declared_task_ids, task_ids)
-    evaluators: dict[str, Callable[[], str]] = {
-        "root-project-instructions": _eval_root_instructions,
-        "unsafe-project-instructions": _eval_unsafe_instructions,
-        "explicit-context-compaction": _eval_compaction,
-        "compaction-failure-atomicity": _eval_compaction_failure,
-        "retry-approval-session-consistency": _eval_workflow_consistency,
-        "guest-export-import-approval": _eval_guest_export_import_approval,
-    }
-    results = []
-    for task_id in selected_task_ids:
-        started_at = clock()
-        evaluator = evaluators.get(task_id)
-        if evaluator is None:
-            results.append(
-                EvalResult(
-                    task_id,
-                    False,
-                    "没有对应的离线执行器",
-                    _elapsed_ms(started_at, clock()),
-                )
-            )
-            continue
-        try:
-            detail = evaluator()
-        except Exception as error:  # noqa: BLE001 - eval boundary reports failures.
-            results.append(
-                EvalResult(
-                    task_id,
-                    False,
-                    f"{type(error).__name__}: {error}",
-                    _elapsed_ms(started_at, clock()),
-                )
-            )
-        else:
-            results.append(
-                EvalResult(
-                    task_id,
-                    True,
-                    detail,
-                    _elapsed_ms(started_at, clock()),
-                )
-            )
-    return tuple(results)
-
-
-def run_real_deepseek_acceptance(
-    settings: Settings,
-    *,
-    runtime_profile: RuntimeProfile = RuntimeProfile.BENCHMARK_MINIMAL,
-    model_factory: RealModelFactory | None = None,
-) -> tuple[EvalResult, ...]:
-    """Run bounded real-model checks after the CLI's explicit cost opt-in."""
-
-    retry_events: list[ActivityEvent] = []
-    factory = model_factory or _default_real_model_factory
-    try:
-        with TemporaryDirectory(prefix="neil-agent-real-eval-") as temporary:
-            root = Path(temporary)
-            (root / "AGENTS.md").write_text(
-                "For every final answer, include the exact token NEIL_EVAL_OK.",
-                encoding="utf-8",
-            )
-            (root / "evidence.txt").write_text("READ_TOOL_OK", encoding="utf-8")
-            acceptance_settings = settings.model_copy(
-                update={
-                    "workspace_root": root,
-                    "audit_log_enabled": False,
-                    "system_prompt": REAL_SYSTEM_PROMPT,
-                    "thinking_enabled": False,
-                    "max_tokens": 1_024,
-                    "max_rounds": 4,
-                    "max_context_chars": 40_000,
-                    "max_context_tokens": None,
-                    "max_tool_rounds": 1,
-                    "max_retries": min(settings.max_retries, 1),
-                    "request_timeout": 60.0,
-                }
-            )
-            v1 = _run_real_v1_acceptance(
-                acceptance_settings,
-                root,
-                factory,
-                retry_events.append,
-                runtime_profile=runtime_profile,
-            )
-            if v1.instruction_result.passed and v1.protocol_result.passed:
-                compaction = _run_real_compaction_acceptance(
-                    acceptance_settings,
-                    root,
-                    v1.messages,
-                    factory,
-                    retry_events.append,
-                )
-                v2 = _run_real_v2_acceptance(
-                    acceptance_settings,
-                    root,
-                    factory,
-                    retry_events.append,
-                )
-            else:
-                compaction = EvalResult(
-                    "real-compaction-and-resume",
-                    False,
-                    "跳过：prerequisite/v1_failed",
-                )
-                v2 = EvalResult(
-                    "real-v2-request-approve-replay",
-                    False,
-                    "跳过：prerequisite/v1_failed",
-                )
-    except Exception:  # noqa: BLE001 - never expose raw acceptance data.
-        return _failed_real_acceptance("失败：workspace/setup")
-
-    retry_count = sum(
-        event.message.startswith("重试模型请求") for event in retry_events
-    )
-    return (
-        v1.instruction_result,
-        v1.protocol_result,
-        compaction,
-        v2,
-        EvalResult(
-            "real-natural-retry-observation",
-            True,
-            f"本次观察到 {retry_count} 次自然重试（0 次不视为失败）",
-        ),
-    )
-
-
-def _default_real_model_factory(
-    scenario: str,
-    settings: Settings,
-    retry_handler: Callable[[ActivityEvent], None],
-) -> ChatModel:
-    del scenario
-    return create_provider(settings, retry_handler=retry_handler)
-
-
-def _run_real_v1_acceptance(
-    settings: Settings,
-    root: Path,
-    model_factory: RealModelFactory,
-    retry_handler: Callable[[ActivityEvent], None],
-    *,
-    runtime_profile: RuntimeProfile,
-) -> _RealV1Outcome:
-    try:
-        stdout = StringIO()
-        exit_code = run_noninteractive(
-            settings,
-            REAL_V1_PROMPT,
-            output_format="stream-json",
-            stdout=stdout,
-            stderr=StringIO(),
-            save_session=True,
-            runtime_profile=runtime_profile,
-            llm=model_factory("v1", settings, retry_handler),
-        )
-        events = _parse_json_lines(stdout.getvalue())
-        if exit_code != 0 or len(events) < 2:
-            return _failed_real_v1("run_exit")
-        started = events[0]
-        result = events[-1]
-        tools = started.get("tools")
-        if (
-            started.get("type") != "session_start"
-            or started.get("protocol_version") != 1
-            or started.get("read_only") is not True
-            or started.get("runtime_profile") != runtime_profile.value
-            or not isinstance(tools, list)
-            or tuple(tools) != REAL_V1_TOOLS
-            or result.get("type") != "result"
-            or result.get("success") is not True
-            or result.get("saved") is not True
-        ):
-            return _failed_real_v1("protocol_shape")
-        session_id = result.get("session_id")
-        if not isinstance(session_id, str):
-            return _failed_real_v1("session_id")
-        usage = _parse_usage(result.get("usage"))
-        if usage is None or usage.total_tokens <= 0:
-            return _failed_real_v1("usage_missing")
-        snapshot = SessionStore(root).load(session_id)
-        read_calls = tuple(
-            call
-            for message in snapshot.messages
-            for call in message.tool_calls
-            if call.name == "read_file"
-        )
-        final_text = snapshot.messages[-1].content
-        instruction_ok = (
-            len(read_calls) == 1
-            and read_calls[0].arguments == {"path": "evidence.txt"}
-            and "READ_TOOL_OK" in final_text
-            and "NEIL_EVAL_OK" in final_text
-        )
-        protocol_ok = snapshot.last_usage == usage and result.get(
-            "session_id"
-        ) == started.get("session_id")
-        return _RealV1Outcome(
-            EvalResult(
-                "real-project-instructions-and-read-tool",
-                instruction_ok,
-                (
-                    "项目指令和精确 read_file 调用均通过"
-                    if instruction_ok
-                    else "失败：v1/instruction_or_read"
-                ),
-            ),
-            EvalResult(
-                "real-v1-protocol-usage-and-session",
-                protocol_ok,
-                (
-                    "默认五个只读工具、服务端 usage 与显式会话持久化均通过；"
-                    f"本回合共 {usage.total_tokens} tokens"
-                    if protocol_ok
-                    else "失败：v1/session_usage_mismatch"
-                ),
-            ),
-            snapshot.messages,
-        )
-    except Exception:  # noqa: BLE001 - keep model output and local IDs private.
-        return _failed_real_v1("exception")
-
-
-def _failed_real_v1(stage: str) -> _RealV1Outcome:
-    detail = f"失败：v1/{stage}"
-    return _RealV1Outcome(
-        EvalResult("real-project-instructions-and-read-tool", False, detail),
-        EvalResult("real-v1-protocol-usage-and-session", False, detail),
-        None,
-    )
-
-
-def _run_real_compaction_acceptance(
-    settings: Settings,
-    root: Path,
-    recent_round: tuple[Message, ...] | None,
-    model_factory: RealModelFactory,
-    retry_handler: Callable[[ActivityEvent], None],
-) -> EvalResult:
-    if recent_round is None:
-        return _failed_compaction("prerequisite")
-    try:
-        instructions = load_project_instructions(root)
-        registry = ToolRegistry()
-        filesystem = FileSystemTools(root)
-        registry.register(READ_FILE, filesystem.read_file)
-        compaction_model = model_factory("compaction", settings, retry_handler)
-        agent = Agent(
-            compaction_model,
-            system_prompt=settings.system_prompt,
-            project_instructions=instructions.prompt_section(),
-            max_rounds=max(settings.max_rounds, 4),
-            max_context_chars=max(settings.max_context_chars, 40_000),
-            registry=registry,
-            max_tool_rounds=settings.max_tool_rounds,
-        )
-        synthetic = tuple(
-            message
-            for number in (1, 2)
-            for message in (
-                Message(role="user", content=f"old request {number}"),
-                Message(role="assistant", content=str(number) * 10_000),
-            )
-        )
-        agent.restore_messages((*synthetic, *recent_round))
-        prepared = agent.prepare_compaction()
-        compaction_usage = (
-            compaction_model.last_usage
-            if isinstance(compaction_model, UsageReportingChatModel)
-            else None
-        )
-        if (
-            prepared.model_requests != 1
-            or compaction_usage is None
-            or compaction_usage.total_tokens <= 0
-        ):
-            return _failed_compaction("usage_missing")
-        agent.apply_compaction(prepared)
-        store = SessionStore(root)
-        handle = store.new_session()
-        saved = store.save(handle, agent.messages, (), None)
-        loaded = store.load(handle.session_id)
-        resumed = Agent(
-            OfflineModel(),
-            system_prompt=settings.system_prompt,
-            project_instructions=instructions.prompt_section(),
-            max_rounds=max(settings.max_rounds, 4),
-            max_context_chars=max(settings.max_context_chars, 40_000),
-            registry=registry,
-            max_tool_rounds=settings.max_tool_rounds,
-        )
-        resumed.restore_messages(loaded.messages)
-        continuity_ok = (
-            resumed.messages == saved.messages
-            and resumed.messages[0].content == COMPACTION_CHECKPOINT_USER
-        )
-    except Exception:  # noqa: BLE001 - do not expose model summaries or paths.
-        return _failed_compaction("exception")
-    return EvalResult(
-        "real-compaction-and-resume",
-        continuity_ok,
-        (
-            "压缩检查点已保存并由新 Agent 恢复；"
-            f"服务端报告 {compaction_usage.total_tokens} tokens"
-            if continuity_ok
-            else "失败：compaction/continuity"
-        ),
-    )
-
-
-def _failed_compaction(stage: str) -> EvalResult:
-    return EvalResult(
-        "real-compaction-and-resume",
-        False,
-        f"失败：compaction/{stage}",
-    )
-
-
-def _run_real_v2_acceptance(
-    settings: Settings,
-    root: Path,
-    model_factory: RealModelFactory,
-    retry_handler: Callable[[ActivityEvent], None],
-) -> EvalResult:
-    target = root / "v2-approved.txt"
-    try:
-        request_stdout = StringIO()
-        request_exit = run_noninteractive(
-            settings,
-            REAL_V2_PROMPT,
-            output_format="json",
-            stdout=request_stdout,
-            stderr=StringIO(),
-            protocol_version=2,
-            permission_mode="request",
-            runtime_profile=RuntimeProfile.STANDARD,
-            llm=model_factory("v2-request", settings, retry_handler),
-        )
-        request = _parse_json_object(request_stdout.getvalue())
-        if request_exit != 3:
-            return _failed_v2("request_exit")
-        approvals = request.get("approval_requests")
-        if (
-            request.get("type") != "approval_required"
-            or request.get("protocol_version") != 2
-            or request.get("permission_mode") != "request"
-            or request.get("saved") is not False
-            or not isinstance(approvals, list)
-            or len(approvals) != 1
-            or target.exists()
-        ):
-            return _failed_v2("request_shape")
-        approval = approvals[0]
-        if not isinstance(approval, dict) or approval.get("tool_name") != "write_file":
-            return _failed_v2("approval_shape")
-        approval_id = approval.get("approval_id")
-        if not isinstance(approval_id, str):
-            return _failed_v2("approval_id")
-        request_usage = _parse_usage(request.get("usage"))
-        if request_usage is None or request_usage.total_tokens <= 0:
-            return _failed_v2("request_usage")
-
-        approve_stdout = StringIO()
-        approve_exit = run_noninteractive(
-            settings,
-            REAL_V2_PROMPT,
-            output_format="json",
-            stdout=approve_stdout,
-            stderr=StringIO(),
-            protocol_version=2,
-            permission_mode="approve",
-            approval_id=approval_id,
-            runtime_profile=RuntimeProfile.STANDARD,
-            llm=model_factory("v2-approve", settings, retry_handler),
-        )
-        approved = _parse_json_object(approve_stdout.getvalue())
-        if approve_exit != 0:
-            return _failed_v2("approve_exit")
-        approve_usage = _parse_usage(approved.get("usage"))
-        if (
-            approved.get("type") != "result"
-            or approved.get("success") is not True
-            or approved.get("approved_request_id") != approval_id
-            or approve_usage is None
-            or approve_usage.total_tokens <= 0
-        ):
-            return _failed_v2("approve_shape")
-        if (
-            not target.is_file()
-            or target.read_text(encoding="utf-8") != "NEIL_V2_APPROVED"
-        ):
-            return _failed_v2("file_mismatch")
-        approved_content = target.read_bytes()
-
-        replay_model = _ForbiddenReplayModel()
-        replay_stdout = StringIO()
-        replay_exit = run_noninteractive(
-            settings,
-            REAL_V2_PROMPT,
-            output_format="json",
-            stdout=replay_stdout,
-            stderr=StringIO(),
-            protocol_version=2,
-            permission_mode="approve",
-            approval_id=approval_id,
-            runtime_profile=RuntimeProfile.STANDARD,
-            llm=replay_model,
-        )
-        replay = _parse_json_object(replay_stdout.getvalue())
-        if (
-            replay_exit != 1
-            or replay.get("type") != "error"
-            or replay.get("error_code") != "approval_error"
-            or replay_model.called
-            or target.read_bytes() != approved_content
-        ):
-            return _failed_v2("replay")
-    except Exception:  # noqa: BLE001 - never expose previews or approval IDs.
-        return _failed_v2("exception")
-    return EvalResult(
-        "real-v2-request-approve-replay",
-        True,
-        "request 未执行、approve 精确执行且同一审批 ID 的重放在模型调用前被拒绝；"
-        f"真实阶段共 {request_usage.total_tokens + approve_usage.total_tokens} tokens",
-    )
-
-
-def _failed_v2(stage: str) -> EvalResult:
-    return EvalResult(
-        "real-v2-request-approve-replay",
-        False,
-        f"失败：v2/{stage}",
-    )
-
-
-class _ForbiddenReplayModel:
-    """Detect any model request after a consumed approval should fail preflight."""
-
-    def __init__(self) -> None:
-        self.called = False
-
-    def complete(
-        self,
-        messages: Sequence[Message],
-        *,
-        system_prompt: str,
-    ) -> str:
-        del messages, system_prompt
-        self.called = True
-        raise AssertionError("replay unexpectedly reached the model")
-
-    def stream(
-        self,
-        messages: Sequence[Message],
-        *,
-        system_prompt: str,
-        tools: Sequence[ToolDefinition] = (),
-    ) -> Iterator[str | ModelResponse]:
-        del messages, system_prompt, tools
-        self.called = True
-        raise AssertionError("replay unexpectedly reached the model")
-        yield  # pragma: no cover - keeps this method an iterator.
-
-
-def _parse_json_lines(raw: str) -> tuple[dict[str, object], ...]:
-    lines = tuple(line for line in raw.splitlines() if line.strip())
-    if not lines:
-        raise ValueError("missing protocol events")
-    events = []
-    for line in lines:
-        value = json.loads(line)
-        if not isinstance(value, dict):
-            raise ValueError("protocol event must be an object")
-        events.append(value)
-    return tuple(events)
-
-
-def _parse_json_object(raw: str) -> dict[str, object]:
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise ValueError("protocol result must be an object")
-    return value
-
-
-def _parse_usage(value: object) -> TokenUsage | None:
-    if not isinstance(value, dict):
-        return None
-    names = (
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-    )
-    counts = {name: value.get(name) for name in names}
-    if any(type(count) is not int or count < 0 for count in counts.values()):
-        return None
-    usage = TokenUsage.model_validate(counts)
-    if value.get("total_tokens") != usage.total_tokens:
-        return None
-    return usage
-
-
-def _failed_real_acceptance(detail: str) -> tuple[EvalResult, ...]:
-    return tuple(
-        EvalResult(task_id, False, detail)
-        for task_id in (
-            "real-project-instructions-and-read-tool",
-            "real-v1-protocol-usage-and-session",
-            "real-compaction-and-resume",
-            "real-v2-request-approve-replay",
-            "real-natural-retry-observation",
-        )
-    )
-
-
-def _eval_root_instructions() -> str:
-    with TemporaryDirectory(prefix="neil-agent-eval-") as temporary:
-        root = Path(temporary)
-        secret_rule = "PRIVATE-EVAL-RULE: always add tests"
-        (root / "AGENTS.md").write_text(secret_rule, encoding="utf-8")
-        instructions = load_project_instructions(root)
-        model = OfflineModel()
-        agent = Agent(model, project_instructions=instructions.prompt_section())
-        agent.chat("change behavior")
-        store = SessionStore(root)
-        handle = store.new_session()
-        store.save(handle, agent.messages, (), None)
-        payload = (store.root / f"{handle.session_id}.json").read_text(encoding="utf-8")
-        _require(instructions.active, "root instructions were not active")
-        _require(
-            secret_rule in model.system_prompts[0],
-            "root instructions did not reach the system prompt",
-        )
-        _require(secret_rule not in payload, "instructions leaked into session JSON")
-    return "指令已注入系统上下文且未写入会话"
-
-
-def _eval_unsafe_instructions() -> str:
-    with TemporaryDirectory(prefix="neil-agent-eval-") as temporary:
-        root = Path(temporary)
-        (root / "AGENTS.md").write_bytes(b"x" * (MAX_INSTRUCTIONS_FILE_BYTES + 1))
-        instructions = load_project_instructions(root)
-        _require(instructions.status == "invalid", "oversized instructions were active")
-        _require(
-            not instructions.prompt_section(), "unsafe prompt content was generated"
-        )
-    return "超限指令被拒绝且未生成提示词"
-
-
-def _eval_compaction() -> str:
-    model = OfflineModel("durable offline summary")
-    agent = Agent(model)
-    history = tuple(
-        message
-        for number in range(1, 5)
-        for message in (
-            Message(role="user", content=f"request {number}"),
-            Message(
-                role="assistant",
-                content=(str(number) * 1_000 if number < 3 else f"answer {number}"),
-            ),
-        )
-    )
-    agent.restore_messages(history)
-    prepared = agent.prepare_compaction()
-    agent.apply_compaction(prepared)
-    _require(
-        agent.messages[0].content == COMPACTION_CHECKPOINT_USER,
-        "compaction checkpoint is missing",
-    )
-    _require(agent.messages[-4:] == history[-4:], "recent rounds changed")
-    return "较早轮次已压缩，最近两轮保持完整"
-
-
-def _eval_compaction_failure() -> str:
-    agent = Agent(FailingCompactionModel())
-    history = tuple(
-        message
-        for number in range(1, 4)
-        for message in (
-            Message(role="user", content=f"request {number}"),
-            Message(role="assistant", content=str(number) * 1_000),
-        )
-    )
-    agent.restore_messages(history)
-    try:
-        agent.prepare_compaction()
-    except AgentError:
-        pass
-    else:
-        raise AssertionError("compaction failure was not propagated")
-    _require(agent.messages == history, "failed compaction changed history")
-    return "摘要失败后内存历史保持不变"
-
-
-def _eval_workflow_consistency() -> str:
-    with TemporaryDirectory(prefix="neil-agent-eval-") as temporary:
-        root = Path(temporary)
-        retry_activities: list[ActivityEvent] = []
-        retry_delays: list[float] = []
-        request = httpx.Request("POST", "https://api.deepseek.com/messages")
-
-        class RetryMessages:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def create(self, **kwargs: object) -> object:
-                self.calls += 1
-                if self.calls == 1:
-                    raise APIConnectionError(request=request)
-                return SimpleNamespace(
-                    content=[SimpleNamespace(type="text", text="recovered")]
-                )
-
-        retry_messages = RetryMessages()
-        retry_client = SimpleNamespace(messages=retry_messages)
-        retry_settings = Settings.model_validate(
-            {
-                "deepseek_api_key": "offline-key",
-                "max_retries": 1,
-                "retry_base_delay": 0,
-            }
-        )
-        retry_model = DeepSeekProvider(
-            retry_settings,
-            client=cast(Anthropic, retry_client),
-            retry_handler=retry_activities.append,
-            sleeper=retry_delays.append,
-        )
-        recovered = retry_model.complete(
-            (Message(role="user", content="offline retry"),),
-            system_prompt="Offline evaluation.",
-        )
-        _require(recovered == "recovered", "transient request did not recover")
-        _require(retry_messages.calls == 2, "retry attempt count was not two")
-        _require(retry_delays == [0.0], "retry delay was not bounded and observable")
-        _require(
-            [event.message for event in retry_activities]
-            == ["模型请求暂时失败，等待重试", "重试模型请求"],
-            "retry activities were incomplete",
-        )
-
-        writes: list[tuple[str, str]] = []
-
-        def record_write(path: str, content: str) -> str:
-            writes.append((path, content))
-            return "written"
-
-        registry = ToolRegistry()
-        registry.register(
-            ToolDefinition(
-                name="write_file",
-                description="Offline approval test.",
-                input_schema={"type": "object"},
-            ),
-            record_write,
-            requires_approval=True,
-            preview_handler=lambda path, content: f"write {path}: {content}",
-        )
-        model = ApprovalWorkflowModel()
-        agent = Agent(
-            model, registry=registry, approval_handler=lambda call, preview: False
-        )
-        response = "".join(agent.stream_chat("attempt a guarded write"))
-        _require(response == "workflow complete", "tool workflow did not finish")
-        _require(writes == [], "denied write was executed")
-        _require(
-            any(
-                "用户拒绝" in result.content
-                for message in agent.messages
-                for result in message.tool_results
-            ),
-            "denied tool result was not recorded",
-        )
-        store = SessionStore(root)
-        handle = store.new_session()
-        saved = store.save(handle, agent.messages, (), None)
-        _require(
-            store.load(handle.session_id).messages == saved.messages,
-            "saved tool round could not be restored",
-        )
-    return "连接异常真实经过重试；拒绝写入后完整工具轮次可恢复"
-
-
-def _eval_guest_export_import_approval() -> str:
-    from io import StringIO
-
-    from neil_agent.noninteractive import run_noninteractive
-    from neil_agent.sandbox_export import build_guest_export_manifest
-    from neil_agent.schemas import ModelResponse, ToolCall
-
-    with TemporaryDirectory(prefix="neil-agent-eval-import-") as temporary:
-        root = Path(temporary)
-        settings = Settings.model_validate(
-            {
-                "deepseek_api_key": "offline-key",
-                "workspace_root": root,
-            }
-        )
-        runtime = build_host_runtime(
-            settings,
-            mode=HostMode.NONINTERACTIVE_WRITE,
-            profile=RuntimeProfile.STANDARD,
-        )
-        assert runtime.guest_import is not None
-        manifest = build_guest_export_manifest(
-            run_id="run-eval",
-            request_hash="d" * 64,
-            certification_sha256="e" * 64,
-            files=(("eval.txt", b"EVAL_IMPORT_OK"),),
-        )
-        digest = runtime.guest_import.stage(manifest, {"eval.txt": b"EVAL_IMPORT_OK"})
-
-        class ImportModel:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def complete(self, messages, *, system_prompt: str) -> str:
-                del messages, system_prompt
-                return "done"
-
-            def stream(self, messages, *, system_prompt: str, tools=()):
-                del messages, system_prompt, tools
-                self.calls += 1
-                if self.calls == 1:
-                    yield ModelResponse(
-                        tool_calls=(
-                            ToolCall(
-                                id="import-eval",
-                                name="import_guest_export",
-                                arguments={"manifest_sha256": digest},
-                            ),
-                        )
-                    )
-                    return
-                yield "import complete"
-                yield ModelResponse(content="import complete")
-
-        model = ImportModel()
-        request_stdout = StringIO()
-        request_exit = run_noninteractive(
-            settings,
-            "import guest export",
-            output_format="json",
-            stdout=request_stdout,
-            stderr=StringIO(),
-            protocol_version=2,
-            permission_mode="request",
-            llm=model,
-        )
-        request = _parse_json_object(request_stdout.getvalue())
-        _require(request_exit == 3, "request mode did not stop for approval")
-        approvals_value = request.get("approval_requests")
-        _require(
-            isinstance(approvals_value, list) and len(approvals_value) == 1,
-            "request mode did not emit one approval",
-        )
-        assert isinstance(approvals_value, list)
-        approval = approvals_value[0]
-        _require(
-            isinstance(approval, dict)
-            and approval.get("tool_name") == "import_guest_export"
-            and approval.get("binding_kind") == "guest-export-import",
-            "approval targeted the wrong tool or binding",
-        )
-        approval_id = approval.get("approval_id")
-        _require(isinstance(approval_id, str), "approval id missing")
-
-        approve_stdout = StringIO()
-        approve_exit = run_noninteractive(
-            settings,
-            "import guest export",
-            output_format="json",
-            stdout=approve_stdout,
-            stderr=StringIO(),
-            protocol_version=2,
-            permission_mode="approve",
-            approval_id=approval_id,
-            llm=ImportModel(),
-        )
-        approved = _parse_json_object(approve_stdout.getvalue())
-        _require(approve_exit == 0, "approve mode failed")
-        _require(approved.get("success") is True, "approve result was not successful")
-        target = root / "eval.txt"
-        _require(
-            target.is_file() and target.read_text(encoding="utf-8") == "EVAL_IMPORT_OK",
-            "guest export import did not write the staged file",
-        )
-    return "guest export 二次批准导入在非交互 v2 下完成且绑定正确"
-
-
-def _require(condition: bool, detail: str) -> None:
-    if not condition:
-        raise AssertionError(detail)
-
-
-def _load_task_ids(path: Path) -> tuple[str, ...]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取评测任务：{path}") from error
-    if not isinstance(payload, list):
-        raise ValueError("评测任务根节点必须是数组")
-    task_ids = []
-    for item in payload:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            raise ValueError("每个评测任务都必须包含字符串 id")
-        task_ids.append(item["id"])
-    if len(task_ids) != len(set(task_ids)):
-        raise ValueError("评测任务 id 不能重复")
-    return tuple(task_ids)
-
-
-def _select_task_ids(
-    declared: Sequence[str],
-    requested: Sequence[str] | None,
-) -> tuple[str, ...]:
-    if not requested:
-        return tuple(declared)
-    if len(requested) != len(set(requested)):
-        raise ValueError("--task 不能重复")
-    unknown = [task_id for task_id in requested if task_id not in declared]
-    if unknown:
-        raise ValueError(f"未知评测任务：{', '.join(unknown)}")
-    return tuple(requested)
-
-
-def _elapsed_ms(started_at: float, finished_at: float) -> int:
-    return max(round((finished_at - started_at) * 1_000), 0)
 
 
 def _show_results(console: Console, title: str, results: Sequence[EvalResult]) -> int:
@@ -1053,8 +76,20 @@ def main() -> None:
     """Run evaluations; real API calls require two explicit command flags."""
 
     parser = argparse.ArgumentParser(description="Run Neil Agent evaluations.")
-    parser.add_argument("--tasks", type=Path, default=DEFAULT_TASKS_PATH)
-    parser.add_argument("--real-deepseek", action="store_true")
+    parser.add_argument("--tasks", type=Path, default=None)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--real-deepseek", action="store_true")
+    mode.add_argument(
+        "--coding-tasks",
+        action="store_true",
+        help="Evaluate fixed coding tasks; graders execute Python on the host without OS sandboxing.",
+    )
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Use reference patches to verify the coding harness offline; produces no real model score.",
+    )
+    parser.add_argument("--trials", type=int, choices=range(1, 4), default=1)
     parser.add_argument("--confirm-api-cost", action="store_true")
     parser.add_argument("--task", action="append", dest="task_ids")
     parser.add_argument("--format", choices=("text", "json"), default="text")
@@ -1067,6 +102,56 @@ def main() -> None:
     arguments = parser.parse_args()
     runtime_profile = RuntimeProfile(arguments.runtime_profile)
     console = Console()
+
+    if arguments.simulate and not arguments.coding_tasks:
+        parser.error("--simulate 只能与 --coding-tasks 一起使用")
+    if arguments.trials != 1 and not arguments.coding_tasks:
+        parser.error("--trials 只能与 --coding-tasks 一起使用")
+    if arguments.coding_tasks:
+        if arguments.tasks is not None:
+            parser.error("代码任务只使用随包分发的固定语料，不能传入 --tasks")
+        if runtime_profile is not RuntimeProfile.BENCHMARK_MINIMAL:
+            parser.error("代码任务固定使用 benchmark-minimal")
+        if not arguments.simulate and not arguments.confirm_api_cost:
+            parser.error("真实代码任务会消耗 API 额度；请同时提供 --confirm-api-cost")
+        try:
+            if arguments.simulate:
+                from .config import Settings
+                from pydantic import SecretStr
+
+                settings = Settings.model_construct(
+                    deepseek_api_key=SecretStr("offline-fixture")
+                )
+            else:
+                settings = get_settings()
+            report = run_coding_evals(
+                settings,
+                task_ids=arguments.task_ids,
+                trials=arguments.trials,
+                simulated=arguments.simulate,
+            )
+        except (NeilAgentError, ValueError):
+            console.print(
+                "代码任务评测初始化失败；请检查配置与任务 ID。",
+                style="red",
+                markup=False,
+            )
+            raise SystemExit(2) from None
+        if arguments.format == "json":
+            print(json.dumps(report.summary(), ensure_ascii=False, sort_keys=True))
+        else:
+            console.print(f"代码任务评测 · {report.mode}", markup=False)
+            for result in report.results:
+                tokens = (
+                    "unavailable"
+                    if result.usage is None
+                    else str(result.usage.total_tokens)
+                )
+                console.print(
+                    f"{result.task_id} #{result.trial}: {result.status}; {result.duration_ms} ms; tokens={tokens}",
+                    markup=False,
+                )
+        raise SystemExit(0 if report.success else 1)
 
     if arguments.real_deepseek:
         if arguments.task_ids:
@@ -1114,3 +199,7 @@ def main() -> None:
             )
         )
     raise SystemExit(_show_results(console, "Neil Agent 离线评测", results))
+
+
+if __name__ == "__main__":
+    main()

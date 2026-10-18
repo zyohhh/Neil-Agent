@@ -7,6 +7,7 @@ A local coding agent built from scratch with Python and provider-neutral model b
 ```text
 uv run neil-agent
 uv run neil-agent-eval
+uv run neil-agent-eval --coding-tasks --simulate --format json
 ```
 
 Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护的文件和 Git 工具、项目指令、显式上下文压缩，以及可恢复的本地会话。
@@ -199,3 +200,5 @@ uv run neil-agent-eval --real-deepseek --confirm-api-cost --format json
 默认只读工具与显式会话保存、压缩恢复，以及 v2 request/approve 和审批
 重放保护；唯一写入发生在该临时目录，结束后删除。验收不主动制造限流或
 网络故障，也不会输出 API Key、完整审批 ID、审批预览或原始模型响应。
+
+内置代码任务可用 `--coding-tasks --confirm-api-cost` 交给当前 Provider 执行，由工作区外的固定功能测试评分；`--simulate` 验收参考补丁流程。任务、资源限制和结果含义见 [`docs/coding-evaluations.md`](docs/coding-evaluations.md)。发布 wheel 的全新环境安装验收使用 `neil-agent-install-check --wheel <文件>`，见 [`docs/installation-acceptance.md`](docs/installation-acceptance.md)。

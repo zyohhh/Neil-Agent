@@ -1762,6 +1762,16 @@ CLI 展示修改预览并等待用户输入 y/yes
 - 新增 48 项回归，覆盖两个独立进程竞争保存、旧版本改名/删除、写前日志失败、已写后模型失败与重启、取消、隐私、容量与轮转、三入口结清和模型准备/冲突/通知/清理失败。1 项新符号链接用例因 Windows 权限跳过；完整门禁 **979 passed、12 skipped、16 deselected**，ruff、mypy 通过。
 - 离线 wheel 构建成功，12 个包内模块哈希与源码一致，并通过从 wheel 导入执行日志、状态锁、共享运行时和 Web 控制器的检查。前端未改动，未重复页面回归；未调用真实模型 API。同步 `execution-recovery.md`、架构/运行时/Web 文档和项目状态；wheel 默认 eval 资源仍为独立后续项。
 
+## 2026-10-18：安装验收、代码任务评测与模块拆分
+
+- 默认任务目录迁入 `neil_agent/evaluation/tasks.json`，通过 `importlib.resources` 读取；wheel 安装后不依赖仓库 `evals/`。补齐 `python -m neil_agent.evals` 执行入口，防止质量检查空退出却被当作成功。空清单、重复/非法任务与超大清单明确拒绝。
+- 增加 `neil-agent-install-check`：离线创建全新虚拟环境，实际安装 wheel 与完整依赖，在仓库之外的临时目录验证四个入口、已安装资源、两种默认评测入口、代码任务模拟流程、两类费用门禁与真实 Web 服务启动/安全头/认证/停止，共 15 项。报告记录 wheel 哈希、Python 和关键依赖版本，子进程移除用户凭据与 Python 注入，失败后相关步骤标记 skipped。
+- 安装验收发现宽松依赖范围会解析到未经现有基线测试的 SDK 大版本；为 Anthropic/OpenAI/Pydantic/Pydantic Settings 补齐上界，锁文件只更新对应约束，保持原有开发依赖版本。
+- 新增分页、slug 冲突和跨文件配置优先级三项固定代码任务。每个试验先确认原始实现评分失败，使用标准 `benchmark-minimal` 读/替换工具，仅批准临时目录的目标源码；最终核对实际变化并执行工作区外的固定功能评分。模型回答不能替代测试，失败后的部分修改也记录。
+- 记录 Provider/模型、框架与任务哈希、Agent/Python/SDK 版本、耗时、请求/工具/审批/自然重试和服务端 usage；usage 缺失明确标记不完整。每任务最多 6 轮工具、7 次逻辑请求、32 个声明调用、每请求 2048 输出 token，设置协作 deadline 与累计报告 token 停止阈值；没有精确费用硬上限声明。`--coding-tasks --simulate` 明确标记参考补丁验收；真实模式必须同时提供 `--confirm-api-cost`，本轮未调用付费模型。
+- `evals.py` 收敛为命令与输出层，`evaluation/` 分离任务资源、离线协议、真实协议、代码执行、功能评分和共享结果；公开入口保持兼容。Agent turn 执行迁入 `web/turn_worker.py`，控制器继续管理控制权、命令、审批与持久化，保留原类的兼容导入。
+- 新增 32 项回归，完整门禁 **1011 passed、12 skipped、16 deselected**；ruff、mypy、离线构建通过。最终 wheel 的 15 项新环境验收和 3 项模拟任务通过，脱敏记录保存在 `docs/acceptance/2026-10-18-*.json`；前端未改动，不重复页面回归。更新安装/评测方法、架构、运行时、运维、项目状态与 README。
+
 
 
 

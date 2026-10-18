@@ -79,7 +79,10 @@ sandbox.py
   平台无关的不可变执行策略、Windows Sandbox 能力探测和 fail-closed 适配层
 
 evals.py
-  默认离线场景执行器、双重显式开启的真实 DeepSeek 协议验收
+  评测命令、费用门禁与输出；evaluation/ 分离任务资源、离线检查、协议验收、代码任务与评分
+
+installation.py / installation_probe.py
+  全新虚拟环境安装实际 wheel，核对入口、资源、评测与真实 loopback 服务
 
 web/ (React + TypeScript)
   本地 Workbench UI；生产构建写入 src/neil_agent/web/static/ 并随 wheel 分发
@@ -368,12 +371,14 @@ CLI 使用 `TerminalRenderer` 统一处理三类异步输出：Agent 活动事�
 
 ## 评测边界
 
-- `neil-agent-eval` 默认读取 `evals/tasks.json`，使用确定性假模型和临时工作区执行全部已声明场景，不读取 API Key、不访问网络，也不修改真实项目文件。
+- `neil-agent-eval` 默认通过 `importlib.resources` 读取随包分发的 `evaluation/tasks.json`，使用确定性假模型和临时工作区执行全部已声明场景，不读取 API Key、不访问网络，也不修改真实项目文件。控制台和 `python -m neil_agent.evals` 执行同一入口。
 - `--task <id>` 可重复指定单个场景，`--format json` 输出稳定字段和毫秒耗时；`run_quality_check(eval)` 复用同一离线 JSON 命令，不会自动启用真实 DeepSeek 模式。
 - 未注册离线执行器的任务会明确失败，防止只增加文字场景却未接入执行逻辑；进程以非零退出码报告失败，可直接接入本地检查或 CI。
 - `--real-deepseek` 单独使用不会发送请求；必须同时提供 `--confirm-api-cost` 才会运行真实验收。
-- 真实模式把工作区固定到自动删除的临时目录，验收设置固定关闭 thinking、单轮工具上限、1024 输出 token、40000 字符上下文、60 秒超时和最多一次瞬时失败重试。它验证 v1 五个默认只读工具、精确 `read_file`、项目指令、服务端 `usage`、显式会话保存、压缩恢复，以及 v2 request/approve 和消费后重放拒绝。
+- 真实协议模式把工作区固定到自动删除的临时目录，验收设置固定关闭 thinking、单轮工具上限、1024 输出 token、40000 字符上下文、60 秒超时和最多一次瞬时失败重试。它验证 v1 默认 `benchmark-minimal` 的三个只读工具、精确 `read_file`、项目指令、服务端 `usage`、显式会话保存、压缩恢复，以及 v2 request/approve 和消费后重放拒绝。
 - v2 的唯一写入只发生在临时目录；审批 ID、预览和原始模型响应不进入报告。v1 前置失败时不会继续发起压缩和 v2 请求。自然重试只观察真实发生次数，不主动制造限流或网络故障。
+- `--coding-tasks` 对固定源码任务执行受限模型编辑，再运行工作区外的功能评分；真实模式明确确认 API 费用，`--simulate` 仅验收参考补丁执行链。报告包含来源指纹、失败、实际修改、usage 与资源指标。评分在宿主子进程执行生成代码，无 OS 沙箱；详见 [`coding-evaluations.md`](coding-evaluations.md)。
+- `neil-agent-install-check` 默认离线创建全新环境安装指定 wheel，核对非空评测结果和真实本地服务，详见 [`installation-acceptance.md`](installation-acceptance.md)。
 
 ## 异常边界
 

@@ -10,7 +10,7 @@ from neil_agent.config import Settings
 from neil_agent.errors import ToolError
 from neil_agent.schemas import Message, ModelResponse, ToolCall, ToolDefinition
 from neil_agent.tools.filesystem import FileSystemTools
-from neil_agent.web import controller as controller_module
+from neil_agent.web import turn_worker as worker_module
 from neil_agent.web.controller import AgentTurnWorker
 
 
@@ -52,7 +52,7 @@ def test_web_cancel_without_visible_text_stops_tools_and_followup_request(
 
     model = CancelModel()
     monkeypatch.setattr(
-        controller_module, "create_provider", lambda *_args, **_kwargs: model
+        worker_module, "create_provider", lambda *_args, **_kwargs: model
     )
     monkeypatch.setattr(
         FileSystemTools,
