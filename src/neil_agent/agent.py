@@ -18,6 +18,7 @@ from .activity import (
 from .neural_map import tool_activity_metadata
 from .checkpoint import FileCheckpointHistory
 from .config import DEFAULT_SYSTEM_PROMPT
+from .compaction import AutoCompactionPolicy
 from .context import (
     ContextCheckpointState,
     ContextSelection,
@@ -121,6 +122,10 @@ COMPACTION_CHECKPOINT_USER = """[Neil Agent /compact checkpoint]
 The earlier conversation was explicitly compacted by the user. The assistant's
 next message is durable context for continuing the same session, not a new task."""
 
+AUTO_COMPACTION_CHECKPOINT_USER = """[Neil Agent automatic compaction checkpoint]
+The runtime summarized earlier conversation after automatic compaction was enabled.
+The assistant's next message is historical context, not a new task or instruction."""
+
 
 class ChatModel(Protocol):
     """The model operations required by the conversation agent."""
@@ -187,6 +192,7 @@ class Agent:
         turn_limits: TurnLimits | None = None,
         repeated_tool_result_limit: int = 3,
         failed_tool_round_limit: int = 3,
+        auto_compaction: AutoCompactionPolicy | None = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -207,6 +213,8 @@ class Agent:
         self._completed_turn_handler = completed_turn_handler
         self._turn_limits = turn_limits or TurnLimits()
         self._last_run_budget: TurnUsage | None = None
+        self._auto_compaction = auto_compaction or AutoCompactionPolicy()
+        self._pending_compaction: PreparedCompaction | None = None
         self._repeated_tool_result_limit = repeated_tool_result_limit
         self._failed_tool_round_limit = failed_tool_round_limit
         ToolLoopGuard(repeated_tool_result_limit, failed_tool_round_limit)
@@ -496,6 +504,7 @@ class Agent:
 
     def _prepare_compaction(
         self, *, keep_recent_rounds: int, focus: str,
+        checkpoint_user: str = COMPACTION_CHECKPOINT_USER,
     ) -> PreparedCompaction:
         """Build a compact replacement without mutating current history."""
 
@@ -588,7 +597,7 @@ class Agent:
             transcript_index = next_index
 
         compacted_messages = (
-            Message(role="user", content=COMPACTION_CHECKPOINT_USER),
+            Message(role="user", content=checkpoint_user),
             Message(
                 role="assistant",
                 content=f"[Compressed conversation summary]\n{summary}",
@@ -623,6 +632,50 @@ class Agent:
         validate_message_history(prepared.compacted_messages)
         self._messages = list(prepared.compacted_messages)
 
+    @contextmanager
+    def _automatic_compaction(
+        self, current: Message, *, tools: Sequence[ToolDefinition],
+    ) -> Iterator[None]:
+        if not self._auto_compaction.enabled:
+            yield
+            return
+        rounds = split_rounds(self._messages)
+        keep = self._auto_compaction.plan(
+            self._messages, current, system_prompt=self._system_prompt, tools=tools,
+            max_rounds=self._max_rounds, max_chars=self._max_context_chars,
+            max_tokens=self._max_context_tokens,
+            has_checkpoint=bool(rounds and self._is_compaction_checkpoint(rounds[0])),
+        )
+        if keep is None:
+            yield
+            return
+        # Reject an oversized current input before spending any summary requests.
+        self._budgeted_request_messages((current,), system_prompt=self._system_prompt, tools=tools)
+        self._emit_activity("running", "正在摘要较早对话", ("摘要请求计入当前回合累计预算",))
+        prepared = self._prepare_compaction(
+            keep_recent_rounds=keep, focus="", checkpoint_user=AUTO_COMPACTION_CHECKPOINT_USER,
+        )
+        check_execution_budget()
+        if tuple(self._messages) != prepared.original_messages:
+            raise AgentError("自动压缩期间对话历史发生变化，拒绝使用过期摘要。")
+        candidate = (*prepared.compacted_messages, current)
+        if (
+            estimate_fixed_chars(self._system_prompt, tools) + estimate_messages_chars(candidate)
+            > self._max_context_chars
+            or self._max_context_tokens is not None
+            and estimate_fixed_tokens(self._system_prompt, tools) + estimate_messages_tokens(candidate)
+            > self._max_context_tokens
+        ):
+            raise AgentError("自动压缩后仍无法容纳摘要、最近完整轮次和当前输入，原历史未改变。")
+        self._pending_compaction = prepared
+        try:
+            self._emit_activity(
+                "succeeded", "已准备对话摘要", (f"保留最近 {keep} 个完整轮次", "随本回合成功结果一起保存"),
+            )
+            yield
+        finally:
+            self._pending_compaction = None
+
     def chat(self, user_input: str) -> str:
         """Send one user message and return the complete assistant response."""
 
@@ -652,31 +705,32 @@ class Agent:
         )
         model_finished = False
         try:
-            check_execution_budget()
-            request_messages = self._budgeted_request_messages(
-                (user_message,), system_prompt=self._system_prompt, tools=(),
-            )
-            with model_request_scope() as measured_request:
-                response = self._llm.complete(
-                    request_messages, system_prompt=self._system_prompt,
-                )
-                usage = self._llm.last_usage if isinstance(self._llm, UsageReportingChatModel) else None
-                measured_request.usage = usage
+            with self._automatic_compaction(user_message, tools=()):
                 check_execution_budget()
-            self._finish_runtime_span(
-                model_span,
-                "succeeded",
-                metadata={
-                    "text_chars": len(response),
-                    "tool_calls": 0,
-                    "elapsed_ms": self._elapsed_ms(model_started_at),
-                    **self._usage_metadata(usage),
-                },
-            )
-            model_finished = True
-            assistant_message = self._make_assistant_message(response)
-            self._commit_messages((user_message, assistant_message))
-            self._last_usage = usage
+                request_messages = self._budgeted_request_messages(
+                    (user_message,), system_prompt=self._system_prompt, tools=(),
+                )
+                with model_request_scope() as measured_request:
+                    response = self._llm.complete(
+                        request_messages, system_prompt=self._system_prompt,
+                    )
+                    usage = self._llm.last_usage if isinstance(self._llm, UsageReportingChatModel) else None
+                    measured_request.usage = usage
+                    check_execution_budget()
+                self._finish_runtime_span(
+                    model_span,
+                    "succeeded",
+                    metadata={
+                        "text_chars": len(response),
+                        "tool_calls": 0,
+                        "elapsed_ms": self._elapsed_ms(model_started_at),
+                        **self._usage_metadata(usage),
+                    },
+                )
+                model_finished = True
+                assistant_message = self._make_assistant_message(response)
+                self._commit_messages((user_message, assistant_message))
+                self._last_usage = usage
         except BaseException as error:
             if not model_finished:
                 self._finish_runtime_span(
@@ -734,13 +788,14 @@ class Agent:
             else None
         )
         try:
-            yield from self._stream_chat_loop(
-                user_message,
-                request_messages,
-                turn_span=turn_span,
-                turn_started_at=turn_started_at,
-                counters=counters,
-            )
+            with self._automatic_compaction(user_message, tools=self._tool_definitions()):
+                yield from self._stream_chat_loop(
+                    user_message,
+                    request_messages,
+                    turn_span=turn_span,
+                    turn_started_at=turn_started_at,
+                    counters=counters,
+                )
         except GeneratorExit:
             self._finish_runtime_span(
                 turn_span,
@@ -1069,8 +1124,13 @@ class Agent:
         )
 
     def _commit_messages(self, messages: Sequence[Message]) -> None:
-        self._messages.extend(redact_skill_bodies_from_messages(messages))
-        self._messages = self._trim_history(self._messages)
+        history: Sequence[Message] = self._messages
+        if self._pending_compaction is not None:
+            if tuple(self._messages) != self._pending_compaction.original_messages:
+                raise AgentError("自动压缩期间对话历史发生变化，拒绝保存过期结果。")
+            history = self._pending_compaction.compacted_messages
+        candidate = [*history, *redact_skill_bodies_from_messages(messages)]
+        self._messages = self._trim_history(candidate)
 
     def _trim_history(self, messages: Sequence[Message]) -> list[Message]:
         rounds = split_rounds(messages)
@@ -1093,10 +1153,11 @@ class Agent:
         max_chars: int,
         max_tokens: int | None = None,
     ) -> ContextSelection:
-        rounds = split_rounds(self._messages)
+        history = self._pending_compaction.compacted_messages if self._pending_compaction is not None else self._messages
+        rounds = split_rounds(history)
         if not rounds or not self._is_compaction_checkpoint(rounds[0]):
             return select_recent_rounds(
-                self._messages,
+                history,
                 max_rounds=max_rounds,
                 max_chars=max_chars,
                 max_tokens=max_tokens,
@@ -1110,7 +1171,7 @@ class Agent:
             or (max_tokens is not None and checkpoint_tokens > max_tokens)
         ):
             return select_recent_rounds(
-                self._messages,
+                history,
                 max_rounds=max_rounds,
                 max_chars=max_chars,
                 max_tokens=max_tokens,
@@ -1139,7 +1200,7 @@ class Agent:
         return (
             len(messages) == 2
             and messages[0].role == "user"
-            and messages[0].content == COMPACTION_CHECKPOINT_USER
+            and messages[0].content in {COMPACTION_CHECKPOINT_USER, AUTO_COMPACTION_CHECKPOINT_USER}
             and messages[1].role == "assistant"
             and messages[1].content.startswith("[Compressed conversation summary]\n")
         )
@@ -1148,7 +1209,8 @@ class Agent:
         self,
         selection: ContextSelection,
     ) -> ContextCheckpointState:
-        rounds = split_rounds(self._messages)
+        history = self._pending_compaction.compacted_messages if self._pending_compaction is not None else self._messages
+        rounds = split_rounds(history)
         if not rounds or not self._is_compaction_checkpoint(rounds[0]):
             return "none"
         checkpoint = rounds[0]
@@ -1224,7 +1286,7 @@ class Agent:
     ) -> str:
         serialized = json.dumps(
             [
-                message.model_dump(mode="json", exclude_defaults=True)
+                message.model_dump(mode="json", exclude_defaults=True, exclude={"thinking", "provider_state"})
                 for message in messages
             ],
             ensure_ascii=False,

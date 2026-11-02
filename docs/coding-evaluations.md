@@ -30,6 +30,8 @@ uv run neil-agent-eval --coding-tasks --confirm-api-cost --task config-precedenc
 
 真实模式使用现有 Provider/模型配置，保留其 endpoint 与凭据选择。最多重复 3 次；每次创建新工作区、新 Agent 和新模型实例，不沿用前一次补丁。`--task` 可筛选内置任务，重复或未知 ID 拒绝执行。代码任务固定使用 `benchmark-minimal`，不接受外部任务清单或更宽的 profile。
 
+代码评测显式关闭自动上下文摘要，避免日常用户配置改变固定评测的模型请求协议。自动摘要维护后的新版模拟记录见 [`acceptance/2026-11-02-auto-compaction-coding-simulated.json`](acceptance/2026-11-02-auto-compaction-coding-simulated.json)。
+
 ## 评分依据
 
 1. 在一次性工作区写入初始源码与约束；功能用例的期望值保留在父进程。

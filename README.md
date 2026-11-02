@@ -12,6 +12,8 @@ uv run neil-agent-eval --coding-tasks --simulate --format json
 
 Neil Agent 会在工作区内提供多轮对话、流式活动、受审批保护的文件和 Git 工具、项目指令、显式上下文压缩，以及可恢复的本地会话。
 
+可选的[自动上下文摘要](docs/automatic-compaction.md)按字符/token 压力和轮数上限整理较早对话，保留最近完整工具轮次，随成功回合提交摘要。默认关闭；显式开启后摘要请求也计入回合共享预算。
+
 启动后首先显示一个响应式工作台，集中展示当前模型、思考模式、工作区、会话、工具审批数量和项目指令状态；它不会显示 API Key 或 `AGENTS.md` 正文。
 
 项目指令命令：

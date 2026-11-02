@@ -12,6 +12,8 @@ Neil Agent 有三个主要运行入口，它们都必须向 `Agent` 提供一致
 
 历史上这三处各自复制 `FileSystemTools`、`ShellTools`、`ToolRegistry` 和 `ProjectInstructionManager` 的装配逻辑，容易产生行为漂移。`host_runtime.py` 是统一装配层；各入口仍负责自己的审批、会话、输出和 UI。
 
+`build_agent()` 同时装配可选的 `AutoCompactionPolicy`；默认关闭，开启后摘要与工作请求共享回合账本，候选仅随完整成功回合提交。配置与历史边界见 [`automatic-compaction.md`](automatic-compaction.md)。
+
 ## 模块位置
 
 ```text

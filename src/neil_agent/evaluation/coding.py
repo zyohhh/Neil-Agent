@@ -313,6 +313,7 @@ def _run_trial(
                     "workspace_root": workspace,
                     "system_prompt": "Solve the requested coding task using the available tools. Follow AGENTS.md. The external grader runs after your final response; never claim it already ran.",
                     "thinking_enabled": False,
+                    "auto_compact_enabled": False,
                     "audit_log_enabled": False,
                     "max_tokens": 2_048,
                     "max_context_chars": 40_000,

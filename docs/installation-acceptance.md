@@ -39,3 +39,5 @@ uv run neil-agent-install-check --wheel .\dist\neil_agent-0.1.0-py3-none-any.whl
 评分、子进程生命周期和执行独占修复后的新 wheel 验收记录见 [`acceptance/2026-10-18-execution-hardening-installation.json`](acceptance/2026-10-18-execution-hardening-installation.json)。验收调用的固定命令使用 [`host-processes.md`](host-processes.md) 中的进程树执行器，生成代码的 OS 隔离仍待补齐。
 
 共享预算、工具停滞检测和六任务语料的新 wheel 记录见 [`acceptance/2026-11-02-turn-limits-installation.json`](acceptance/2026-11-02-turn-limits-installation.json)；此前三任务记录保留为历史验收，不代表新版语料覆盖。
+
+自动摘要维护后的新版 wheel 记录见 [`acceptance/2026-11-02-auto-compaction-installation.json`](acceptance/2026-11-02-auto-compaction-installation.json)；功能配置与候选提交边界见 [`automatic-compaction.md`](automatic-compaction.md)。

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from .audit import AuditLogStatus, JsonlAuditSink
 from .config import Settings
+from .compaction import AutoCompactionPolicy
 from .execution_journal import ExecutionJournal
 from .execution_lock import WorkspaceExecutionLock
 from .turn_budget import TurnLimits
@@ -460,4 +461,9 @@ def build_agent(
         ),
         repeated_tool_result_limit=settings.repeated_tool_result_limit,
         failed_tool_round_limit=settings.failed_tool_round_limit,
+        auto_compaction=AutoCompactionPolicy(
+            enabled=settings.auto_compact_enabled,
+            trigger_ratio=settings.auto_compact_trigger_ratio,
+            keep_recent_rounds=settings.auto_compact_keep_recent_rounds,
+        ),
     )

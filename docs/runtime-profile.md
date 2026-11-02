@@ -116,6 +116,12 @@ SDK 尝试在适配器计入，宿主通过 `build_agent()` 传入限制；子�
 
 新增 45 项回归；完整离线门禁 1084 passed、12 skipped、16 deselected，ruff 与 99 个源文件的 mypy 通过。最终 wheel 的 106 个包内文件与源码一致，全新环境 15 项安装验收及六任务/69 用例的参考补丁模拟通过；记录见 `docs/acceptance/2026-11-02-turn-limits-*.json`，未调用真实模型 API。
 
+### 2026-11-02：自动上下文摘要
+
+`build_agent()` 从 Settings 装配 `AutoCompactionPolicy`，默认关闭。显式开启后，在新回合的字符/token 压力或历史轮数即将超过限制时准备摘要，摘要请求继承同一累计账本；最近完整轮次的工具配对和 Provider 状态保留。候选只用于当前请求，完整工作回合成功后再与新消息一起提交；失败、取消、关闭和原历史变化均拒绝替换历史。手动 `/compact` 保持独立可用，自动检查点沿用现有会话格式。
+
+新增 36 项离线回归，完整门禁 1120 passed、12 skipped、16 deselected，ruff 和 100 个源文件的 mypy 通过。最终 wheel 的 107 个包内文件与源码一致，全新环境 15 项安装验收及六任务/69 用例参考补丁模拟通过。配置、压缩边界与分发验收见 [`automatic-compaction.md`](automatic-compaction.md)。没有新增工具、线程调度或检索式长期记忆。
+
 ## 批次 1：RuntimeProfile + benchmark-minimal
 
 **问题：** 入口能力由 `HostMode` 隐式决定；eval 使用与日常 Agent 相近的工具面，模型分数无法声明 harness。DeepSeek 官方 benchmark 明确跑在 Minimal 上。

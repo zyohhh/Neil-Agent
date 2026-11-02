@@ -32,6 +32,7 @@ def runtime_provenance() -> RuntimeProvenance:
         "agent.py",
         "config.py",
         "context.py",
+        "compaction.py",
         "subtask.py",
         "events.py",
         "host_runtime.py",
