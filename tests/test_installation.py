@@ -76,7 +76,7 @@ def _fake_probe(command, **kwargs):
             "installed": True,
             "version": "0.1.0",
             "offline_tasks": 6,
-            "coding_tasks": 3,
+            "coding_tasks": 6,
             "static_files": 3,
             "python": "3.13.0",
             "dependencies": {
@@ -99,7 +99,7 @@ def _fake_probe(command, **kwargs):
     ):
         return ProcessResult(2, "cost gate")
     elif "--simulate" in command:
-        payload = {"mode": "simulated", "success": True, "total": 3}
+        payload = {"schema_version": 2, "mode": "simulated", "success": True, "total": 6}
     elif "--format" in command:
         payload = {"success": True, "total": 6}
     else:

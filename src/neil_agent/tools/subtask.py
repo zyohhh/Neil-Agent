@@ -14,7 +14,7 @@ def run_readonly_subtask_definition(max_prompt_chars: int) -> ToolDefinition:
     return ToolDefinition(
         name="run_readonly_subtask",
         description=(
-            "Spawn a one-shot read-only sub-agent to explore the repository in parallel. "
+            "Run a one-shot read-only sub-agent synchronously under the parent turn budget. "
             "The sub-agent may only use read-only filesystem tools and returns a bounded "
             "summary without merging its full conversation into the main history."
         ),

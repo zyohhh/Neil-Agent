@@ -43,6 +43,7 @@ Web 启动器仍在 `web/runtime.py`（Uvicorn 与静态资源），不要与 `h
 | 审计 hooks | 可选 | 可选 | 可选 | 可选 |
 | 持久执行记录 | ✅ 懒创建 | ❌ | ✅ 懒创建 | ✅ 懒创建 |
 | 工作区执行独占 | ✅ 回合至保存 | ❌ | ✅ 回合至输出/保存 | ✅ 回合至保存 |
+| 累计模型预算 / 停滞检测 | ✅ | ✅ | ✅ | ✅ |
 | 会话持久化 | ✅ 多轮 | 单次/可选保存 | 单次/可选保存 | ✅ 选择、恢复、成功后原子保存 |
 | 进程内模型切换 | ❌ 启动配置 | ❌ 启动配置 | ❌ 启动配置 | ✅ 同 Provider 显式白名单、idle + 空会话 |
 | Security Shield 投影 | ✅ `/cockpit` | ❌（无对应 UI） | ❌（无对应 UI） | ✅ 与 CLI 共用观察函数 |
@@ -100,6 +101,8 @@ runtime = build_host_runtime(settings, mode=HostMode.WEB)
 | Web worker 与控制器分离 | ✅ `web/turn_worker.py` 执行 Agent；控制器保留控制权、审批协调与持久化 |
 
 当前无已知 host_runtime 迁移缺口；后续新能力应优先经 `build_host_runtime()` 接入三入口。
+
+`build_agent()` 从 Settings 传入累计预算与停滞阈值，子任务保留局部限制并继承父级账本；不增加文件或模型工具。SDK 默认及注入客户端均关闭 SDK 内部隐藏重试，由适配器统一管理；局部/累计限制、未知 usage 和扩展模型接入要求见 [`turn-limits.md`](turn-limits.md)。
 
 `WorkspaceExecutionLock` 与执行记录按相同入口条件装配并纳入 disposer。Agent 自动保护执行，宿主持久化作用域可重入；关闭运行时不提前释放活动任务。`build_agent()` 的 `before_turn_handler` 与 `completed_turn_handler` 为宿主会话检查/保存使用，不是模型工具或可由项目指令替换的策略。并发保护见 [`execution-recovery.md`](execution-recovery.md)，命令取消和子进程清理见 [`host-processes.md`](host-processes.md)。
 

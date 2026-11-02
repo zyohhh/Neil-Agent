@@ -187,7 +187,7 @@ def test_deepseek_complete_matches_v1_golden_contract() -> None:
         expected_usage=TokenUsage.model_validate(contract["usage"]),
     )
 
-    assert client.messages.create.call_args.kwargs == case["wire_request"]
+    assert client.messages.create.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_deepseek_text_stream_matches_v1_golden_contract() -> None:
@@ -217,7 +217,7 @@ def test_deepseek_text_stream_matches_v1_golden_contract() -> None:
         expected_response=ModelResponse.model_validate(contract["response"]),
     )
 
-    assert client.messages.stream.call_args.kwargs == case["wire_request"]
+    assert client.messages.stream.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_deepseek_tool_stream_matches_v1_golden_contract() -> None:
@@ -247,7 +247,7 @@ def test_deepseek_tool_stream_matches_v1_golden_contract() -> None:
         expected_response=ModelResponse.model_validate(contract["response"]),
     )
 
-    assert client.messages.stream.call_args.kwargs == case["wire_request"]
+    assert client.messages.stream.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_claude_fixture_is_versioned_synthetic_and_secret_free() -> None:
@@ -289,7 +289,7 @@ def test_claude_complete_matches_v1_golden_contract() -> None:
         expected_usage=TokenUsage.model_validate(contract["usage"]),
     )
 
-    assert client.messages.create.call_args.kwargs == case["wire_request"]
+    assert client.messages.create.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_claude_text_stream_matches_v1_golden_contract() -> None:
@@ -319,7 +319,7 @@ def test_claude_text_stream_matches_v1_golden_contract() -> None:
         expected_response=ModelResponse.model_validate(contract["response"]),
     )
 
-    assert client.messages.stream.call_args.kwargs == case["wire_request"]
+    assert client.messages.stream.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_claude_tool_stream_matches_v1_golden_contract() -> None:
@@ -349,7 +349,7 @@ def test_claude_tool_stream_matches_v1_golden_contract() -> None:
         expected_response=ModelResponse.model_validate(contract["response"]),
     )
 
-    assert client.messages.stream.call_args.kwargs == case["wire_request"]
+    assert client.messages.stream.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_openai_fixture_is_versioned_synthetic_and_secret_free() -> None:
@@ -390,7 +390,7 @@ def test_openai_complete_matches_v1_golden_contract() -> None:
         expected_usage=TokenUsage.model_validate(contract["usage"]),
     )
 
-    assert client.responses.create.call_args.kwargs == case["wire_request"]
+    assert client.responses.create.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_openai_text_stream_matches_v1_golden_contract() -> None:
@@ -417,7 +417,7 @@ def test_openai_text_stream_matches_v1_golden_contract() -> None:
         expected_response=ModelResponse.model_validate(contract["response"]),
     )
 
-    assert client.responses.create.call_args.kwargs == case["wire_request"]
+    assert client.responses.create.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}
 
 
 def test_openai_tool_stream_matches_v1_golden_contract() -> None:
@@ -444,4 +444,4 @@ def test_openai_tool_stream_matches_v1_golden_contract() -> None:
         expected_response=ModelResponse.model_validate(contract["response"]),
     )
 
-    assert client.responses.create.call_args.kwargs == case["wire_request"]
+    assert client.responses.create.call_args.kwargs == {**case["wire_request"], "timeout": model.settings.request_timeout}

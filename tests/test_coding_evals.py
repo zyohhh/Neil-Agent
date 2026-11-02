@@ -12,7 +12,7 @@ from neil_agent.config import Settings
 from neil_agent.errors import LLMError
 from neil_agent.evaluation import coding as coding_module
 from neil_agent.evaluation.coding import _ReferenceModel, run_coding_evals
-from neil_agent.evaluation.coding_catalog import CodingTask, FunctionCase, load_coding_tasks
+from neil_agent.evaluation.coding_catalog import CodingTask, FunctionCase, TaskOrigin, load_coding_tasks
 from neil_agent.host_runtime import BENCHMARK_MINIMAL_WRITE_TOOLS
 from neil_agent.schemas import ModelResponse, TokenUsage, ToolCall
 
@@ -33,12 +33,15 @@ class NoChangeModel:
 def test_reference_fixture_exercises_all_tasks_but_is_not_a_real_score() -> None:
     report = run_coding_evals(_settings(), simulated=True)
     assert report.mode == "simulated" and report.provider == "fixture"
-    assert report.success and report.task_count == 3
+    assert report.success and report.task_count == 6 and report.schema_version == 2
     assert all(
         result.baseline_failed and result.grader_exit_code == 0
         for result in report.results
     )
-    assert [result.approved_writes for result in report.results] == [1, 1, 2]
+    assert {result.task_id: result.approved_writes for result in report.results} == {
+        "pagination-boundaries": 1, "slug-collision": 1, "config-precedence": 2,
+        "terminal-state-history": 2, "session-revision-save": 2, "approval-context-consume": 2,
+    }
     assert all(
         result.usage is None and not result.usage_complete for result in report.results
     )
@@ -46,6 +49,10 @@ def test_reference_fixture_exercises_all_tasks_but_is_not_a_real_score() -> None
     assert len(report.harness_sha256) == 64
     assert set(report.sdk_versions) == {"anthropic", "openai"}
     assert report.summary()["reported_usage"] is None
+    assert report.summary()["model_attempts"] == 18
+    assert report.summary()["unreported_attempts"] == 18
+    adapted = [result for result in report.results if result.origin is not None]
+    assert len(adapted) == 3 and all(result.origin.fixture_kind == "adapted" for result in adapted)
 
 
 def test_completion_claim_without_changes_fails_grading() -> None:
@@ -239,6 +246,40 @@ def test_reported_token_threshold_prevents_next_model_request() -> None:
     assert result.usage == TokenUsage(input_tokens=30000)
 
 
+def test_coding_loop_is_reported_separately_from_model_and_budget_failures():
+    class RepeatingModel(NoChangeModel):
+        calls = 0
+
+        def stream(self, *args, **kwargs):
+            self.calls += 1
+            yield ModelResponse(tool_calls=(ToolCall(id=str(self.calls), name="read_file", arguments={"path": "pager.py"}),))
+
+    result = run_coding_evals(
+        _settings(), task_ids=("pagination-boundaries",), simulated=True,
+        model_factory=lambda *_: RepeatingModel(),
+    ).results[0]
+    assert result.status == "loop_detected" and result.model_attempts == 3
+    assert result.unreported_attempts == 3 and not result.aggregate_usage_complete
+
+
+@pytest.mark.parametrize("task_id", ["terminal-state-history", "session-revision-save", "approval-context-consume"])
+def test_adapted_tasks_reject_partially_fixed_multifile_patches(task_id):
+    def factory(task, *_):
+        # Fixing only the helper leaves the independently graded integration bug.
+        first = next(iter(task.reference_files))
+        return _ReferenceModel(task.model_copy(update={"reference_files": {first: task.reference_files[first]}}))
+
+    report = run_coding_evals(_settings(), task_ids=(task_id,), simulated=True, model_factory=factory)
+    assert report.results[0].status == "grade_failed"
+    assert report.results[0].origin.reference_commit
+
+
+@pytest.mark.parametrize("path", ["../escape.py", "C:/secret.py", "bad\\path.py", "", "src/../bad.py"])
+def test_regression_origins_require_bounded_relative_source_paths(path):
+    with pytest.raises(ValueError):
+        TaskOrigin(reference_commit="f" * 40, source_paths=(path,), description="fixture")
+
+
 def test_invalid_baseline_never_constructs_a_paid_model(monkeypatch) -> None:
     task = next(task for task in load_coding_tasks() if task.id == "pagination-boundaries").model_copy(
         update={"cases": (FunctionCase(module="pager", function="paginate", args=([1, 2], 1, 1), expected=[2]),)}
@@ -335,4 +376,5 @@ def test_simulated_cli_does_not_read_environment_configuration(
     assert result.value.code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["mode"] == "simulated" and payload["success"]
+    assert payload["schema_version"] == 2 and payload["model_attempts"] == 3
     assert "PRIVATE" not in json.dumps(payload)

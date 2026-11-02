@@ -56,7 +56,7 @@
 | --- | --- | --- | --- |
 | 1 | 已完成 | `RuntimeProfile` 与 `benchmark-minimal` | `build_host_runtime(..., profile=)`；eval 默认 minimal；`HostProfile` 可断言工具集；文档与 CLI 声明 harness |
 | 2 | 已完成 | 可逆注册与 runtime teardown | 工具 / hook / 审批 / sandbox 注册返回 disposer；`switch_model` 与关闭路径逆序清理，无残留注册 |
-| 3 | 已完成 | 只读子任务 | 并行只读探索；独立预算；无写 / 无 shell；`await` + 必 `dispose`；事件带 parent |
+| 3 | 已完成 | 只读子任务 | 同步只读探索；局部限制与父级累计预算；无写 / 无 shell；`finally` 释放；事件带 parent |
 | 4 | 未开始（可选） | Session goals | 会话日志中的可 pause/resume 目标；CAS；压缩与分支后仍在 |
 | 5 | 已完成 | Skills 目录 | 仅加载工作区内已声明 `SKILL.md`；与 `sensitive_paths` 共用 denylist |
 | 6 | 未开始（可选） | 受限 Plan DSL | 串行步骤由 runtime 解释；步骤仍走审批；禁止任意脚本 |
@@ -103,6 +103,18 @@
 `HostMode`/profile 工具面和审批内核不变；执行锁懒创建并纳入 close，只读入口/子运行时不创建。运行锁不阻止外部编辑器和同用户恶意代码；进程树管理不提供 OS 沙箱。完整边界分别见 [`execution-recovery.md`](execution-recovery.md)、[`host-processes.md`](host-processes.md) 和 [`coding-evaluations.md`](coding-evaluations.md)。
 
 新增 28 项回归，完整离线门禁 1039 passed、12 skipped、16 deselected。后续整任务累计预算、评测 OS 隔离与通用 PR CI 仍在项目状态中明确保留，不视为本批完成。
+
+### 2026-11-02：累计预算、停滞检测与回归任务
+
+| 项 | 状态 | 完成标准 |
+| --- | --- | --- |
+| 父子/重试累计预算 | 已完成 | 一回合共享请求尝试、已报告 token 与 deadline；失败尝试计数，未知 usage 不填 0 |
+| 工具停滞检测 | 已完成 | 相同观察与连续失败阈值；新结果、成功操作及指令变更后允许复查 |
+| 代码回归语料与报告 | 已完成 | 六任务、69 个功能用例，含三个带来源的改编回归；schema v2 区分逻辑调用与共享尝试 |
+
+SDK 尝试在适配器计入，宿主通过 `build_agent()` 传入限制；子任务不能重置父账本。SDK 超时收窄到剩余 deadline，耗尽额度时在审批/工具执行前停止。预算数值进入 allowlist 元数据，不记录提示或参数正文。配置与边界见 [`turn-limits.md`](turn-limits.md)，任务与成绩范围见 [`coding-evaluations.md`](coding-evaluations.md)。只读子任务仍同步执行，事件 DAG 不提供依赖并行调度。
+
+新增 45 项回归；完整离线门禁 1084 passed、12 skipped、16 deselected，ruff 与 99 个源文件的 mypy 通过。最终 wheel 的 106 个包内文件与源码一致，全新环境 15 项安装验收及六任务/69 用例的参考补丁模拟通过；记录见 `docs/acceptance/2026-11-02-turn-limits-*.json`，未调用真实模型 API。
 
 ## 批次 1：RuntimeProfile + benchmark-minimal
 

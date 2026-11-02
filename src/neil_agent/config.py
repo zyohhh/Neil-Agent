@@ -159,6 +159,11 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum tool-use cycles allowed for one user request.",
     )
+    turn_max_model_attempts: int = Field(default=32, ge=1, le=1000)
+    turn_max_reported_tokens: int | None = Field(default=100_000, ge=1)
+    turn_timeout_seconds: float = Field(default=600.0, gt=0, allow_inf_nan=False)
+    repeated_tool_result_limit: int = Field(default=3, ge=2, le=100)
+    failed_tool_round_limit: int = Field(default=3, ge=1, le=100)
     subtask_max_tool_rounds: int = Field(
         default=3,
         ge=1,

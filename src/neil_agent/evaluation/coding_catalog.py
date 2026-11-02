@@ -25,6 +25,28 @@ class FunctionCase(BaseModel):
     identity: Literal["any", "new", "disjoint"] = "any"
 
 
+class TaskOrigin(BaseModel):
+    """Provenance of adapted fixtures, never a claim of full-repository scoring."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    kind: Literal["repository-regression"] = "repository-regression"
+    fixture_kind: Literal["adapted"] = "adapted"
+    repository: Literal["zyohhh/Neil-Agent"] = "zyohhh/Neil-Agent"
+    reference_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_paths: tuple[str, ...] = Field(min_length=1, max_length=8)
+    description: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_source_paths(self) -> Self:
+        for name in self.source_paths:
+            path = PurePosixPath(name)
+            if path.is_absolute() or path.as_posix() != name or any(part in {".", ".."} for part in path.parts) or ":" in name or "\\" in name or any(ord(char) < 32 for char in name):
+                raise ValueError("source paths must be bounded repository-relative paths")
+            if not name or len(name) > 240:
+                raise ValueError("source path exceeds limits")
+        return self
+
+
 class CodingTask(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -35,6 +57,7 @@ class CodingTask(BaseModel):
     editable_files: tuple[str, ...] = Field(min_length=1, max_length=8)
     reference_files: dict[str, str]
     cases: tuple[FunctionCase, ...] = Field(min_length=1, max_length=32)
+    origin: TaskOrigin | None = None
 
     @model_validator(mode="after")
     def validate_workspace(self) -> Self:

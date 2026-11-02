@@ -42,6 +42,8 @@ from .approval import approval_context_digest
 from .errors import AgentError, HookError, NeilAgentError
 from .execution_journal import ExecutionJournal, TurnStatus
 from .execution_lock import WorkspaceExecutionLock
+from .loop_guard import ToolLoopGuard
+from .turn_budget import TurnLimits, TurnUsage, check_next_model_attempt, current_turn_usage, model_request_scope, turn_budget_scope
 from .events import (
     ApprovalDecision,
     EventBus,
@@ -182,6 +184,9 @@ class Agent:
         execution_lock: WorkspaceExecutionLock | None = None,
         before_turn_handler: Callable[[], None] | None = None,
         completed_turn_handler: Callable[[], None] | None = None,
+        turn_limits: TurnLimits | None = None,
+        repeated_tool_result_limit: int = 3,
+        failed_tool_round_limit: int = 3,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
@@ -200,6 +205,11 @@ class Agent:
         self._execution_lock = execution_lock
         self._before_turn_handler = before_turn_handler
         self._completed_turn_handler = completed_turn_handler
+        self._turn_limits = turn_limits or TurnLimits()
+        self._last_run_budget: TurnUsage | None = None
+        self._repeated_tool_result_limit = repeated_tool_result_limit
+        self._failed_tool_round_limit = failed_tool_round_limit
+        ToolLoopGuard(repeated_tool_result_limit, failed_tool_round_limit)
         self._execution_id: str | None = None
         self._last_execution_id: str | None = None
         self._uncommitted_executions: list[str] = []
@@ -231,11 +241,16 @@ class Agent:
     def last_execution_id(self) -> str | None:
         return self._last_execution_id
 
+    @property
+    def last_run_budget(self) -> TurnUsage | None:
+        return self._last_run_budget
+
     def bind_session(self, session_id: str | None) -> None:
         """Bind future execution records to the entry point's selected session."""
 
         if session_id != self._session_id:
             self._uncommitted_executions.clear()
+            self._last_run_budget = None
         self._session_id = session_id
 
     def mark_execution(self, status: TurnStatus) -> None:
@@ -253,17 +268,26 @@ class Agent:
         if not self._turn_lock.acquire(blocking=False):
             raise AgentError("同一 Agent 已有正在执行的回合。")
         self._last_execution_id = None
+        self._last_run_budget = None
         try:
-            with self.execution_scope():
-                if self._before_turn_handler is not None:
-                    self._before_turn_handler()
-                with self._journal_scope():
-                    yield
-                if self._completed_turn_handler is not None:
-                    self._completed_turn_handler()
+            with turn_budget_scope(self._turn_limits) as budget, self.execution_scope():
+                try:
+                    with self._owned_turn_scope():
+                        yield
+                finally:
+                    self._last_run_budget = budget.snapshot()
         finally:
             self._execution_id = None
             self._turn_lock.release()
+
+    @contextmanager
+    def _owned_turn_scope(self) -> Iterator[None]:
+        if self._before_turn_handler is not None:
+            self._before_turn_handler()
+        with self._journal_scope():
+            yield
+        if self._completed_turn_handler is not None:
+            self._completed_turn_handler()
 
     @contextmanager
     def execution_scope(self) -> Iterator[None]:
@@ -363,6 +387,7 @@ class Agent:
         self._messages.clear()
         self._uncommitted_executions.clear()
         self._last_usage = None
+        self._last_run_budget = None
         if self._task_tracker is not None:
             self._task_tracker.clear()
 
@@ -455,12 +480,22 @@ class Agent:
         self._messages = self._trim_history(messages)
         self._uncommitted_executions.clear()
         self._last_usage = last_usage
+        self._last_run_budget = None
 
     def prepare_compaction(
         self,
         *,
         keep_recent_rounds: int = COMPACTION_KEEP_ROUNDS,
         focus: str = "",
+    ) -> PreparedCompaction:
+        with turn_budget_scope(self._turn_limits) as budget:
+            try:
+                return self._prepare_compaction(keep_recent_rounds=keep_recent_rounds, focus=focus)
+            finally:
+                self._last_run_budget = budget.snapshot()
+
+    def _prepare_compaction(
+        self, *, keep_recent_rounds: int, focus: str,
     ) -> PreparedCompaction:
         """Build a compact replacement without mutating current history."""
 
@@ -537,10 +572,11 @@ class Agent:
                     f"压缩需要超过 {MAX_COMPACTION_MODEL_REQUESTS} 次模型请求，"
                     "已停止且原历史未改变。"
                 )
-            response = self._llm.complete(
-                (request,),
-                system_prompt=compaction_system_prompt,
-            ).strip()
+            with model_request_scope() as measured_request:
+                response = self._llm.complete(
+                    (request,), system_prompt=compaction_system_prompt,
+                ).strip()
+                measured_request.usage = self._llm.last_usage if isinstance(self._llm, UsageReportingChatModel) else None
             model_requests += 1
             if not response:
                 raise AgentError("模型返回了空的压缩摘要，原历史未改变。")
@@ -620,16 +656,13 @@ class Agent:
             request_messages = self._budgeted_request_messages(
                 (user_message,), system_prompt=self._system_prompt, tools=(),
             )
-            response = self._llm.complete(
-                request_messages,
-                system_prompt=self._system_prompt,
-            )
-            check_execution_budget()
-            usage = (
-                self._llm.last_usage
-                if isinstance(self._llm, UsageReportingChatModel)
-                else None
-            )
+            with model_request_scope() as measured_request:
+                response = self._llm.complete(
+                    request_messages, system_prompt=self._system_prompt,
+                )
+                usage = self._llm.last_usage if isinstance(self._llm, UsageReportingChatModel) else None
+                measured_request.usage = usage
+                check_execution_budget()
             self._finish_runtime_span(
                 model_span,
                 "succeeded",
@@ -748,6 +781,7 @@ class Agent:
         tool_definitions = self._tool_definitions()
         tool_rounds = 0
         turn_usage: TokenUsage | None = None
+        loop_guard = ToolLoopGuard(self._repeated_tool_result_limit, self._failed_tool_round_limit)
 
         while True:
             check_execution_budget()
@@ -815,16 +849,18 @@ class Agent:
             model_response: ModelResponse | None = None
             try:
                 check_execution_budget()
-                for event in self._llm.stream(
-                    request_messages,
-                    system_prompt=request_system_prompt,
-                    tools=tool_definitions,
-                ):
-                    check_execution_budget()
-                    if isinstance(event, str):
-                        yield event
-                    else:
-                        model_response = event
+                with model_request_scope() as measured_request:
+                    for event in self._llm.stream(
+                        request_messages,
+                        system_prompt=request_system_prompt,
+                        tools=tool_definitions,
+                    ):
+                        check_execution_budget()
+                        if isinstance(event, str):
+                            yield event
+                        else:
+                            model_response = event
+                            measured_request.usage = event.usage
                 check_execution_budget()
                 if model_response is not None:
                     terminal_error = completion_error(
@@ -933,16 +969,21 @@ class Agent:
                     f"工具调用超过 {self._max_tool_rounds} 轮，已停止本次任务。"
                 )
 
-            tool_result_message = Message(
-                role="user",
-                tool_results=tuple(
-                    self._execute_tool_call(
+            check_next_model_attempt()
+            pairs = [
+                (call, self._execute_tool_call(
                         call,
                         parent_event_id=self._span_event_id(model_span),
                         instruction_digest=request_instruction_digest,
-                    )
-                    for call in model_response.tool_calls
-                ),
+                )) for call in model_response.tool_calls
+            ]
+            loop_guard.check_round(
+                pairs,
+                instruction_digest=approval_context_digest(self._project_instructions),
+                approved_tools={definition.name for definition in self._registry.definitions if self._registry.requires_approval(definition.name)},
+            )
+            tool_result_message = Message(
+                role="user", tool_results=tuple(result for _, result in pairs),
             )
             request_messages.append(tool_result_message)
             pending_messages.append(tool_result_message)
@@ -1713,6 +1754,18 @@ class Agent:
         if self._runtime_events is None or span is None:
             return
         try:
+            budget = current_turn_usage() if span.stage == "agent_turn" else None
+            if budget is not None:
+                metadata = dict(metadata or {})
+                metadata.update(
+                    shared_model_attempts=budget.model_attempts,
+                    shared_unreported_attempts=budget.unreported_attempts,
+                    shared_usage_complete=budget.usage_complete,
+                )
+                if budget.usage is not None:
+                    metadata["shared_reported_tokens"] = budget.usage.total_tokens
+                if budget.stop_reason is not None:
+                    metadata["budget_stop_reason"] = budget.stop_reason
             self._runtime_events.finish(span, status, metadata=metadata)
         except Exception:
             return

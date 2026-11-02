@@ -23,6 +23,7 @@ class ExecutionBudget:
     cancel: Event | None = None
     cancelled_message: str = _CANCELLED_MESSAGE
     parent: ExecutionBudget | None = None
+    limit_check: Callable[[], None] | None = None
 
 
 _budget: ContextVar[ExecutionBudget | None] = ContextVar(
@@ -36,6 +37,7 @@ def execution_budget_scope(
     deadline: float | None = None,
     cancel: Event | None = None,
     cancelled_message: str = _CANCELLED_MESSAGE,
+    limit_check: Callable[[], None] | None = None,
 ):
     """Bind a turn or subtask budget without discarding its parent's limits."""
 
@@ -45,6 +47,7 @@ def execution_budget_scope(
             cancel=cancel,
             cancelled_message=cancelled_message,
             parent=_budget.get(),
+            limit_check=limit_check,
         )
     )
     try:
@@ -71,12 +74,35 @@ def execution_is_cancelled() -> bool:
 
 
 def _check_budget(budget: ExecutionBudget | None) -> None:
+    current = budget
+    while current is not None:
+        if current.cancel is not None and current.cancel.is_set():
+            raise ToolError(current.cancelled_message)
+        current = current.parent
     while budget is not None:
-        if budget.cancel is not None and budget.cancel.is_set():
-            raise ToolError(budget.cancelled_message)
+        if budget.limit_check is not None:
+            budget.limit_check()
         if budget.deadline is not None and monotonic() >= budget.deadline:
             raise ToolError(_TIMEOUT_MESSAGE)
         budget = budget.parent
+
+
+def current_execution_deadline() -> float | None:
+    budget = _budget.get()
+    deadline = None
+    while budget is not None:
+        if budget.deadline is not None:
+            deadline = budget.deadline if deadline is None else min(deadline, budget.deadline)
+        budget = budget.parent
+    return deadline
+
+
+def remaining_request_timeout(default: float) -> float:
+    """Keep SDK connection/read timeouts inside every enclosing deadline."""
+
+    check_execution_budget()
+    deadline = current_execution_deadline()
+    return default if deadline is None else max(0.001, min(default, deadline - monotonic()))
 
 
 def budgeted_sleep(delay: float, sleeper: Callable[[float], None]) -> None:

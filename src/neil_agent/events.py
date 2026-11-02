@@ -84,6 +84,11 @@ RuntimeMetadataName = Literal[
     "tool_count",
     "tool_name",
     "workspace_path",
+    "shared_model_attempts",
+    "shared_unreported_attempts",
+    "shared_reported_tokens",
+    "shared_usage_complete",
+    "budget_stop_reason",
 ]
 RuntimeMetadataValue: TypeAlias = StrictBool | StrictInt | StrictStr
 RuntimeObserver = Callable[["RuntimeEvent"], None]
@@ -123,6 +128,11 @@ _STAGE_METADATA_FIELDS: dict[
         "elapsed_ms",
         "error_type",
         "parent_run_id",
+        "shared_model_attempts",
+        "shared_unreported_attempts",
+        "shared_reported_tokens",
+        "shared_usage_complete",
+        "budget_stop_reason",
     ),
     "model_request": (
         "model_round",

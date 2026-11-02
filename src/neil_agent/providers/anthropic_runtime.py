@@ -15,7 +15,9 @@ from ..execution_budget import (
     budgeted_sleep,
     check_execution_budget,
     interrupt_on_execution_budget,
+    remaining_request_timeout,
 )
+from ..turn_budget import budgeted_sdk_client, check_next_model_attempt, model_attempt_scope
 from ..schemas import (
     ActivityEvent,
     Message,
@@ -95,7 +97,7 @@ class AnthropicMessagesProvider:
             if base_url is not None:
                 client_kwargs["base_url"] = base_url
             client = factory(**client_kwargs)
-        self._client = client
+        self._client = budgeted_sdk_client(client)
         self._retry_policy = RetryPolicy(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.retry_base_delay,
@@ -142,8 +144,14 @@ class AnthropicMessagesProvider:
         while True:
             check_execution_budget()
             try:
-                response = self._client.messages.create(**request)
-                check_execution_budget()
+                with model_attempt_scope() as attempt:
+                    response = self._client.messages.create(
+                        **request, timeout=remaining_request_timeout(self.settings.request_timeout),
+                    )
+                    sdk_usage = getattr(response, "usage", None)
+                    if sdk_usage is not None:
+                        attempt.observe_usage(sdk_usage, self._to_token_usage)
+                    check_execution_budget()
                 break
             except APIError as sdk_error:
                 check_execution_budget()
@@ -202,17 +210,25 @@ class AnthropicMessagesProvider:
         while True:
             check_execution_budget()
             try:
-                with (
-                    self._client.messages.stream(**request) as stream,
-                    interrupt_on_execution_budget(getattr(stream, "close", None)),
-                ):
-                    for text in stream.text_stream:
+                with model_attempt_scope() as attempt:
+                    with (
+                        self._client.messages.stream(
+                            **request, timeout=remaining_request_timeout(self.settings.request_timeout),
+                        ) as stream,
+                        interrupt_on_execution_budget(getattr(stream, "close", None)),
+                    ):
+                        for text in stream.text_stream:
+                            check_execution_budget()
+                            if text:
+                                emitted_text = True
+                                yield text
                         check_execution_budget()
-                        if text:
-                            emitted_text = True
-                            yield text
-                    check_execution_budget()
-                    final_message = stream.get_final_message()
+                        final_message = stream.get_final_message()
+                        sdk_usage = getattr(final_message, "usage", None)
+                        if sdk_usage is not None:
+                            attempt.observe_usage(sdk_usage, self._to_token_usage)
+                        check_execution_budget()
+                    model_response = self._to_model_response(final_message)
                     check_execution_budget()
                 break
             except APIError as sdk_error:
@@ -230,7 +246,6 @@ class AnthropicMessagesProvider:
                 retries_done += 1
                 self._wait_for_retry(error, retries_done)
 
-        model_response = self._to_model_response(final_message)
         self._last_usage = model_response.usage
         yield model_response
 
@@ -271,6 +286,7 @@ class AnthropicMessagesProvider:
             raise ValueError("at least one message is required")
 
     def _wait_for_retry(self, error: ProviderError, retry_number: int) -> None:
+        check_next_model_attempt()
         delay = self._retry_policy.delay(error, retry_number)
         self._emit_retry_activity(
             "模型请求暂时失败，等待重试",

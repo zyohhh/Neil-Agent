@@ -12,6 +12,7 @@ from .audit import AuditLogStatus, JsonlAuditSink
 from .config import Settings
 from .execution_journal import ExecutionJournal
 from .execution_lock import WorkspaceExecutionLock
+from .turn_budget import TurnLimits
 from .hooks import LifecycleHooks
 from .instructions import ProjectInstructionManager
 from .task import PlanChangeHandler, TaskTracker
@@ -452,4 +453,11 @@ def build_agent(
         execution_lock=host_runtime.execution_lock,
         before_turn_handler=before_turn_handler,
         completed_turn_handler=completed_turn_handler,
+        turn_limits=TurnLimits(
+            max_model_attempts=settings.turn_max_model_attempts,
+            max_reported_tokens=settings.turn_max_reported_tokens,
+            timeout_seconds=settings.turn_timeout_seconds,
+        ),
+        repeated_tool_result_limit=settings.repeated_tool_result_limit,
+        failed_tool_round_limit=settings.failed_tool_round_limit,
     )

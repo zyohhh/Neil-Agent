@@ -24,7 +24,7 @@ uv run neil-agent-install-check --wheel .\dist\neil_agent-0.1.0-py3-none-any.whl
 | 四个命令入口 | CLI、eval、Web、install-check 的实际安装脚本均能运行 `--help` |
 | 已安装资源 | 独立解释器核对包来自新环境、版本一致、两类任务目录和前端清单完整 |
 | 默认评测 | 控制台入口和 `python -I -m neil_agent.evals` 均输出真实非空 JSON，6 项通过 |
-| 代码任务框架 | 安装后运行 3 个任务的确定性参考补丁流程，明确标记 `simulated` |
+| 代码任务框架 | 安装后运行至少 6 个任务的确定性参考补丁流程，明确标记 `simulated` 并检查 schema v2 |
 | API 费用门禁 | 两种真实评测模式缺少费用确认时必须以退出码 2 拒绝 |
 | Web 本地服务 | 启动已安装的 launcher，确认 `ready` 健康协议、HTML 安全头、匿名 snapshot 返回 401，再正常停止 |
 
@@ -37,3 +37,5 @@ uv run neil-agent-install-check --wheel .\dist\neil_agent-0.1.0-py3-none-any.whl
 本轮实际安装验收记录见 [`acceptance/2026-10-18-installation.json`](acceptance/2026-10-18-installation.json)。代码任务方法与真实运行方式见 [`coding-evaluations.md`](coding-evaluations.md)。
 
 评分、子进程生命周期和执行独占修复后的新 wheel 验收记录见 [`acceptance/2026-10-18-execution-hardening-installation.json`](acceptance/2026-10-18-execution-hardening-installation.json)。验收调用的固定命令使用 [`host-processes.md`](host-processes.md) 中的进程树执行器，生成代码的 OS 隔离仍待补齐。
+
+共享预算、工具停滞检测和六任务语料的新 wheel 记录见 [`acceptance/2026-11-02-turn-limits-installation.json`](acceptance/2026-11-02-turn-limits-installation.json)；此前三任务记录保留为历史验收，不代表新版语料覆盖。

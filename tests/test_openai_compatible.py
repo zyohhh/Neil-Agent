@@ -108,7 +108,7 @@ def test_compatible_fixture_complete_and_stream_contract(
 
     assert result == mapping(complete["contract"])["result"]
     expected_request = {"model": profile["model"], **mapping(complete["wire_request"])}
-    assert client.responses.create.call_args.kwargs == expected_request
+    assert client.responses.create.call_args.kwargs == {**expected_request, "timeout": model.settings.request_timeout}
 
     streamed = mapping(cases["stream_text"])
     streamed_input = mapping(streamed["input"])
@@ -132,7 +132,7 @@ def test_compatible_fixture_complete_and_stream_contract(
         "model": profile["model"],
         **mapping(streamed["wire_request"]),
     }
-    assert client.responses.create.call_args.kwargs == expected_stream_request
+    assert client.responses.create.call_args.kwargs == {**expected_stream_request, "timeout": model.settings.request_timeout}
 
 
 def test_fixture_is_versioned_synthetic_and_secret_free() -> None:

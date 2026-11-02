@@ -13,7 +13,9 @@ from ..execution_budget import (
     budgeted_sleep,
     check_execution_budget,
     interrupt_on_execution_budget,
+    remaining_request_timeout,
 )
+from ..turn_budget import budgeted_sdk_client, check_next_model_attempt, model_attempt_scope
 from ..schemas import ActivityEvent, Message, ModelResponse, TokenUsage, ToolDefinition
 from .base import (
     ProviderCapabilities, ProviderDescriptor, ProviderId, WireProtocol, completion_error,
@@ -35,6 +37,7 @@ from .openai_responses import (
     normalize_openai_error,
     normalize_stream_error,
     parse_response,
+    to_token_usage,
 )
 from .retry import RetryPolicy
 
@@ -131,7 +134,7 @@ class OpenAIResponsesProvider:
                 timeout=self.settings.request_timeout,
                 max_retries=0,
             )
-        self._client = client
+        self._client = budgeted_sdk_client(client)
         self._retry_policy = RetryPolicy(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.retry_base_delay,
@@ -183,30 +186,34 @@ class OpenAIResponsesProvider:
         while True:
             check_execution_budget()
             try:
-                response = self._client.responses.create(**request)
-                check_execution_budget()
-                model_response = parse_response(
-                    response,
-                    model=self.settings.selected_model,
-                    provider=self.provider_id,
-                    preserve_state=self.descriptor.capabilities.reasoning_state,
-                    allow_reasoning=self.descriptor.capabilities.reasoning_state,
-                    allow_parallel_tool_calls=(
-                        self.descriptor.capabilities.parallel_tool_calls
-                    ),
-                )
-                if model_response.tool_calls:
-                    raise ProviderProtocolError(
-                        "非流式完成返回了 function call。",
+                with model_attempt_scope() as attempt:
+                    response = self._client.responses.create(**request, timeout=remaining_request_timeout(self.settings.request_timeout))
+                    raw_usage = self._event_field(response, "usage")
+                    if raw_usage is not None:
+                        attempt.observe_usage(raw_usage, to_token_usage)
+                    check_execution_budget()
+                    model_response = parse_response(
+                        response,
+                        model=self.settings.selected_model,
                         provider=self.provider_id,
+                        preserve_state=self.descriptor.capabilities.reasoning_state,
+                        allow_reasoning=self.descriptor.capabilities.reasoning_state,
+                        allow_parallel_tool_calls=(
+                            self.descriptor.capabilities.parallel_tool_calls
+                        ),
                     )
-                terminal_error = completion_error(
-                    model_response.stop_reason, has_tool_calls=False,
-                )
-                if terminal_error is not None:
-                    raise ProviderProtocolError(terminal_error, provider=self.provider_id)
-                self._last_usage = model_response.usage
-                return model_response.content
+                    if model_response.tool_calls:
+                        raise ProviderProtocolError(
+                            "非流式完成返回了 function call。",
+                            provider=self.provider_id,
+                        )
+                    terminal_error = completion_error(
+                        model_response.stop_reason, has_tool_calls=False,
+                    )
+                    if terminal_error is not None:
+                        raise ProviderProtocolError(terminal_error, provider=self.provider_id)
+                    self._last_usage = model_response.usage
+                    return model_response.content
             except Exception as sdk_error:
                 check_execution_budget()
                 error = self._normalize_runtime_error(sdk_error)
@@ -245,86 +252,109 @@ class OpenAIResponsesProvider:
             argument_deltas: dict[str, list[str]] = {}
             argument_done: dict[str, str] = {}
             try:
-                raw_stream = self._client.responses.create(**request, stream=True)
-                with (
-                    raw_stream as stream,
-                    interrupt_on_execution_budget(getattr(stream, "close", None)),
-                ):
-                    for event in stream:
-                        check_execution_budget()
-                        event_type = self._event_string(event, "type")
-                        previous_sequence = self._validate_sequence(
-                            event,
-                            previous_sequence,
-                        )
-                        if event_type == "error":
-                            raise normalize_stream_error(
-                                self._event_field(event, "code"),
-                                provider=self.provider_id,
+                with model_attempt_scope() as attempt:
+                    raw_stream = self._client.responses.create(**request, stream=True, timeout=remaining_request_timeout(self.settings.request_timeout))
+                    with (
+                        raw_stream as stream,
+                        interrupt_on_execution_budget(getattr(stream, "close", None)),
+                    ):
+                        for event in stream:
+                            check_execution_budget()
+                            event_type = self._event_string(event, "type")
+                            previous_sequence = self._validate_sequence(
+                                event,
+                                previous_sequence,
                             )
-                        if not created:
-                            if event_type != "response.created":
-                                raise ProviderProtocolError(
-                                    "OpenAI 流在 response.created 之前返回了内容。",
+                            if event_type == "error":
+                                raise normalize_stream_error(
+                                    self._event_field(event, "code"),
                                     provider=self.provider_id,
                                 )
-                            created = True
-                            continue
-                        if terminal_response is not None:
-                            raise ProviderProtocolError(
-                                "OpenAI 流在终态事件后继续返回内容。",
-                                provider=self.provider_id,
-                            )
-                        if event_type in {
-                            "response.output_text.delta",
-                            "response.refusal.delta",
-                        }:
-                            delta = self._event_string(event, "delta", allow_empty=True)
-                            if delta:
+                            if not created:
+                                if event_type != "response.created":
+                                    raise ProviderProtocolError(
+                                        "OpenAI 流在 response.created 之前返回了内容。",
+                                        provider=self.provider_id,
+                                    )
+                                created = True
+                                continue
+                            if terminal_response is not None:
+                                raise ProviderProtocolError(
+                                    "OpenAI 流在终态事件后继续返回内容。",
+                                    provider=self.provider_id,
+                                )
+                            if event_type in {
+                                "response.output_text.delta",
+                                "response.refusal.delta",
+                            }:
+                                delta = self._event_string(event, "delta", allow_empty=True)
+                                if delta:
+                                    output_started = True
+                                    visible_text.append(delta)
+                                    yield delta
+                            elif event_type == "response.function_call_arguments.delta":
                                 output_started = True
-                                visible_text.append(delta)
-                                yield delta
-                        elif event_type == "response.function_call_arguments.delta":
-                            output_started = True
-                            item_id = self._event_string(event, "item_id")
-                            delta = self._event_string(event, "delta", allow_empty=True)
-                            argument_deltas.setdefault(item_id, []).append(delta)
-                        elif event_type == "response.function_call_arguments.done":
-                            item_id = self._event_string(event, "item_id")
-                            arguments = self._event_string(event, "arguments")
-                            if item_id in argument_done:
+                                item_id = self._event_string(event, "item_id")
+                                delta = self._event_string(event, "delta", allow_empty=True)
+                                argument_deltas.setdefault(item_id, []).append(delta)
+                            elif event_type == "response.function_call_arguments.done":
+                                item_id = self._event_string(event, "item_id")
+                                arguments = self._event_string(event, "arguments")
+                                if item_id in argument_done:
+                                    raise ProviderProtocolError(
+                                        "OpenAI 流重复结束同一个 function call 参数。",
+                                        provider=self.provider_id,
+                                    )
+                                argument_done[item_id] = arguments
+                            elif event_type in {
+                                "response.completed",
+                                "response.incomplete",
+                                "response.failed",
+                            }:
+                                terminal_response = self._event_field(event, "response")
+                                if terminal_response is None:
+                                    raise ProviderProtocolError(
+                                        "OpenAI 终态事件缺少 response。",
+                                        provider=self.provider_id,
+                                    )
+                                raw_usage = self._event_field(terminal_response, "usage")
+                                if raw_usage is not None:
+                                    attempt.observe_usage(raw_usage, to_token_usage)
+                                terminal_type = event_type
+                            elif event_type not in _PASSIVE_STREAM_EVENTS:
                                 raise ProviderProtocolError(
-                                    "OpenAI 流重复结束同一个 function call 参数。",
+                                    f"OpenAI 流返回了未支持的事件：{event_type}。",
                                     provider=self.provider_id,
                                 )
-                            argument_done[item_id] = arguments
-                        elif event_type in {
-                            "response.completed",
-                            "response.incomplete",
-                            "response.failed",
-                        }:
-                            terminal_response = self._event_field(event, "response")
-                            if terminal_response is None:
-                                raise ProviderProtocolError(
-                                    "OpenAI 终态事件缺少 response。",
-                                    provider=self.provider_id,
-                                )
-                            terminal_type = event_type
-                        elif event_type not in _PASSIVE_STREAM_EVENTS:
-                            raise ProviderProtocolError(
-                                f"OpenAI 流返回了未支持的事件：{event_type}。",
-                                provider=self.provider_id,
-                            )
-                if terminal_response is None or terminal_type is None:
-                    raise ProviderProtocolError(
-                        "OpenAI 流在没有终态事件时结束。",
-                        provider=self.provider_id,
+                    if terminal_response is None or terminal_type is None:
+                        raise ProviderProtocolError(
+                            "OpenAI 流在没有终态事件时结束。",
+                            provider=self.provider_id,
+                        )
+                    self._validate_terminal_type(terminal_response, terminal_type)
+                    if terminal_type == "response.failed":
+                        # Preserve the provider error category even when a failed
+                        # response has no output collection.
+                        parse_response(
+                            terminal_response,
+                            model=self.settings.selected_model,
+                            provider=self.provider_id,
+                            preserve_state=self.descriptor.capabilities.reasoning_state,
+                            allow_reasoning=self.descriptor.capabilities.reasoning_state,
+                            allow_parallel_tool_calls=(
+                                self.descriptor.capabilities.parallel_tool_calls
+                            ),
+                        )
+                        raise ProviderProtocolError(
+                            "OpenAI failed 终态被错误解析为成功。",
+                            provider=self.provider_id,
+                        )
+                    self._validate_argument_deltas(
+                        terminal_response,
+                        argument_deltas,
+                        argument_done,
                     )
-                self._validate_terminal_type(terminal_response, terminal_type)
-                if terminal_type == "response.failed":
-                    # Preserve the provider error category even when a failed
-                    # response has no output collection.
-                    parse_response(
+                    model_response = parse_response(
                         terminal_response,
                         model=self.settings.selected_model,
                         provider=self.provider_id,
@@ -334,33 +364,14 @@ class OpenAIResponsesProvider:
                             self.descriptor.capabilities.parallel_tool_calls
                         ),
                     )
-                    raise ProviderProtocolError(
-                        "OpenAI failed 终态被错误解析为成功。",
-                        provider=self.provider_id,
-                    )
-                self._validate_argument_deltas(
-                    terminal_response,
-                    argument_deltas,
-                    argument_done,
-                )
-                model_response = parse_response(
-                    terminal_response,
-                    model=self.settings.selected_model,
-                    provider=self.provider_id,
-                    preserve_state=self.descriptor.capabilities.reasoning_state,
-                    allow_reasoning=self.descriptor.capabilities.reasoning_state,
-                    allow_parallel_tool_calls=(
-                        self.descriptor.capabilities.parallel_tool_calls
-                    ),
-                )
-                if "".join(visible_text) != model_response.content:
-                    raise ProviderProtocolError(
-                        "OpenAI 文本 delta 与终态响应不一致。",
-                        provider=self.provider_id,
-                    )
-                self._last_usage = model_response.usage
-                yield model_response
-                return
+                    if "".join(visible_text) != model_response.content:
+                        raise ProviderProtocolError(
+                            "OpenAI 文本 delta 与终态响应不一致。",
+                            provider=self.provider_id,
+                        )
+                    self._last_usage = model_response.usage
+                    yield model_response
+                    return
             except Exception as sdk_error:
                 check_execution_budget()
                 error = self._normalize_runtime_error(sdk_error)
@@ -546,6 +557,7 @@ class OpenAIResponsesProvider:
         )
 
     def _wait_for_retry(self, error: ProviderError, retry_number: int) -> None:
+        check_next_model_attempt()
         delay = self._retry_policy.delay(error, retry_number)
         self._emit_retry_activity(error, retry_number, delay)
         budgeted_sleep(delay, self._sleeper)

@@ -30,8 +30,14 @@ def runtime_provenance() -> RuntimeProvenance:
     root = files("neil_agent")
     names = [
         "agent.py",
+        "config.py",
+        "context.py",
+        "subtask.py",
+        "events.py",
         "host_runtime.py",
         "execution_budget.py",
+        "turn_budget.py",
+        "loop_guard.py",
         "instructions.py",
         "processes.py",
         "process_tree.py",

@@ -250,7 +250,7 @@ def run_install_acceptance(
                             payload.get("installed") is True
                             and payload.get("version") == package_version
                             and payload.get("offline_tasks", 0) >= 6
-                            and payload.get("coding_tasks", 0) >= 3
+                            and payload.get("coding_tasks", 0) >= 6
                             and payload.get("static_files", 0) >= 3
                         )
                         if passed:
@@ -281,9 +281,9 @@ def run_install_acceptance(
                     else:
                         passed = payload.get("success") is True and payload.get(
                             "total", 0
-                        ) >= (3 if name == "coding_harness" else 6)
+                        ) >= 6
                         if name == "coding_harness":
-                            passed = passed and payload.get("mode") == "simulated"
+                            passed = passed and payload.get("mode") == "simulated" and payload.get("schema_version") == 2
                 except (ValueError, AttributeError, TypeError):
                     passed = False
             mark(name, passed, result.returncode)

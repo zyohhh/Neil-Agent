@@ -36,6 +36,15 @@ def test_nested_budget_cannot_extend_parent_deadline() -> None:
                 check_execution_budget()
 
 
+def test_parent_cancel_takes_precedence_over_an_expired_child_deadline() -> None:
+    cancel = Event()
+    with execution_budget_scope(cancel=cancel, cancelled_message="parent cancelled"):
+        with execution_budget_scope(deadline=monotonic() - 1):
+            cancel.set()
+            with pytest.raises(ToolError, match="parent cancelled"):
+                check_execution_budget()
+
+
 def test_retry_backoff_observes_cancel_before_waiting_for_full_delay() -> None:
     cancel = Event()
     delays: list[float] = []

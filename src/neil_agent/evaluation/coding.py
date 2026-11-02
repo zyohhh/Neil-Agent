@@ -25,8 +25,10 @@ from ..schemas import (
     ToolDefinition,
 )
 from ..session import SessionStore
+from ..loop_guard import AgentLoopDetected
+from ..turn_budget import TurnBudgetExceeded
 from .catalog import _select_task_ids
-from .coding_catalog import CodingTask, load_coding_tasks
+from .coding_catalog import CodingTask, TaskOrigin, load_coding_tasks
 from .grading import grade_task, grader_passed, materialize_task, workspace_delta
 from .common import runtime_provenance
 
@@ -38,6 +40,7 @@ CodingStatus = Literal[
     "grade_failed",
     "model_failed",
     "budget_exceeded",
+    "loop_detected",
     "workspace_changed",
     "setup_failed",
 ]
@@ -61,12 +64,19 @@ class CodingResult(BaseModel):
     changed_files: tuple[str, ...] = ()
     usage: TokenUsage | None = None
     usage_complete: bool = False
+    model_attempts: int = 0
+    unreported_attempts: int = 0
+    aggregate_usage: TokenUsage | None = None
+    aggregate_usage_complete: bool = False
+    budget_stop_reason: str | None = None
+    origin: TaskOrigin | None = None
+    case_count: int = 0
 
 
 class CodingReport(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     mode: Literal["real", "simulated"]
     provider: str
     model: str
@@ -81,7 +91,9 @@ class CodingReport(BaseModel):
     max_output_tokens_per_request: int = 2_048
     reported_token_stop_threshold: int = 30_000
     max_model_requests_per_trial: int = 7
+    max_model_attempts_per_trial: int = 14
     max_tool_calls_per_trial: int = 32
+    agent_timeout_seconds: float = 120.0
     results: tuple[CodingResult, ...]
 
     @property
@@ -101,14 +113,16 @@ class CodingReport(BaseModel):
         )
         usage: TokenUsage | None = None
         for result in self.results:
-            if result.usage is not None:
-                usage = result.usage if usage is None else usage.combine(result.usage)
+            if result.aggregate_usage is not None:
+                usage = result.aggregate_usage if usage is None else usage.combine(result.aggregate_usage)
         payload.update(
             reported_usage=None
             if usage is None
             else {**usage.model_dump(), "total_tokens": usage.total_tokens},
             usage_complete=bool(self.results)
-            and all(result.usage_complete for result in self.results),
+            and all(result.aggregate_usage_complete for result in self.results),
+            model_attempts=sum(result.model_attempts for result in self.results),
+            unreported_attempts=sum(result.unreported_attempts for result in self.results),
         )
         return payload
 
@@ -257,6 +271,9 @@ def run_coding_evals(
         model="reference-patch" if simulated else settings.selected_model,
         task_count=len(selected),
         trials_per_task=trials,
+        max_model_attempts_per_trial=min(settings.turn_max_model_attempts, 14),
+        reported_token_stop_threshold=min(settings.turn_max_reported_tokens or 30_000, 30_000),
+        agent_timeout_seconds=min(settings.turn_timeout_seconds, 120.0),
         results=results,
         **runtime_provenance(),
     )
@@ -273,6 +290,7 @@ def _run_trial(
     baseline_failed = False
     grader_exit: int | None = None
     changed: tuple[str, ...] = ()
+    agent = None
 
     def activity(event: ActivityEvent) -> None:
         nonlocal retries
@@ -303,6 +321,9 @@ def _run_trial(
                     "max_rounds": 4,
                     "max_retries": min(settings.max_retries, 1),
                     "request_timeout": min(settings.request_timeout, 30.0),
+                    "turn_max_model_attempts": min(settings.turn_max_model_attempts, 14),
+                    "turn_max_reported_tokens": min(settings.turn_max_reported_tokens or 30_000, 30_000),
+                    "turn_timeout_seconds": min(settings.turn_timeout_seconds, 120.0),
                 }
             )
             runtime = build_host_runtime(
@@ -359,12 +380,15 @@ def _run_trial(
                     status = "workspace_changed"
                 runtime.close()
     except NeilAgentError as error:
-        if isinstance(error, _CodingBudgetExceeded) or monotonic() >= deadline:
+        if isinstance(error, (_CodingBudgetExceeded, TurnBudgetExceeded)) or monotonic() >= deadline:
             status = "budget_exceeded"
+        elif isinstance(error, AgentLoopDetected):
+            status = "loop_detected"
     except Exception:
         # No raw model output, exception bodies, host paths or prompts in reports.
         if status != "model_failed":
             status = "setup_failed"
+    budget = None if agent is None else agent.last_run_budget
     return CodingResult(
         task_id=task.id,
         task_sha256=task.digest,
@@ -383,4 +407,11 @@ def _run_trial(
         usage_complete=measured is not None
         and measured.usage_complete
         and measured.requests > 0,
+        model_attempts=0 if budget is None else budget.model_attempts,
+        unreported_attempts=0 if budget is None else budget.unreported_attempts,
+        aggregate_usage=None if budget is None else budget.usage,
+        aggregate_usage_complete=budget is not None and budget.usage_complete,
+        budget_stop_reason=None if budget is None else budget.stop_reason,
+        origin=task.origin,
+        case_count=len(task.cases),
     )

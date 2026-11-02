@@ -202,3 +202,5 @@ uv run neil-agent-eval --real-deepseek --confirm-api-cost --format json
 网络故障，也不会输出 API Key、完整审批 ID、审批预览或原始模型响应。
 
 内置代码任务可用 `--coding-tasks --confirm-api-cost` 交给当前 Provider 执行，由工作区外的固定功能测试评分；`--simulate` 验收参考补丁流程。任务、资源限制和结果含义见 [`docs/coding-evaluations.md`](docs/coding-evaluations.md)。发布 wheel 的全新环境安装验收使用 `neil-agent-install-check --wheel <文件>`，见 [`docs/installation-acceptance.md`](docs/installation-acceptance.md)。
+
+当前代码语料为六任务、69 个功能用例，包含三个标注来源提交的仓库契约改编 fixture；模拟通过不表示真实模型修复成功率。schema v2 报告区分逻辑请求、模型尝试和未报告 usage。运行时为主任务、只读子任务和 SDK 重试共享累计预算，并检测稳定重复工具结果及连续失败；配置与边界见 [`docs/turn-limits.md`](docs/turn-limits.md)。

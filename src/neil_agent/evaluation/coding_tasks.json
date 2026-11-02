@@ -508,5 +508,1076 @@
         "identity": "new"
       }
     ]
+  },
+  {
+    "id": "terminal-state-history",
+    "title": "Reject incomplete responses before committing conversation history",
+    "prompt": "Repair terminal.py and conversation.py. Only end_turn without calls and tool_call with calls are consistent terminal states; all other reasons are invalid. finish_turn must reject invalid states, blank user input and blank final replies with ValueError. Pending tool calls must leave history unchanged; successful final replies append one user/assistant pair. Always return a deep copy and never mutate or alias input history. Preserve both public signatures. This is an adapted repository regression fixture, not the full application.",
+    "files": {
+      "terminal.py": "def terminal_is_consistent(reason, calls):\n    return reason != \"error\"\n",
+      "conversation.py": "from terminal import terminal_is_consistent\n\n\ndef finish_turn(history, user, text, reason, calls):\n    if not terminal_is_consistent(reason, calls):\n        raise ValueError(\"invalid terminal state\")\n    history.extend([{\"role\": \"user\", \"content\": user}, {\"role\": \"assistant\", \"content\": text}])\n    return history\n"
+    },
+    "editable_files": [
+      "terminal.py",
+      "conversation.py"
+    ],
+    "reference_files": {
+      "terminal.py": "def terminal_is_consistent(reason, calls):\n    if reason == \"end_turn\":\n        return not calls\n    if reason == \"tool_call\":\n        return bool(calls)\n    return False\n",
+      "conversation.py": "from copy import deepcopy\nfrom terminal import terminal_is_consistent\n\n\ndef finish_turn(history, user, text, reason, calls):\n    if not terminal_is_consistent(reason, calls) or not isinstance(user, str) or not user.strip():\n        raise ValueError(\"invalid terminal state or user input\")\n    result = deepcopy(history)\n    if calls:\n        return result\n    if not isinstance(text, str) or not text.strip():\n        raise ValueError(\"empty final response\")\n    result.extend([{\"role\": \"user\", \"content\": user}, {\"role\": \"assistant\", \"content\": text}])\n    return result\n"
+    },
+    "cases": [
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "end_turn",
+          []
+        ],
+        "expected": true,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "end_turn",
+          [
+            "read"
+          ]
+        ],
+        "expected": false,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "tool_call",
+          [
+            "read"
+          ]
+        ],
+        "expected": true,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "tool_call",
+          []
+        ],
+        "expected": false,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "max_tokens",
+          []
+        ],
+        "expected": false,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "content_filter",
+          [
+            "read"
+          ]
+        ],
+        "expected": false,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "cancelled",
+          []
+        ],
+        "expected": false,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "unknown",
+          []
+        ],
+        "expected": false,
+        "identity": "any"
+      },
+      {
+        "module": "terminal",
+        "function": "terminal_is_consistent",
+        "args": [
+          "error",
+          []
+        ],
+        "expected": false,
+        "identity": "any"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "new",
+          "done",
+          "end_turn",
+          []
+        ],
+        "expected": [
+          {
+            "role": "user",
+            "content": "earlier"
+          },
+          {
+            "role": "assistant",
+            "content": "answer"
+          },
+          {
+            "role": "user",
+            "content": "new"
+          },
+          {
+            "role": "assistant",
+            "content": "done"
+          }
+        ],
+        "identity": "disjoint"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "new",
+          "",
+          "tool_call",
+          [
+            "read"
+          ]
+        ],
+        "expected": [
+          {
+            "role": "user",
+            "content": "earlier"
+          },
+          {
+            "role": "assistant",
+            "content": "answer"
+          }
+        ],
+        "identity": "disjoint"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [],
+          "new",
+          "done",
+          "end_turn",
+          []
+        ],
+        "expected": [
+          {
+            "role": "user",
+            "content": "new"
+          },
+          {
+            "role": "assistant",
+            "content": "done"
+          }
+        ],
+        "identity": "disjoint"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "new",
+          "partial",
+          "max_tokens",
+          []
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "new",
+          "partial",
+          "cancelled",
+          []
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "new",
+          "partial",
+          "unknown",
+          []
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "new",
+          "partial",
+          "tool_call",
+          []
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "new",
+          "   ",
+          "end_turn",
+          []
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "conversation",
+        "function": "finish_turn",
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "earlier"
+            },
+            {
+              "role": "assistant",
+              "content": "answer"
+            }
+          ],
+          "",
+          "done",
+          "end_turn",
+          []
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      }
+    ],
+    "origin": {
+      "kind": "repository-regression",
+      "fixture_kind": "adapted",
+      "repository": "zyohhh/Neil-Agent",
+      "reference_commit": "f4819edb8db57c4a46d1388e51ab8541d2f52cca",
+      "source_paths": [
+        "src/neil_agent/agent.py",
+        "src/neil_agent/providers/base.py",
+        "tests/test_agent.py"
+      ],
+      "description": "Adapted multi-file fixture for the incomplete-terminal/history-commit contract; not a full repository checkout or external benchmark issue."
+    }
+  },
+  {
+    "id": "session-revision-save",
+    "title": "Compare loaded revisions before planning a session save",
+    "prompt": "Fix versions.py and store.py. snapshot_digest is SHA-256 of UTF-8 JSON with sorted keys, ensure_ascii=False and compact separators. plan_save returns an independent deep copy of incoming; it must never mutate inputs. None current with None expected means creation. Reject stale digests, deleted loaded snapshots, create-only collisions, changed session_id and changes to a bound runtime_provider/runtime_model using ValueError. A non-None provider is bound. Keep public signatures. The fixture plans a save only; do not add file I/O or locks. This is an adapted repository regression fixture.",
+    "files": {
+      "versions.py": "import hashlib\n\n\ndef snapshot_digest(snapshot):\n    return hashlib.sha256(str(snapshot).encode()).hexdigest()\n",
+      "store.py": "from versions import snapshot_digest\n\n\ndef plan_save(current, expected_digest, incoming):\n    return incoming\n"
+    },
+    "editable_files": [
+      "versions.py",
+      "store.py"
+    ],
+    "reference_files": {
+      "versions.py": "import hashlib\nimport json\n\n\ndef snapshot_digest(snapshot):\n    canonical = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, separators=(\",\", \":\"))\n    return hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()\n",
+      "store.py": "from copy import deepcopy\nfrom versions import snapshot_digest\n\n\ndef plan_save(current, expected_digest, incoming):\n    if current is None:\n        if expected_digest is not None:\n            raise ValueError(\"loaded snapshot was deleted\")\n    else:\n        if expected_digest is None or snapshot_digest(current) != expected_digest:\n            raise ValueError(\"stale revision or create-only conflict\")\n        if current.get(\"session_id\") != incoming.get(\"session_id\"):\n            raise ValueError(\"session identity changed\")\n        if current.get(\"runtime_provider\") is not None and any(current.get(key) != incoming.get(key) for key in (\"runtime_provider\", \"runtime_model\")):\n            raise ValueError(\"bound model changed\")\n    return deepcopy(incoming)\n"
+    },
+    "cases": [
+      {
+        "module": "versions",
+        "function": "snapshot_digest",
+        "args": [
+          {
+            "b": 2,
+            "a": 1
+          }
+        ],
+        "expected": "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+        "identity": "any"
+      },
+      {
+        "module": "versions",
+        "function": "snapshot_digest",
+        "args": [
+          {
+            "a": 1,
+            "b": 2
+          }
+        ],
+        "expected": "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+        "identity": "any"
+      },
+      {
+        "module": "versions",
+        "function": "snapshot_digest",
+        "args": [
+          {
+            "title": "中文",
+            "values": [
+              false,
+              0,
+              ""
+            ]
+          }
+        ],
+        "expected": "ec97e754979c0668f9f06b697f6ecab62ae43c8596e05522bf9013a30e1df14f",
+        "identity": "any"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "old"
+              }
+            ]
+          },
+          "f2e498d6aeb8a45063d88336fdf73249ba63fa5d9558755eb6183cbfed679e45",
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": {
+          "session_id": "session-1",
+          "title": "original",
+          "runtime_provider": "deepseek",
+          "runtime_model": "model-a",
+          "messages": [
+            {
+              "text": "new"
+            }
+          ]
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          null,
+          null,
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": {
+          "session_id": "session-1",
+          "title": "original",
+          "runtime_provider": "deepseek",
+          "runtime_model": "model-a",
+          "messages": [
+            {
+              "text": "new"
+            }
+          ]
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          null,
+          "f2e498d6aeb8a45063d88336fdf73249ba63fa5d9558755eb6183cbfed679e45",
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "old"
+              }
+            ]
+          },
+          null,
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "old"
+              }
+            ]
+          },
+          "stale",
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          {
+            "session_id": "session-1",
+            "title": "renamed",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "old"
+              }
+            ]
+          },
+          "f2e498d6aeb8a45063d88336fdf73249ba63fa5d9558755eb6183cbfed679e45",
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "old"
+              }
+            ]
+          },
+          "f2e498d6aeb8a45063d88336fdf73249ba63fa5d9558755eb6183cbfed679e45",
+          {
+            "session_id": "session-2",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "old"
+              }
+            ]
+          },
+          "f2e498d6aeb8a45063d88336fdf73249ba63fa5d9558755eb6183cbfed679e45",
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-b",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "store",
+        "function": "plan_save",
+        "args": [
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "deepseek",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "old"
+              }
+            ]
+          },
+          "f2e498d6aeb8a45063d88336fdf73249ba63fa5d9558755eb6183cbfed679e45",
+          {
+            "session_id": "session-1",
+            "title": "original",
+            "runtime_provider": "openai",
+            "runtime_model": "model-a",
+            "messages": [
+              {
+                "text": "new"
+              }
+            ]
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      }
+    ],
+    "origin": {
+      "kind": "repository-regression",
+      "fixture_kind": "adapted",
+      "repository": "zyohhh/Neil-Agent",
+      "reference_commit": "57fe9b684a89418d4cb921a1d8bfd6cafa6c6a48",
+      "source_paths": [
+        "src/neil_agent/session.py",
+        "tests/test_session_concurrency.py"
+      ],
+      "description": "Adapted pure-function fixture for session revision comparison and runtime binding; real kernel locking and atomic persistence are tested separately in the project."
+    }
+  },
+  {
+    "id": "approval-context-consume",
+    "title": "Bind one-use approvals to the complete operation context",
+    "prompt": "Repair binding.py and approval.py. binding_digest hashes exactly tool, arguments, preview, instructions and prompt using SHA-256 of compact sorted UTF-8 JSON with ensure_ascii=False. Extra transport metadata does not change the binding; missing required fields raise ValueError. consume must reject expired (expires_at <= now), invalid expiry, already-consumed or mismatched approvals with ValueError. Match the entire context, including instructions and prompt. Return a deep copied approval with consumed=True and preserve all input objects. Preserve signatures. This adapted fixture models a decision, not an actual handler or persistent approval store.",
+    "files": {
+      "binding.py": "import hashlib\nimport json\n\n\ndef binding_digest(call):\n    return hashlib.sha256(json.dumps({\"tool\": call[\"tool\"], \"arguments\": call[\"arguments\"], \"preview\": call[\"preview\"]}, sort_keys=True, ensure_ascii=False, separators=(\",\", \":\")).encode()).hexdigest()\n",
+      "approval.py": "from binding import binding_digest\n\n\ndef consume(approval, call, now):\n    return dict(approval, consumed=True)\n"
+    },
+    "editable_files": [
+      "binding.py",
+      "approval.py"
+    ],
+    "reference_files": {
+      "binding.py": "import hashlib\nimport json\n\n\ndef binding_digest(call):\n    keys = (\"tool\", \"arguments\", \"preview\", \"instructions\", \"prompt\")\n    if not isinstance(call, dict) or any(key not in call for key in keys):\n        raise ValueError(\"incomplete approval context\")\n    canonical = json.dumps({key: call[key] for key in keys}, sort_keys=True, ensure_ascii=False, separators=(\",\", \":\"))\n    return hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()\n",
+      "approval.py": "from copy import deepcopy\nfrom binding import binding_digest\n\n\ndef consume(approval, call, now):\n    expiry = approval.get(\"expires_at\")\n    if not isinstance(expiry, (int, float)) or isinstance(expiry, bool) or not expiry > now:\n        raise ValueError(\"expired or invalid approval\")\n    if approval.get(\"consumed\") is not False or approval.get(\"digest\") != binding_digest(call):\n        raise ValueError(\"consumed or mismatched approval\")\n    result = deepcopy(approval)\n    result[\"consumed\"] = True\n    return result\n"
+    },
+    "cases": [
+      {
+        "module": "binding",
+        "function": "binding_digest",
+        "args": [
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          }
+        ],
+        "expected": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+        "identity": "any"
+      },
+      {
+        "module": "binding",
+        "function": "binding_digest",
+        "args": [
+          {
+            "prompt": "fix app",
+            "instructions": "AGENTS v1",
+            "preview": "Change-ID: fixture",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "tool": "replace_text"
+          }
+        ],
+        "expected": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+        "identity": "any"
+      },
+      {
+        "module": "binding",
+        "function": "binding_digest",
+        "args": [
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app",
+            "request_id": "ignored-transport-id"
+          }
+        ],
+        "expected": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+        "identity": "any"
+      },
+      {
+        "module": "binding",
+        "function": "binding_digest",
+        "args": [
+          {
+            "tool": "replace_text"
+          }
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          },
+          119
+        ],
+        "expected": {
+          "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+          "consumed": true,
+          "expires_at": 120,
+          "metadata": {
+            "label": "fixture"
+          }
+        },
+        "identity": "disjoint"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          },
+          120
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": true,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          },
+          100
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": null,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          },
+          100
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "write_file",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          },
+          100
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "other.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          },
+          100
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: changed",
+            "instructions": "AGENTS v1",
+            "prompt": "fix app"
+          },
+          100
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v2",
+            "prompt": "fix app"
+          },
+          100
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      },
+      {
+        "module": "approval",
+        "function": "consume",
+        "args": [
+          {
+            "digest": "5364564882f3cbfe688a8d76e759c0af2f4084d7a62c6571a520c885260bb89f",
+            "consumed": false,
+            "expires_at": 120,
+            "metadata": {
+              "label": "fixture"
+            }
+          },
+          {
+            "tool": "replace_text",
+            "arguments": {
+              "path": "app.py",
+              "new_text": "fixed"
+            },
+            "preview": "Change-ID: fixture",
+            "instructions": "AGENTS v1",
+            "prompt": "different task"
+          },
+          100
+        ],
+        "expected": null,
+        "identity": "any",
+        "raises": "ValueError"
+      }
+    ],
+    "origin": {
+      "kind": "repository-regression",
+      "fixture_kind": "adapted",
+      "repository": "zyohhh/Neil-Agent",
+      "reference_commit": "f4819edb8db57c4a46d1388e51ab8541d2f52cca",
+      "source_paths": [
+        "src/neil_agent/approval.py",
+        "src/neil_agent/agent.py",
+        "tests/test_approval.py"
+      ],
+      "description": "Adapted multi-file fixture for preview/instruction/prompt binding and one-use approval decisions; not a full persistent approval-store or OS-security evaluation."
+    }
   }
 ]
